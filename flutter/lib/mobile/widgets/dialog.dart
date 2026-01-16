@@ -4,9 +4,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
 import 'package:get/get.dart';
+import 'package:http/http.dart' as http;
 
 import '../../common.dart';
 import '../../models/platform_model.dart';
+
 
 void _showSuccess() {
   showToast(translate("Successful"));
@@ -149,15 +151,82 @@ void setTemporaryPasswordLengthDialog(
 
 void showServerSettings(OverlayDialogManager dialogManager,
     void Function(VoidCallback) setState) async {
-  Map<String, dynamic> options = {};
   try {
-    options = jsonDecode(await bind.mainGetOptions());
+    // 1. 从网络接口获取服务器列表
+    final response = await http.get(Uri.parse('https://ep.nemodesk.top'));
+    if (response.statusCode != 200) {
+      showToast("Fetch failed");
+      return;
+    }
+
+    Map<String, dynamic> serverMap = jsonDecode(utf8.decode(response.bodyBytes));
+    List<String> keys = serverMap.keys.toList();
+
+    // 2. 从本地读取上次勾选的 Key（跨启动记忆）
+    String selectedKey = bind.mainGetOptionSync(key: 'last-selected-server-key');
+
+    // 3. 弹出列表
+    dialogManager.show((dialogState, close, context) {
+      return CustomAlertDialog(
+        title: Text(translate('选择线路')),
+        actions: const [], // 无按钮
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(minWidth: 300, maxHeight: 400),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: keys.map((key) {
+                return RadioListTile<String>(
+                  title: Text(key),
+                  value: key,
+                  groupValue: selectedKey,
+                  onChanged: (String? value) async {
+                    if (value == null) return;
+
+                    // A. 更新 UI 勾选状态并持久化
+                    dialogState(() {
+                      selectedKey = value;
+                    });
+                    await bind.mainSetOption(
+                        key: 'last-selected-server-key', value: value);
+
+                    // B. 执行静默拼接逻辑
+                    String rawValue = serverMap[value];
+                    final config = ServerConfig(
+                      idServer: '${rawValue}6',
+                      relayServer: '${rawValue}7',
+                      apiServer: 'https://${rawValue}4',
+                      key: 'k3lsu+CTLs4OhFpq5Lh38Uvo2m8Cyb1jLz6gTCAnyCw=',
+                    );
+
+                    // C. 立即关闭弹窗
+                    close();
+
+                    // D. 执行保存（传 null 绕过网络测试）
+                    bool success = await setServerConfig(null, null, config);
+
+                    if (success) {
+                      showToast(translate('Successful'));
+                      // 刷新主界面的 Network 卡片
+                      setState(() {});
+                    } else {
+                      showToast(translate('Failed'));
+                    }
+                  },
+                );
+              }).toList(),
+            ),
+          ),
+        ), // 这里之前的分号已被删除
+      );
+    });
   } catch (e) {
-    print("Invalid server config: $e");
+    print("Network error: $e");
+    showToast("Network Error");
   }
-  showServerSettingsWithValue(
-      ServerConfig.fromOptions(options), dialogManager, setState);
 }
+
+
 
 void showServerSettingsWithValue(
     ServerConfig serverConfig,
