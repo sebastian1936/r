@@ -26,6 +26,7 @@ import 'package:url_launcher/url_launcher_string.dart';
 
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/login.dart';
+import 'package:http/http.dart' as http;
 
 const double _kTabWidth = 200;
 const double _kTabHeight = 42;
@@ -1981,19 +1982,100 @@ class _AccountState extends State<_Account> {
     return ListView(
       controller: scrollController,
       children: [
-        _Card(title: 'Account', children: [accountAction(), useInfo()]),
+        _Card(
+          title: 'Account',
+          children: [
+            loginAction(),    // 第一行：登录/登出按钮
+            registerAction(), // 第二行：注册按钮（始终显示）
+            useInfo(),        // 第三行：用户信息
+          ],
+        ),
       ],
     ).marginOnly(bottom: _kListViewBottomMargin);
   }
 
-  Widget accountAction() {
+
+  // 登录/登出按钮
+  Widget loginAction() {
     return Obx(() => _Button(
         gFFI.userModel.userName.value.isEmpty ? 'Login' : 'Logout',
-        () => {
-              gFFI.userModel.userName.value.isEmpty
-                  ? loginDialog()
-                  : logOutConfirmDialog()
-            }));
+            () => {
+          gFFI.userModel.userName.value.isEmpty
+              ? loginDialog()
+              : logOutConfirmDialog()
+        }).marginOnly(left: _kContentHMargin));
+  }
+
+  // 注册按钮 (始终显示)
+  Widget registerAction() {
+    return _Button(
+        '注册',
+            () => registerDialog()
+    ).marginOnly(left: _kContentHMargin, top: 4);
+  }
+
+
+
+  void registerDialog() {
+    final nameController = TextEditingController();
+    final pwdController = TextEditingController();
+    final regExp = RegExp(r'^[a-zA-Z0-9]+$');
+
+    Get.defaultDialog(
+      title: "用户注册",
+      content: Column(
+        children: [
+          TextField(
+            controller: nameController,
+            decoration: InputDecoration(labelText: "请输入账号 (2-18位)"),
+          ),
+          TextField(
+            controller: pwdController,
+            obscureText: false, // 明文展示
+            decoration: InputDecoration(labelText: "请输入密码 (6-18位)"),
+          ),
+        ],
+      ).marginSymmetric(horizontal: 20),
+      textConfirm: "提交注册",
+      onConfirm: () async {
+        String name = nameController.text.trim();
+        String pwd = pwdController.text.trim();
+
+        if (name.length < 2 || name.length > 18 || !regExp.hasMatch(name)) {
+          Get.snackbar("错误", "账号必须为2-18位字母或数字");
+          return;
+        }
+        if (pwd.length < 6 || pwd.length > 18 || !regExp.hasMatch(pwd)) {
+          Get.snackbar("错误", "密码必须为6-18位字母或数字");
+          return;
+        }
+
+        await _doRegister(name, pwd);
+      },
+      textCancel: "取消",
+    );
+  }
+
+  Future<void> _doRegister(String name, String password) async {
+    try {
+      final response = await http.post(
+        Uri.parse('https://api.nemodesk.top/regist'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "name": name,
+          "password": password,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        if (Get.isDialogOpen!) Get.back(); // 安全关闭对话框
+        Get.snackbar("成功", "注册成功");
+      } else {
+        Get.snackbar("失败", "注册失败: ${response.body}");
+      }
+    } catch (e) {
+      Get.snackbar("错误", "无法连接到服务器: $e");
+    }
   }
 
   Widget useInfo() {
@@ -2006,16 +2088,16 @@ class _AccountState extends State<_Account> {
     }
 
     return Obx(() => Offstage(
-          offstage: gFFI.userModel.userName.value.isEmpty,
-          child: Column(
-            children: [
-              text('Username', gFFI.userModel.userName.value),
-              // text('Group', gFFI.groupModel.groupName.value),
-            ],
-          ),
-        )).marginOnly(left: 18, top: 16);
+      offstage: gFFI.userModel.userName.value.isEmpty,
+      child: Column(
+        children: [
+          text('Username', gFFI.userModel.userName.value),
+        ],
+      ),
+    )).marginOnly(left: 18, top: 16);
   }
 }
+
 
 class _Checkbox extends StatefulWidget {
   final String label;

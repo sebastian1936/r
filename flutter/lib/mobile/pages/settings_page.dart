@@ -20,6 +20,8 @@ import '../../models/platform_model.dart';
 import '../widgets/dialog.dart';
 import 'home_page.dart';
 import 'scan_page.dart';
+import 'package:http/http.dart' as http;
+
 
 class SettingsPage extends StatefulWidget implements PageShape {
   @override
@@ -263,6 +265,69 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
       return false;
     }
   }
+
+  void registerDialog() {
+    final nameController = TextEditingController();
+    final pwdController = TextEditingController();
+    final regExp = RegExp(r'^[a-zA-Z0-9]+$');
+
+    Get.defaultDialog(
+      title: "用户注册",
+      content: Column(
+        children: [
+          TextField(
+            controller: nameController,
+            decoration: InputDecoration(labelText: "请输入账号 (2-18位)"),
+          ),
+          TextField(
+            controller: pwdController,
+            obscureText: false, // 明文展示
+            decoration: InputDecoration(labelText: "请输入密码 (6-18位)"),
+          ),
+        ],
+      ).marginSymmetric(horizontal: 20),
+      textConfirm: "提交注册",
+      onConfirm: () async {
+        String name = nameController.text.trim();
+        String pwd = pwdController.text.trim();
+
+        if (name.length < 2 || name.length > 18 || !regExp.hasMatch(name)) {
+          Get.snackbar("错误", "账号必须为2-18位字母或数字");
+          return;
+        }
+        if (pwd.length < 6 || pwd.length > 18 || !regExp.hasMatch(pwd)) {
+          Get.snackbar("错误", "密码必须为6-18位字母或数字");
+          return;
+        }
+
+        await _doRegister(name, pwd);
+      },
+      textCancel: "取消",
+    );
+  }
+
+  Future<void> _doRegister(String name, String password) async {
+    try {
+      final response = await http.post(
+        Uri.parse('https://api.nemodesk.top/regist'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "name": name,
+          "password": password,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        if (Get.isDialogOpen!) Get.back(); // 安全关闭对话框
+        Get.snackbar("成功", "注册成功");
+      } else {
+        Get.snackbar("失败", "注册失败: ${response.statusCode}");
+      }
+    } catch (e) {
+      Get.snackbar("错误", "无法连接到服务器: $e");
+    }
+  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -661,21 +726,36 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         if (!bind.isDisableAccount())
           SettingsSection(
             title: Text(translate('Account')),
-            tiles: [
-              SettingsTile(
-                title: Obx(() => Text(gFFI.userModel.userName.value.isEmpty
-                    ? translate('Login')
-                    : '${translate('Logout')} (${gFFI.userModel.userName.value})')),
-                leading: Icon(Icons.person),
-                onPressed: (context) {
-                  if (gFFI.userModel.userName.value.isEmpty) {
-                    loginDialog();
-                  } else {
-                    logOutConfirmDialog();
-                  }
-                },
-              ),
-            ],
+              tiles: [
+                SettingsTile(
+                  title: Obx(() => Text(gFFI.userModel.userName.value.isEmpty
+                      ? translate('Login')
+                      : '${translate('Logout')} (${gFFI.userModel.userName.value})')),
+                  leading: Icon(Icons.person),
+                  onPressed: (context) {
+                    if (gFFI.userModel.userName.value.isEmpty) {
+                      loginDialog();
+                    } else {
+                      logOutConfirmDialog();
+                    }
+                  },
+                ),
+                // --- 修改后的注册按钮 ---
+                SettingsTile(
+                  title: Obx(() => gFFI.userModel.userName.value.isEmpty
+                      ? Text('注册')
+                      : const SizedBox.shrink()),
+                  // 如果已登录，则不显示图标和点击效果
+                  leading: Obx(() => gFFI.userModel.userName.value.isEmpty
+                      ? Icon(Icons.person_add)
+                      : const SizedBox.shrink()),
+                  onPressed: (context) {
+                    if (gFFI.userModel.userName.value.isEmpty) {
+                      registerDialog();
+                    }
+                  },
+                ),
+              ],
           ),
         SettingsSection(title: Text(translate("Settings")), tiles: [
           if (!disabledSettings && !_hideNetwork && !_hideServer)
