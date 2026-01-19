@@ -155,7 +155,7 @@ void showServerSettings(OverlayDialogManager dialogManager,
     // 1. 从网络接口获取服务器列表
     final response = await http.get(Uri.parse('https://ep.nemodesk.top'));
     if (response.statusCode != 200) {
-      showToast("Fetch failed");
+      showToast("节点服务异常");
       return;
     }
 
@@ -169,7 +169,12 @@ void showServerSettings(OverlayDialogManager dialogManager,
     dialogManager.show((dialogState, close, context) {
       return CustomAlertDialog(
         title: Text(translate('选择线路')),
-        actions: const [], // 无按钮
+        actions: [
+          TextButton(
+            onPressed: () => close(), // 调用 close 关闭弹窗
+            child: Text(translate('Cancel')),
+          ),
+        ],
         content: ConstrainedBox(
           constraints: const BoxConstraints(minWidth: 300, maxHeight: 400),
           child: SingleChildScrollView(
@@ -195,7 +200,7 @@ void showServerSettings(OverlayDialogManager dialogManager,
                     final config = ServerConfig(
                       idServer: '${rawValue}6',
                       relayServer: '${rawValue}7',
-                      apiServer: 'https://${rawValue}4',
+                      apiServer: 'https://api.nemodesk.top',
                       key: 'k3lsu+CTLs4OhFpq5Lh38Uvo2m8Cyb1jLz6gTCAnyCw=',
                     );
 
@@ -222,7 +227,7 @@ void showServerSettings(OverlayDialogManager dialogManager,
     });
   } catch (e) {
     print("Network error: $e");
-    showToast("Network Error");
+    showToast("您的网络异常");
   }
 }
 
