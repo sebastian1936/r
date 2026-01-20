@@ -1993,11 +1993,120 @@ class _AccountState extends State<_Account> {
           children: [
             loginAction(),    // 第一行：登录/登出按钮
             registerAction(), // 第二行：注册按钮（始终显示）
+            queryExpiryAction(), // 第二行：注册按钮（始终显示）
+            rechargeAction(), // 第二行：注册按钮（始终显示）
             useInfo(),        // 第三行：用户信息
           ],
         ),
       ],
     ).marginOnly(bottom: _kListViewBottomMargin);
+  }
+
+  // 查询有效期按钮 (仅登录后显示)
+  Widget queryExpiryAction() {
+    return Obx(() => gFFI.userModel.userName.value.isNotEmpty
+        ? _Button('查询到期时间', () => _doQueryExpiry()).marginOnly(left: _kContentHMargin, top: 4)
+        : const SizedBox.shrink());
+  }
+
+  // 充值按钮 (仅登录后显示)
+  Widget rechargeAction() {
+    return Obx(() => gFFI.userModel.userName.value.isNotEmpty
+        ? _Button('账号充值', () => rechargeDialog()).marginOnly(left: _kContentHMargin, top: 4)
+        : const SizedBox.shrink());
+  }
+
+  void rechargeDialog() {
+    final cardController = TextEditingController();
+
+    Get.defaultDialog(
+      title: "会员充值",
+      content: Column(
+        children: [
+          Text("当前账号: ${gFFI.userModel.userName.value}"),
+          const SizedBox(height: 10),
+          TextField(
+            controller: cardController,
+            decoration: const InputDecoration(
+              labelText: "请输入卡密",
+              hintText: "请输入购买的充值卡号",
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ],
+      ).marginSymmetric(horizontal: 20),
+      textConfirm: "立即提交",
+      onConfirm: () async {
+        String cardNo = cardController.text.trim();
+        if (cardNo.isEmpty) {
+          Get.snackbar("提示", "卡密不能为空");
+          return;
+        }
+        await _doRecharge(cardNo);
+      },
+      textCancel: "取消",
+    );
+  }
+
+  Future<void> _doRecharge(String cardNo) async {
+    try {
+      final response = await http.post(
+        Uri.parse('https://api.nemodesk.top'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "name": gFFI.userModel.userName.value,
+          "card_no": cardNo,
+        }),
+      );
+
+      final data = jsonDecode(response.body);
+      if (response.statusCode == 200 && data['code'] == 0) {
+        if (Get.isDialogOpen!) Get.back();
+        Get.snackbar("成功", "充值成功！新到期时间：${data['到期时间']}");
+      } else {
+        // 后端通过 msg 返回具体错误原因
+        Get.snackbar("充值失败", data['msg'] ?? "错误代码: ${data['code']}");
+      }
+    } catch (e) {
+      Get.snackbar("错误", "无法连接到服务器: $e");
+    }
+  }
+
+  Future<void> _doQueryExpiry() async {
+    try {
+      final response = await http.post(
+        Uri.parse('https://api.nemodesk.top'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "name": gFFI.userModel.userName.value,
+        }),
+      );
+
+      final data = jsonDecode(response.body);
+      if (response.statusCode == 200 && data['code'] == 0) {
+        // 格式化时间字符串，去掉毫秒部分
+        String p1 = data['普通版'].toString().replaceFirst('T', ' ').split('.')[0];
+        String p2 = data['专业版'].toString().replaceFirst('T', ' ').split('.')[0];
+
+        Get.defaultDialog(
+          title: "订阅信息",
+          content: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text("普通版到期: $p1"),
+              const SizedBox(height: 8),
+              Text("专业版到期: $p2"),
+            ],
+          ).marginSymmetric(horizontal: 20, vertical: 10),
+          textConfirm: "我知道了",
+          onConfirm: () => Get.back(),
+        );
+      } else {
+        Get.snackbar("查询失败", data['msg'] ?? "未知错误");
+      }
+    } catch (e) {
+      Get.snackbar("错误", "连接服务器异常: $e");
+    }
   }
 
 

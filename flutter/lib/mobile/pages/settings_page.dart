@@ -265,6 +265,111 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
       return false;
     }
   }
+  // 充值对话框
+  void rechargeDialog() {
+    final cardController = TextEditingController();
+
+    Get.defaultDialog(
+      title: "会员充值",
+      content: Column(
+        children: [
+          Text("当前账号: ${gFFI.userModel.userName.value}"),
+          const SizedBox(height: 10),
+          TextField(
+            controller: cardController,
+            decoration: const InputDecoration(
+              labelText: "请输入卡密",
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ],
+      ).marginSymmetric(horizontal: 20),
+      textConfirm: "立即充值",
+      onConfirm: () async {
+        String cardNo = cardController.text.trim();
+        if (cardNo.isEmpty) {
+          Get.snackbar("提示", "卡密不能为空");
+          return;
+        }
+        await _doRecharge(cardNo);
+      },
+      textCancel: "取消",
+    );
+  }
+
+  // 请求充值接口
+  Future<void> _doRecharge(String cardNo) async {
+    try {
+      final response = await http.post(
+        Uri.parse('https://api.nemodesk.top/recharge'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "name": gFFI.userModel.userName.value, // 从全局模型获取当前用户名
+          "card_no": cardNo,
+        }),
+      );
+
+      final data = jsonDecode(response.body);
+      if (response.statusCode == 200 && data['code'] == 0) {
+        if (Get.isDialogOpen!) Get.back();
+        Get.snackbar("成功", "充值成功！到期时间：${data['到期时间']}");
+        // 充值成功后建议刷新一次有效期
+        _doQueryExpiry();
+      } else {
+        Get.snackbar("充值失败", data['msg'] ?? "错误代码: ${data['code']}");
+      }
+    } catch (e) {
+      Get.snackbar("错误", "连接服务器失败: $e");
+    }
+  }
+
+  // 查询有效期方法
+  Future<void> _doQueryExpiry() async {
+    try {
+      // 显示加载提示
+      // Get.showOverlay(asyncFunction: () async { ... }); // 可选
+
+      final response = await http.post(
+        Uri.parse('https://api.nemodesk.top/query'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "name": gFFI.userModel.userName.value,
+        }),
+      );
+
+      final data = jsonDecode(response.body);
+      if (response.statusCode == 200 && data['code'] == 0) {
+        // 后端返回的Key是 "普通版" 和 "专业版"
+        String expire1 = data['普通版'].toString().split('T')[0]; // 简单处理只看日期
+        String expire2 = data['专业版'].toString().split('T')[0];
+
+        Get.defaultDialog(
+          title: "账号有效期",
+          content: Column(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.star_border),
+                title: const Text("普通版"),
+                subtitle: Text(expire1),
+              ),
+              ListTile(
+                leading: const Icon(Icons.stars),
+                title: const Text("专业版"),
+                subtitle: Text(expire2),
+              ),
+            ],
+          ),
+          textConfirm: "确定",
+          onConfirm: () => Get.back(),
+        );
+      } else {
+        Get.snackbar("查询失败", data['msg'] ?? "未知错误");
+      }
+    } catch (e) {
+      Get.snackbar("错误", "无法获取有效期: $e");
+    }
+  }
+
 
   void registerDialog() {
     final nameController = TextEditingController();
@@ -755,6 +860,36 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                     }
                   },
                 ),
+// --- 修改后的查询到期时间按钮 ---
+                SettingsTile(
+                  title: Obx(() => gFFI.userModel.userName.value.isNotEmpty
+                      ? const Text('查询到期时间')
+                      : const SizedBox.shrink()),
+                  leading: Obx(() => gFFI.userModel.userName.value.isNotEmpty
+                      ? const Icon(Icons.access_time)
+                      : const SizedBox.shrink()),
+                  onPressed: (context) {
+                    if (gFFI.userModel.userName.value.isNotEmpty) {
+                      _doQueryExpiry(); // 调用查询方法
+                    }
+                  },
+                ),
+
+// --- 修改后的充值按钮 ---
+                SettingsTile(
+                  title: Obx(() => gFFI.userModel.userName.value.isNotEmpty
+                      ? const Text('充值')
+                      : const SizedBox.shrink()),
+                  leading: Obx(() => gFFI.userModel.userName.value.isNotEmpty
+                      ? const Icon(Icons.card_membership)
+                      : const SizedBox.shrink()),
+                  onPressed: (context) {
+                    if (gFFI.userModel.userName.value.isNotEmpty) {
+                      rechargeDialog(); // 调用充值弹窗
+                    }
+                  },
+                ),
+
               ],
           ),
         SettingsSection(title: Text(translate("Settings")), tiles: [
