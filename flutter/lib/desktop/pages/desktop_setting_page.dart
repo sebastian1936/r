@@ -543,17 +543,19 @@ class _GeneralState extends State<_General> {
             kOptionDirectxCapture,
           ),
         if (!bind.isIncomingOnly()) ...[
-          _OptionCheckBox(
-            context,
-            'Enable UDP hole punching',
-            kOptionEnableUdpPunch,
-            isServer: false,
+          // 替换第一个：Enable UDP hole punching
+          CheckboxListTile(
+            title: Text('Enable UDP hole punching'),
+            value: true,      // 默认开启
+            onChanged: null,   // 无法修改 (变灰禁用)
+            controlAffinity: ListTileControlAffinity.leading, // 复选框在左侧
           ),
-          _OptionCheckBox(
-            context,
-            'Enable IPv6 P2P connection',
-            kOptionEnableIpv6Punch,
-            isServer: false,
+          // 替换第二个：Enable IPv6 P2P connection
+          CheckboxListTile(
+            title: Text('Enable IPv6 P2P connection'),
+            value: true,      // 默认开启
+            onChanged: null,   // 无法修改 (变灰禁用)
+            controlAffinity: ListTileControlAffinity.leading,
           ),
         ],
       ],
@@ -765,18 +767,22 @@ class _GeneralState extends State<_General> {
         currentKey = defaultOptionLang;
       }
       final isOptFixed = isOptionFixed(kCommConfKeyLang);
+      // 定义我们想要固定的 Key
+      const String fixedLang = 'zh-cn';
+      // 检查 keys 列表中是否真的包含这个 Key，如果不包含，则使用列表第一个值，防止报错
+      final String finalKey = keys.contains(fixedLang) ? fixedLang : (keys.isNotEmpty ? keys.first : currentKey);
+
       return ComboBox(
         keys: keys,
         values: values,
-        initialKey: currentKey,
-        onChanged: (key) async {
-          await bind.mainSetLocalOption(key: kCommConfKeyLang, value: key);
-          if (isWeb) reloadCurrentWindow();
-          if (!isWeb) reloadAllWindows();
-          if (!isWeb) bind.mainChangeLanguage(lang: key);
-        },
-        enabled: !isOptFixed,
+        // 使用经过安全检查的 Key
+        initialKey: finalKey,
+        // 空的回调函数，确保逻辑不被触发
+        onChanged: (key) async {},
+        // 强制禁用
+        enabled: false,
       ).marginOnly(left: _kContentHMargin);
+
     });
   }
 }
@@ -1636,11 +1642,20 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
                 ),
               if (!hideWebSocket && (!hideServer || !hideProxy)) divider,
               if (!hideWebSocket)
-                switchWidget(
-                    Icons.web_asset_outlined,
-                    'Use WebSocket',
+              // 使用原生 ListTile 绕过自定义函数的参数限制
+                ListTile(
+                  leading: Icon(Icons.web_asset_outlined),
+                  title: Text(translate('Use WebSocket')), // 使用翻译函数
+                  subtitle: Text(
                     '${translate('websocket_tip')}\n\n${translate('server-oss-not-support-tip')}',
-                    kOptionAllowWebSocket),
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  trailing: Switch(
+                    value: false,
+                    onChanged: null,
+                  ),
+                ),
+
               if (!isWeb)
                 futureBuilder(
                   future: bind.mainIsUsingPublicServer(),
@@ -1659,27 +1674,18 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
                               kOptionAllowInsecureTLSFallback),
                           if (!outgoingOnly) divider,
                           if (!outgoingOnly)
-                            listTile(
-                              icon: Icons.lan_outlined,
-                              title: 'Disable UDP',
-                              showTooltip: true,
-                              tooltipMessage:
-                                  '${translate('disable-udp-tip')}\n\n${translate('server-oss-not-support-tip')}',
-                              trailing: Switch(
-                                value: bind.mainGetOptionSync(
-                                        key: kOptionDisableUdp) ==
-                                    'Y',
-                                onChanged:
-                                    locked || isOptionFixed(kOptionDisableUdp)
-                                        ? null
-                                        : (value) async {
-                                            await bind.mainSetOption(
-                                                key: kOptionDisableUdp,
-                                                value: value ? 'Y' : 'N');
-                                            setState(() {});
-                                          },
-                              ),
-                            ),
+                          listTile(
+                          icon: Icons.lan_outlined,
+                          title: 'Disable UDP',
+                          showTooltip: true,
+                          tooltipMessage: '${translate('disable-udp-tip')}\n\n${translate('server-oss-not-support-tip')}',
+                          trailing: Switch(
+                          // 1. 强制设为 false (关闭状态)
+                          value: false,
+                          // 2. 强制设为 null (禁用点击，按钮会变灰且无法操作)
+                          onChanged: null,
+                          ),
+                          ),
                         ],
                       );
                     }

@@ -777,19 +777,12 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                 }),
           if (!disabledSettings && !_hideNetwork && !_hideWebSocket)
             SettingsTile.switchTile(
-              title: Text(translate('Use WebSocket')),
-              initialValue: _allowWebSocket,
-              onToggle: isOptionFixed(kOptionAllowWebSocket)
-                  ? null
-                  : (v) async {
-                      await mainSetBoolOption(kOptionAllowWebSocket, v);
-                      final newValue =
-                          await mainGetBoolOption(kOptionAllowWebSocket);
-                      setState(() {
-                        _allowWebSocket = newValue;
-                      });
-                    },
-            ),
+          title: Text(translate('Use WebSocket')),
+          // 1. 强制设为 false (关闭状态)
+          initialValue: false,
+          // 2. 强制设为 null (禁用交互，按钮会变灰且无法点击)
+          onToggle: null,
+          ),
           if (!_isUsingPublicServer)
             SettingsTile.switchTile(
               title: Text(translate('Allow insecure TLS fallback')),
@@ -809,52 +802,38 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
           if (isAndroid && !outgoingOnly && !_isUsingPublicServer)
             SettingsTile.switchTile(
               title: Text(translate('Disable UDP')),
-              initialValue: _disableUdp,
-              onToggle: isOptionFixed(kOptionDisableUdp)
-                  ? null
-                  : (v) async {
-                      await bind.mainSetOption(
-                          key: kOptionDisableUdp, value: v ? 'Y' : 'N');
-                      final newValue =
-                          bind.mainGetOptionSync(key: kOptionDisableUdp) == 'Y';
-                      setState(() {
-                        _disableUdp = newValue;
-                      });
-                    },
+              // 1. 强制初始值为 false (关闭状态)
+              initialValue: false,
+              // 2. 强制设为 null (禁用交互，控件会变为灰色不可点击)
+              onToggle: null,
             ),
+
           if (!incomingOnly)
             SettingsTile.switchTile(
               title: Text(translate('Enable UDP hole punching')),
-              initialValue: _enableUdpPunch,
-              onToggle: (v) async {
-                await mainSetLocalBoolOption(kOptionEnableUdpPunch, v);
-                final newValue =
-                    mainGetLocalBoolOptionSync(kOptionEnableUdpPunch);
-                setState(() {
-                  _enableUdpPunch = newValue;
-                });
-              },
+              // 1. 强制设为 true (默认启用状态)
+              initialValue: true,
+              // 2. 设为 null 以禁用交互 (按钮会变灰且无法点击)
+              onToggle: null,
             ),
           if (!incomingOnly)
             SettingsTile.switchTile(
               title: Text(translate('Enable IPv6 P2P connection')),
-              initialValue: _enableIpv6Punch,
-              onToggle: (v) async {
-                await mainSetLocalBoolOption(kOptionEnableIpv6Punch, v);
-                final newValue =
-                    mainGetLocalBoolOptionSync(kOptionEnableIpv6Punch);
-                setState(() {
-                  _enableIpv6Punch = newValue;
-                });
-              },
+              // 1. 强制设为 true (默认启用状态)
+              initialValue: true,
+              // 2. 设为 null 以禁用交互 (按钮会变灰且无法点击)
+              onToggle: null,
             ),
-          SettingsTile(
-              title: Text(translate('Language')),
-              leading: Icon(Icons.translate),
-              onPressed: (context) {
-                showLanguageSettings(gFFI.dialogManager);
-              }),
-          SettingsTile(
+           SettingsTile(
+           title: Text(translate('Language')),
+           leading: Icon(Icons.translate),
+           // 1. 显示你想要固定的语言名称（例如：简体中文）
+           trailing: Text('简体中文'),
+           // 2. 将 onPressed 设为 null，使其变灰且无法点击弹出列表
+           onPressed: null,
+           ),
+
+    SettingsTile(
             title: Text(translate(
                 Theme.of(context).brightness == Brightness.light
                     ? 'Light Theme'
