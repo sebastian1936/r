@@ -2012,8 +2012,21 @@ class _AccountState extends State<_Account> {
   // 充值按钮 (仅登录后显示)
   Widget rechargeAction() {
     return Obx(() => gFFI.userModel.userName.value.isNotEmpty
-        ? _Button('账号充值', () => rechargeDialog()).marginOnly(left: _kContentHMargin, top: 4)
+        ? _Button('账号充值', () => showRechargeConfirm()).marginOnly(left: _kContentHMargin, top: 4)
         : const SizedBox.shrink());
+  }
+
+  void showRechargeConfirm() {
+    Get.defaultDialog(
+      title: "重要事项",
+      middleText: "充值完成后，选择对应的线路，默认是普通版线路",
+      textCancel: "取消",
+      textConfirm: "确定",
+      onConfirm: () {
+        Get.back(); // 关闭询问框
+        rechargeDialog(); // 弹出真正的输入表单框
+      },
+    );
   }
 
   void rechargeDialog() {
@@ -2051,7 +2064,7 @@ class _AccountState extends State<_Account> {
   Future<void> _doRecharge(String cardNo) async {
     try {
       final response = await http.post(
-        Uri.parse('https://api.nemodesk.top'),
+        Uri.parse('https://api.nemodesk.top/recharge'),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
           "name": gFFI.userModel.userName.value,
@@ -2075,7 +2088,7 @@ class _AccountState extends State<_Account> {
   Future<void> _doQueryExpiry() async {
     try {
       final response = await http.post(
-        Uri.parse('https://api.nemodesk.top'),
+        Uri.parse('https://api.nemodesk.top/query'),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
           "name": gFFI.userModel.userName.value,
@@ -2125,11 +2138,22 @@ class _AccountState extends State<_Account> {
   Widget registerAction() {
     return _Button(
         '注册',
-            () => registerDialog()
+            () => showRegisterConfirm()
     ).marginOnly(left: _kContentHMargin, top: 4);
   }
 
-
+  void showRegisterConfirm() {
+    Get.defaultDialog(
+      title: "重要事项",
+      middleText: "多个设备，只用一个账号，被控无需登录，牢记账号",
+      textCancel: "取消",
+      textConfirm: "确定",
+      onConfirm: () {
+        Get.back(); // 关闭询问框
+        registerDialog(); // 弹出真正的输入表单框
+      },
+    );
+  }
 
   void registerDialog() {
     final nameController = TextEditingController();

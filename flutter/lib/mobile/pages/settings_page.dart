@@ -265,6 +265,19 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
       return false;
     }
   }
+
+  void showRechargeConfirm() {
+    Get.defaultDialog(
+      title: "重要事项",
+      middleText: "充值完成后，选择对应的线路，默认是普通版线路",
+      textCancel: "取消",
+      textConfirm: "确定",
+      onConfirm: () {
+        Get.back(); // 关闭询问框
+        rechargeDialog(); // 弹出真正的输入表单框
+      },
+    );
+  }
   // 充值对话框
   void rechargeDialog() {
     final cardController = TextEditingController();
@@ -370,6 +383,18 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
     }
   }
 
+  void showRegisterConfirm() {
+    Get.defaultDialog(
+      title: "重要事项",
+      middleText: "多个设备，只用一个账号，被控无需登录，牢记账号",
+      textCancel: "取消",
+      textConfirm: "确定",
+      onConfirm: () {
+        Get.back(); // 关闭询问框
+        registerDialog(); // 弹出真正的输入表单框
+      },
+    );
+  }
 
   void registerDialog() {
     final nameController = TextEditingController();
@@ -846,46 +871,45 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                   },
                 ),
                 // --- 修改后的注册按钮 ---
+// --- 修改后的注册按钮 ---
                 SettingsTile(
-                  title: Obx(() => gFFI.userModel.userName.value.isEmpty
-                      ? Text('注册')
-                      : const SizedBox.shrink()),
-                  // 如果已登录，则不显示图标和点击效果
-                  leading: Obx(() => gFFI.userModel.userName.value.isEmpty
-                      ? Icon(Icons.person_add)
-                      : const SizedBox.shrink()),
+                  title: const Text('注册'),
+
+                  leading: const Icon(Icons.person_add),
+
                   onPressed: (context) {
                     if (gFFI.userModel.userName.value.isEmpty) {
-                      registerDialog();
+                      showRegisterConfirm();
+                    } else {
+                      // 如果已登录，可以选择提示用户
+                      Get.snackbar("提示", "您已处于登录状态");
                     }
                   },
                 ),
+
 // --- 修改后的查询到期时间按钮 ---
                 SettingsTile(
-                  title: Obx(() => gFFI.userModel.userName.value.isNotEmpty
-                      ? const Text('查询到期时间')
-                      : const SizedBox.shrink()),
-                  leading: Obx(() => gFFI.userModel.userName.value.isNotEmpty
-                      ? const Icon(Icons.access_time)
-                      : const SizedBox.shrink()),
+                  title: const Text('查询到期时间'),
+                  leading: const Icon(Icons.access_time),
                   onPressed: (context) {
+                    // 逻辑上通常需要登录才能查询，此处保留业务逻辑判断
                     if (gFFI.userModel.userName.value.isNotEmpty) {
-                      _doQueryExpiry(); // 调用查询方法
+                      _doQueryExpiry();
+                    } else {
+                      Get.snackbar("提示", "请先登录/注册");
                     }
                   },
                 ),
 
 // --- 修改后的充值按钮 ---
                 SettingsTile(
-                  title: Obx(() => gFFI.userModel.userName.value.isNotEmpty
-                      ? const Text('充值')
-                      : const SizedBox.shrink()),
-                  leading: Obx(() => gFFI.userModel.userName.value.isNotEmpty
-                      ? const Icon(Icons.card_membership)
-                      : const SizedBox.shrink()),
+                  title: const Text('充值'),
+                  leading: const Icon(Icons.card_membership),
                   onPressed: (context) {
                     if (gFFI.userModel.userName.value.isNotEmpty) {
-                      rechargeDialog(); // 调用充值弹窗
+                      showRechargeConfirm();
+                    } else {
+                      Get.snackbar("提示", "请先登录/注册");
                     }
                   },
                 ),

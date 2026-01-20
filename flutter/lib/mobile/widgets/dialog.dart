@@ -152,6 +152,7 @@ void setTemporaryPasswordLengthDialog(
 void showServerSettings(OverlayDialogManager dialogManager,
     void Function(VoidCallback) setState) async {
   try {
+    await showIntroDialog(dialogManager);
     // 1. 从网络接口获取服务器列表
     final response = await http.get(Uri.parse('https://ep.nemodesk.top'));
     if (response.statusCode != 200) {
@@ -231,6 +232,34 @@ void showServerSettings(OverlayDialogManager dialogManager,
   }
 }
 
+/// 新增：弹出线路说明对话框
+Future<void> showIntroDialog(OverlayDialogManager dialogManager) async {
+  final completer = Completer<void>();
+  dialogManager.show((_, close, context) {
+    return CustomAlertDialog(
+      title: Text('线路说明'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '普通版无限制，不保证流畅度\n专业版保证流畅度，限制5个设备，不能传100M以上文件',
+            style: TextStyle(fontSize: 15),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () {
+            close();
+            completer.complete();
+          },
+          child: Text('继续'),
+        ),
+      ],
+    );
+  });
+  return completer.future;
+}
 
 
 void showServerSettingsWithValue(
