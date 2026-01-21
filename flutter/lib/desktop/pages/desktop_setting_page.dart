@@ -2002,18 +2002,37 @@ class _AccountState extends State<_Account> {
     ).marginOnly(bottom: _kListViewBottomMargin);
   }
 
-  // 查询有效期按钮 (仅登录后显示)
   Widget queryExpiryAction() {
-    return Obx(() => gFFI.userModel.userName.value.isNotEmpty
-        ? _Button('查询到期时间', () => _doQueryExpiry()).marginOnly(left: _kContentHMargin, top: 4)
-        : const SizedBox.shrink());
+    return _Button('查询到期时间', () {
+      if (gFFI.userModel.userName.value.isEmpty) {
+        // 使用你项目中的弹窗或 Toast 提示
+        Get.snackbar("提示", "请先登录");
+        return;
+      }
+      _doQueryExpiry();
+    }).marginOnly(left: _kContentHMargin, top: 4);
   }
 
-  // 充值按钮 (仅登录后显示)
+  // 充值按钮
   Widget rechargeAction() {
-    return Obx(() => gFFI.userModel.userName.value.isNotEmpty
-        ? _Button('账号充值', () => showRechargeConfirm()).marginOnly(left: _kContentHMargin, top: 4)
-        : const SizedBox.shrink());
+    return _Button('账号充值', () {
+      if (gFFI.userModel.userName.value.isEmpty) {
+        Get.snackbar("提示", "请先登录");
+        return;
+      }
+      showRechargeConfirm();
+    }).marginOnly(left: _kContentHMargin, top: 4);
+  }
+
+  // 注册按钮 (假设你的注册按钮组件类似如下)
+  Widget registerAction() {
+    return _Button('注册', () {
+      if (gFFI.userModel.userName.value.isNotEmpty) {
+        Get.snackbar("提示", "你已经有账号了");
+        return;
+      }
+      showRegisterConfirm();
+    }).marginOnly(left: _kContentHMargin, top: 4);
   }
 
   void showRechargeConfirm() {
@@ -2134,18 +2153,11 @@ class _AccountState extends State<_Account> {
         }).marginOnly(left: _kContentHMargin));
   }
 
-  // 注册按钮 (始终显示)
-  Widget registerAction() {
-    return _Button(
-        '注册',
-            () => showRegisterConfirm()
-    ).marginOnly(left: _kContentHMargin, top: 4);
-  }
 
   void showRegisterConfirm() {
     Get.defaultDialog(
       title: "重要事项",
-      middleText: "多个设备，只用一个账号，被控无需登录，牢记账号",
+      middleText: "1.多个设备，只用一个账号\n2.被控无需登录\n3.牢记账号",
       textCancel: "取消",
       textConfirm: "确定",
       onConfirm: () {

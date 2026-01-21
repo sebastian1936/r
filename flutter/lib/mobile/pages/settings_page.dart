@@ -386,7 +386,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   void showRegisterConfirm() {
     Get.defaultDialog(
       title: "重要事项",
-      middleText: "多个设备，只用一个账号，被控无需登录，牢记账号",
+      middleText: "1.多个设备，只用一个账号\n2.被控无需登录\n3.牢记账号",
       textCancel: "取消",
       textConfirm: "确定",
       onConfirm: () {

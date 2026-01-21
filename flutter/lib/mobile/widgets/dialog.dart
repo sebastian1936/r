@@ -198,9 +198,13 @@ void showServerSettings(OverlayDialogManager dialogManager,
 
                     // B. 执行静默拼接逻辑
                     String rawValue = serverMap[value];
+                    List<String> parts = rawValue.split('|');
+                    String part1 = parts[0];
+                    String part2 = parts[1];
+
                     final config = ServerConfig(
-                      idServer: '${rawValue}6',
-                      relayServer: '${rawValue}7',
+                      idServer: '${part1}',
+                      relayServer: '${part2}',
                       apiServer: 'https://api.nemodesk.top',
                       key: 'k3lsu+CTLs4OhFpq5Lh38Uvo2m8Cyb1jLz6gTCAnyCw=',
                     );

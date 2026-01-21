@@ -133,7 +133,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Insert Ctrl + Alt + Del", "插入 Ctrl + Alt + Del"),
         ("Insert Lock", "锁定远程电脑"),
         ("Refresh", "刷新画面"),
-        ("ID does not exist", "和对方线路不一样或者对方未就绪"),
+        ("ID does not exist", "ID输错了或者和对方线路不一样或者对方未就绪"),
         ("Failed to connect to rendezvous server", "连接注册服务器失败"),
         ("Please try later", "请稍后再试"),
         ("Remote desktop is offline", "远程电脑处于离线状态"),
