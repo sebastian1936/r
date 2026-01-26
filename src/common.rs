@@ -1050,7 +1050,7 @@ fn get_api_server_(api: String, custom: String) -> String {
             return format!("http://{}", s);
         }
     }
-    "https://api.nemodesk.top".to_owned()
+    "https://api.nemocc.top:41112".to_owned()
 }
 
 #[inline]

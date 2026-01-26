@@ -2083,7 +2083,7 @@ class _AccountState extends State<_Account> {
   Future<void> _doRecharge(String cardNo) async {
     try {
       final response = await http.post(
-        Uri.parse('https://api.nemodesk.top/recharge'),
+        Uri.parse('https://api.nemocc.top:41112/recharge'),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
           "name": gFFI.userModel.userName.value,
@@ -2107,7 +2107,7 @@ class _AccountState extends State<_Account> {
   Future<void> _doQueryExpiry() async {
     try {
       final response = await http.post(
-        Uri.parse('https://api.nemodesk.top/query'),
+        Uri.parse('https://api.nemocc.top:41112/query'),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
           "name": gFFI.userModel.userName.value,
@@ -2210,7 +2210,7 @@ class _AccountState extends State<_Account> {
   Future<void> _doRegister(String name, String password) async {
     try {
       final response = await http.post(
-        Uri.parse('https://api.nemodesk.top/regist'),
+        Uri.parse('https://api.nemocc.top:41112/regist'),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
           "name": name,

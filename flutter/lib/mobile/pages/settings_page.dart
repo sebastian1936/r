@@ -314,7 +314,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   Future<void> _doRecharge(String cardNo) async {
     try {
       final response = await http.post(
-        Uri.parse('https://api.nemodesk.top/recharge'),
+        Uri.parse('https://api.nemocc.top:41112/recharge'),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
           "name": gFFI.userModel.userName.value, // 从全局模型获取当前用户名
@@ -343,7 +343,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
       // Get.showOverlay(asyncFunction: () async { ... }); // 可选
 
       final response = await http.post(
-        Uri.parse('https://api.nemodesk.top/query'),
+        Uri.parse('https://api.nemocc.top:41112/query'),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
           "name": gFFI.userModel.userName.value,
@@ -439,7 +439,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   Future<void> _doRegister(String name, String password) async {
     try {
       final response = await http.post(
-        Uri.parse('https://api.nemodesk.top/regist'),
+        Uri.parse('https://api.nemocc.top:41112/regist'),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
           "name": name,

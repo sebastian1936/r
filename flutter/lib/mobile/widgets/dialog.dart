@@ -154,13 +154,15 @@ void showServerSettings(OverlayDialogManager dialogManager,
   try {
     await showIntroDialog(dialogManager);
     // 1. 从网络接口获取服务器列表
-    final response = await http.get(Uri.parse('https://ep.nemodesk.top'));
+    final response = await http.get(Uri.parse('https://apple-1300444545.cos-website.ap-nanjing.myqcloud.com'));
     if (response.statusCode != 200) {
       showToast("节点服务异常");
       return;
     }
+    String rawBody = utf8.decode(response.bodyBytes);
 
-    Map<String, dynamic> serverMap = jsonDecode(utf8.decode(response.bodyBytes));
+    String decryptedBody = rawBody.replaceAll('999', '.').replaceAll('333', ':');
+    Map<String, dynamic> serverMap = jsonDecode(decryptedBody);
     List<String> keys = serverMap.keys.toList();
 
     // 2. 从本地读取上次勾选的 Key（跨启动记忆）
@@ -205,7 +207,7 @@ void showServerSettings(OverlayDialogManager dialogManager,
                     final config = ServerConfig(
                       idServer: '${part1}',
                       relayServer: '${part2}',
-                      apiServer: 'https://api.nemodesk.top',
+                      apiServer: 'https://api.nemocc.top:41112',
                       key: 'k3lsu+CTLs4OhFpq5Lh38Uvo2m8Cyb1jLz6gTCAnyCw=',
                     );
 
