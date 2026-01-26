@@ -154,7 +154,7 @@ void showServerSettings(OverlayDialogManager dialogManager,
   try {
     await showIntroDialog(dialogManager);
     // 1. 从网络接口获取服务器列表
-    final response = await http.get(Uri.parse('https://apple-1300444545.cos-website.ap-nanjing.myqcloud.com'));
+    final response = await http.get(Uri.parse('http://apple-1300444545.cos-website.ap-nanjing.myqcloud.com'));
     if (response.statusCode != 200) {
       showToast("节点服务异常");
       return;
@@ -207,7 +207,7 @@ void showServerSettings(OverlayDialogManager dialogManager,
                     final config = ServerConfig(
                       idServer: '${part1}',
                       relayServer: '${part2}',
-                      apiServer: 'https://api.nemocc.top:41112',
+                      apiServer: 'http://api.nemocc.top:41111',
                       key: 'k3lsu+CTLs4OhFpq5Lh38Uvo2m8Cyb1jLz6gTCAnyCw=',
                     );
 
