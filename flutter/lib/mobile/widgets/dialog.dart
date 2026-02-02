@@ -149,34 +149,77 @@ void setTemporaryPasswordLengthDialog(
   }, backDismiss: true, clickMaskDismiss: true);
 }
 
-void showServerSettings(OverlayDialogManager dialogManager,
-    void Function(VoidCallback) setState) async {
+void _showManualAddressDialog(OverlayDialogManager dialogManager, void Function(VoidCallback) setState) {
+  // 从本地读取上次手动输入的地址作为默认值
+  String lastManualUrl = bind.mainGetOptionSync(key: 'last-manual-server-url');
+  final TextEditingController controller = TextEditingController(text: lastManualUrl);
+
+  dialogManager.show((dialogState, close, context) {
+    return CustomAlertDialog(
+      title: const Text("手动输入节点地址"),
+      content: TextField(
+        controller: controller,
+        autofocus: true,
+        decoration: const InputDecoration(
+          hintText: "https://example.com/config",
+          helperText: "请输入有效的配置订阅地址",
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => close(), child: Text(translate('Cancel'))),
+        TextButton(
+          onPressed: () async {
+            String url = controller.text.trim();
+            if (url.isNotEmpty) {
+              // 持久化保存这个地址
+              await bind.mainSetOption(key: 'last-manual-server-url', value: url);
+              close();
+              showServerSettings(dialogManager, setState, manualUrl: url);
+            }
+          },
+          child: Text(translate('OK')),
+        ),
+      ],
+    );
+  });
+}
+
+
+// 2. 主函数：修正了 func -> Future<void>
+Future<void> showServerSettings(OverlayDialogManager dialogManager,
+    void Function(VoidCallback) setState, {String? manualUrl}) async {
   try {
-    await showIntroDialog(dialogManager);
-    // 1. 从网络接口获取服务器列表
-    final response = await http.get(Uri.parse('https://apple-1300444545.cos-website.ap-nanjing.myqcloud.com'));
+    // 只有第一次进入（非手动输入模式）才显示 intro
+    if (manualUrl == null) {
+      await showIntroDialog(dialogManager);
+    }
+
+    final targetUrl = manualUrl ?? 'https://apple-1300444545.cos-website.ap-nanjing.myqcloud.com';
+    final response = await http.get(Uri.parse(targetUrl)).timeout(const Duration(seconds: 10));
+
     if (response.statusCode != 200) {
       showToast("节点服务异常");
-      return;
+      _showManualAddressDialog(dialogManager, setState);
+      return; // 明确返回 void
     }
-    String rawBody = utf8.decode(response.bodyBytes);
 
+    // --- 数据解析成功后，如果是手动输入的地址，确保已持久化 ---
+    if (manualUrl != null) {
+      await bind.mainSetOption(key: 'last-manual-server-url', value: manualUrl);
+    }
+
+    String rawBody = utf8.decode(response.bodyBytes);
     String decryptedBody = rawBody.replaceAll('999', '.').replaceAll('333', ':');
     Map<String, dynamic> serverMap = jsonDecode(decryptedBody);
     List<String> keys = serverMap.keys.toList();
 
-    // 2. 从本地读取上次勾选的 Key（跨启动记忆）
     String selectedKey = bind.mainGetOptionSync(key: 'last-selected-server-key');
 
-    // 3. 弹出列表
     dialogManager.show((dialogState, close, context) {
       return CustomAlertDialog(
         title: Text(translate('选择线路')),
         actions: [
-          TextButton(
-            onPressed: () => close(), // 调用 close 关闭弹窗
-            child: Text(translate('Cancel')),
-          ),
+          TextButton(onPressed: () => close(), child: Text(translate('Cancel'))),
         ],
         content: ConstrainedBox(
           constraints: const BoxConstraints(minWidth: 300, maxHeight: 400),
@@ -191,35 +234,26 @@ void showServerSettings(OverlayDialogManager dialogManager,
                   onChanged: (String? value) async {
                     if (value == null) return;
 
-                    // A. 更新 UI 勾选状态并持久化
                     dialogState(() {
                       selectedKey = value;
                     });
-                    await bind.mainSetOption(
-                        key: 'last-selected-server-key', value: value);
+                    await bind.mainSetOption(key: 'last-selected-server-key', value: value);
 
-                    // B. 执行静默拼接逻辑
                     String rawValue = serverMap[value];
                     List<String> parts = rawValue.split('|');
-                    String part1 = parts[0];
-                    String part2 = parts[1];
 
                     final config = ServerConfig(
-                      idServer: '${part1}',
-                      relayServer: '${part2}',
+                      idServer: parts[0],
+                      relayServer: parts[1],
                       apiServer: 'https://api.nemocc.top:41112',
                       key: 'k3lsu+CTLs4OhFpq5Lh38Uvo2m8Cyb1jLz6gTCAnyCw=',
                     );
 
-                    // C. 立即关闭弹窗
                     close();
 
-                    // D. 执行保存（传 null 绕过网络测试）
                     bool success = await setServerConfig(null, null, config);
-
                     if (success) {
                       showToast(translate('Successful'));
-                      // 刷新主界面的 Network 卡片
                       setState(() {});
                     } else {
                       showToast(translate('Failed'));
@@ -229,14 +263,16 @@ void showServerSettings(OverlayDialogManager dialogManager,
               }).toList(),
             ),
           ),
-        ), // 这里之前的分号已被删除
+        ),
       );
     });
   } catch (e) {
-    print("Network error: $e");
-    showToast("您的网络异常");
+    debugPrint("Network error: $e");
+    // 捕获到异常（网络超时、JSON解析失败等）时弹出手动输入
+    _showManualAddressDialog(dialogManager, setState);
   }
 }
+
 
 /// 新增：弹出线路说明对话框
 Future<void> showIntroDialog(OverlayDialogManager dialogManager) async {
