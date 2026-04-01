@@ -195,7 +195,7 @@ Future<void> showServerSettings(OverlayDialogManager dialogManager,
     }
 
     final targetUrl = manualUrl ?? 'https://apple-1300444545.cos-website.ap-nanjing.myqcloud.com-';
-    final response = await http.get(Uri.parse(targetUrl)).timeout(const Duration(seconds: 10));
+    final response = await http.get(Uri.parse(targetUrl)).timeout(const Duration(seconds: 3));
 
     if (response.statusCode != 200) {
       showToast("节点服务异常");
