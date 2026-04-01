@@ -857,62 +857,52 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
           SettingsSection(
             title: Text(translate('Account')),
               tiles: [
-                SettingsTile(
-                  title: Obx(() => Text(gFFI.userModel.userName.value.isEmpty
-                      ? translate('Login')
-                      : '${translate('Logout')} (${gFFI.userModel.userName.value})')),
-                  leading: Icon(Icons.person),
-                  onPressed: (context) {
-                    if (gFFI.userModel.userName.value.isEmpty) {
-                      loginDialog();
-                    } else {
-                      logOutConfirmDialog();
-                    }
-                  },
-                ),
-                // --- 修改后的注册按钮 ---
-// --- 修改后的注册按钮 ---
-                SettingsTile(
-                  title: const Text('注册'),
-
-                  leading: const Icon(Icons.person_add),
-
-                  onPressed: (context) {
-                    if (gFFI.userModel.userName.value.isEmpty) {
-                      showRegisterConfirm();
-                    } else {
-                      // 如果已登录，可以选择提示用户
-                      Get.snackbar("提示", "您已处于登录状态");
-                    }
-                  },
-                ),
-
-// --- 修改后的查询到期时间按钮 ---
-                SettingsTile(
-                  title: const Text('查询到期时间'),
-                  leading: const Icon(Icons.access_time),
-                  onPressed: (context) {
-                    // 逻辑上通常需要登录才能查询，此处保留业务逻辑判断
-                    if (gFFI.userModel.userName.value.isNotEmpty) {
-                      _doQueryExpiry();
-                    } else {
-                      Get.snackbar("提示", "请先登录/注册");
-                    }
-                  },
-                ),
-
-// --- 修改后的充值按钮 ---
-                SettingsTile(
-                  title: const Text('充值'),
-                  leading: const Icon(Icons.card_membership),
-                  onPressed: (context) {
-                    if (gFFI.userModel.userName.value.isNotEmpty) {
-                      showRechargeConfirm();
-                    } else {
-                      Get.snackbar("提示", "请先登录/注册");
-                    }
-                  },
-                ),
+                // SettingsTile(
+                //   title: Obx(() => Text(gFFI.userModel.userName.value.isEmpty
+                //       ? translate('Login')
+                //       : '${translate('Logout')} (${gFFI.userModel.userName.value})')),
+                //   leading: Icon(Icons.person),
+                //   onPressed: (context) {
+                //     if (gFFI.userModel.userName.value.isEmpty) {
+                //       loginDialog();
+                //     } else {
+                //       logOutConfirmDialog();
+                //     }
+                //   },
+                // ),
+                // SettingsTile(
+                //   title: const Text('注册'),
+                //   leading: const Icon(Icons.person_add),
+                //   onPressed: (context) {
+                //     if (gFFI.userModel.userName.value.isEmpty) {
+                //       showRegisterConfirm();
+                //     } else {
+                //       Get.snackbar("提示", "您已处于登录状态");
+                //     }
+                //   },
+                // ),
+                // SettingsTile(
+                //   title: const Text('查询到期时间'),
+                //   leading: const Icon(Icons.access_time),
+                //   onPressed: (context) {
+                //     if (gFFI.userModel.userName.value.isNotEmpty) {
+                //       _doQueryExpiry();
+                //     } else {
+                //       Get.snackbar("提示", "请先登录/注册");
+                //     }
+                //   },
+                // ),
+                // SettingsTile(
+                //   title: const Text('充值'),
+                //   leading: const Icon(Icons.card_membership),
+                //   onPressed: (context) {
+                //     if (gFFI.userModel.userName.value.isNotEmpty) {
+                //       showRechargeConfirm();
+                //     } else {
+                //       Get.snackbar("提示", "请先登录/注册");
+                //     }
+                //   },
+                // ),
 
               ],
           ),

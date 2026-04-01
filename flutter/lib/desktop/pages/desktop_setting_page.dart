@@ -1991,10 +1991,10 @@ class _AccountState extends State<_Account> {
         _Card(
           title: 'Account',
           children: [
-            loginAction(),    // 第一行：登录/登出按钮
-            registerAction(), // 第二行：注册按钮（始终显示）
-            queryExpiryAction(), // 第二行：注册按钮（始终显示）
-            rechargeAction(), // 第二行：注册按钮（始终显示）
+            // loginAction(),    // 第一行：登录/登出按钮
+            // registerAction(), // 第二行：注册按钮（始终显示）
+            // queryExpiryAction(), // 第二行：注册按钮（始终显示）
+            // rechargeAction(), // 第二行：注册按钮（始终显示）
             useInfo(),        // 第三行：用户信息
           ],
         ),
