@@ -185,93 +185,98 @@ void _showManualAddressDialog(OverlayDialogManager dialogManager, void Function(
 }
 
 
-// 2. 主函数：修正了 func -> Future<void>
 Future<void> showServerSettings(OverlayDialogManager dialogManager,
-    void Function(VoidCallback) setState, {String? manualUrl}) async {
-  try {
-    // 只有第一次进入（非手动输入模式）才显示 intro
-    if (manualUrl == null) {
-      await showIntroDialog(dialogManager);
-    }
+    void Function(VoidCallback) setState) async {
+  
+  // 1. 先从本地读取上一次输入成功的 URL（如果有）
+  String lastUrl = bind.mainGetOptionSync(key: 'last-manual-server-url');
+  TextEditingController controller = TextEditingController(text: lastUrl);
 
-    final targetUrl = manualUrl ?? 'https://apple-1300444545.cos-website.ap-nanjing.myqcloud.com';
-    final response = await http.get(Uri.parse(targetUrl)).timeout(const Duration(seconds: 10));
+  // 2. 直接弹出输入对话框
+  dialogManager.show((dialogState, close, context) {
+    return CustomAlertDialog(
+      title: Text(translate('设置服务器地址')),
+      content: TextField(
+        controller: controller,
+        decoration: InputDecoration(
+          hintText: "请输入服务器配置 URL",
+          helperText: "例如: https://your-config-url.com",
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => close(), child: Text(translate('Cancel'))),
+        ElevatedButton(
+          onPressed: () async {
+            String inputUrl = controller.text.trim();
+            if (inputUrl.isEmpty) {
+              showToast("请输入地址");
+              return;
+            }
+
+            // 执行核心逻辑：获取并应用配置
+            bool success = await _fetchAndApplyConfig(inputUrl, dialogManager, setState);
+            
+            if (success) {
+              // 只有成功获取并解析后，才持久化这个 URL
+              await bind.mainSetOption(key: 'last-manual-server-url', value: inputUrl);
+              close(); // 成功后关闭弹窗
+            }
+          },
+          child: Text(translate('Confirm')),
+        ),
+      ],
+    );
+  });
+}
+
+// 提取出来的私有方法：负责网络请求和配置应用
+Future<bool> _fetchAndApplyConfig(String url, OverlayDialogManager dialogManager, Function setState) async {
+  try {
+    showToast("正在获取配置...");
+    final response = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 10));
 
     if (response.statusCode != 200) {
-      showToast("节点服务异常");
-      _showManualAddressDialog(dialogManager, setState);
-      return; // 明确返回 void
+      showToast("获取失败 (Status: ${response.statusCode})");
+      return false;
     }
 
-    // --- 数据解析成功后，如果是手动输入的地址，确保已持久化 ---
-    if (manualUrl != null) {
-      await bind.mainSetOption(key: 'last-manual-server-url', value: manualUrl);
-    }
-
+    // 解密与解析逻辑（保留你原有的逻辑）
     String rawBody = utf8.decode(response.bodyBytes);
     String decryptedBody = rawBody.replaceAll('999', '.').replaceAll('333', ':');
     Map<String, dynamic> serverMap = jsonDecode(decryptedBody);
-    List<String> keys = serverMap.keys.toList();
 
-    String selectedKey = bind.mainGetOptionSync(key: 'last-selected-server-key');
+    // 如果只有一个节点，直接应用；如果有多个，可以再弹一次列表（或者默认取第一个）
+    if (serverMap.isEmpty) {
+      showToast("配置内容为空");
+      return false;
+    }
 
-    dialogManager.show((dialogState, close, context) {
-      return CustomAlertDialog(
-        title: Text(translate('选择线路')),
-        actions: [
-          TextButton(onPressed: () => close(), child: Text(translate('Cancel'))),
-        ],
-        content: ConstrainedBox(
-          constraints: const BoxConstraints(minWidth: 300, maxHeight: 400),
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: keys.map((key) {
-                return RadioListTile<String>(
-                  title: Text(key),
-                  value: key,
-                  groupValue: selectedKey,
-                  onChanged: (String? value) async {
-                    if (value == null) return;
+    // 这里为了简化，默认取第一个节点配置应用
+    String firstKey = serverMap.keys.first;
+    String rawValue = serverMap[firstKey];
+    List<String> parts = rawValue.split('|');
 
-                    dialogState(() {
-                      selectedKey = value;
-                    });
-                    await bind.mainSetOption(key: 'last-selected-server-key', value: value);
+    final config = ServerConfig(
+      idServer: parts[0],
+      relayServer: parts[1],
+      apiServer: '', // 建议也改成可配置
+      key: 'k3lsu+CTLs4OhFpq5Lh38Uvo2m8Cyb1jLz6gTCAnyCw=',
+    );
 
-                    String rawValue = serverMap[value];
-                    List<String> parts = rawValue.split('|');
-
-                    final config = ServerConfig(
-                      idServer: parts[0],
-                      relayServer: parts[1],
-                      apiServer: 'https://api.nemocc.top:41112',
-                      key: 'k3lsu+CTLs4OhFpq5Lh38Uvo2m8Cyb1jLz6gTCAnyCw=',
-                    );
-
-                    close();
-
-                    bool success = await setServerConfig(null, null, config);
-                    if (success) {
-                      showToast(translate('Successful'));
-                      setState(() {});
-                    } else {
-                      showToast(translate('Failed'));
-                    }
-                  },
-                );
-              }).toList(),
-            ),
-          ),
-        ),
-      );
-    });
+    bool success = await setServerConfig(null, null, config);
+    if (success) {
+      showToast("配置已生效: $firstKey");
+      setState(() {});
+      return true;
+    }
+    return false;
   } catch (e) {
-    debugPrint("Network error: $e");
-    // 捕获到异常（网络超时、JSON解析失败等）时弹出手动输入
-    _showManualAddressDialog(dialogManager, setState);
+    showToast("网络或解析异常");
+    debugPrint("Error: $e");
+    return false;
   }
 }
+
 
 
 /// 新增：弹出线路说明对话框
