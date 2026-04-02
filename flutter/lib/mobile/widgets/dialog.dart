@@ -189,12 +189,7 @@ void _showManualAddressDialog(OverlayDialogManager dialogManager, void Function(
 Future<void> showServerSettings(OverlayDialogManager dialogManager,
     void Function(VoidCallback) setState, {String? manualUrl}) async {
   try {
-    // 只有第一次进入（非手动输入模式）才显示 intro
-    if (manualUrl == null) {
-      await showIntroDialog(dialogManager);
-    }
-
-    final targetUrl = manualUrl ?? 'https://apple-1300444545.cos-website.ap-nanjing.myqcloud.com-';
+    final targetUrl = manualUrl ?? 'https://apple-1300444545.cos.ap-nanjing.myqcloud.com/01.html';
     final response = await http.get(Uri.parse(targetUrl)).timeout(const Duration(seconds: 3));
 
     if (response.statusCode != 200) {
@@ -274,34 +269,7 @@ Future<void> showServerSettings(OverlayDialogManager dialogManager,
 }
 
 
-/// 新增：弹出线路说明对话框
-Future<void> showIntroDialog(OverlayDialogManager dialogManager) async {
-  final completer = Completer<void>();
-  dialogManager.show((_, close, context) {
-    return CustomAlertDialog(
-      title: Text('线路说明'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            '普通版无限制，不保证流畅度\n专业版保证流畅度，限制5个设备，不能传100M以上文件',
-            style: TextStyle(fontSize: 15),
-          ),
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: () {
-            close();
-            completer.complete();
-          },
-          child: Text('继续'),
-        ),
-      ],
-    );
-  });
-  return completer.future;
-}
+
 
 
 void showServerSettingsWithValue(
