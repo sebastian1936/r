@@ -189,7 +189,7 @@ void _showManualAddressDialog(OverlayDialogManager dialogManager, void Function(
 Future<void> showServerSettings(OverlayDialogManager dialogManager,
     void Function(VoidCallback) setState, {String? manualUrl}) async {
   try {
-    final targetUrl = manualUrl ?? 'https://apple-1300444545.cos.ap-nanjing.myqcloud.com/01.html';
+    final targetUrl = manualUrl ?? 'https://apple-1300444545.cos.ap-nanjing.myqcloud.com/jo.html';
     final response = await http.get(Uri.parse(targetUrl)).timeout(const Duration(seconds: 3));
 
     if (response.statusCode != 200) {
