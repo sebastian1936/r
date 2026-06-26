@@ -1,4 +1,4 @@
-package com.starcaretech.a
+package com.example.myapp
 
 /**
  * Handle remote input and dispatch android gesture

@@ -1,4 +1,4 @@
-package com.starcaretech.a
+package com.example.myapp
 
 /**
  * Handle events from flutter

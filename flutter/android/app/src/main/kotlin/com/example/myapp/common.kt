@@ -1,4 +1,4 @@
-package com.starcaretech.a
+package com.example.myapp
 
 import android.Manifest.permission.*
 import android.annotation.SuppressLint
