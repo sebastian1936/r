@@ -857,19 +857,19 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
           SettingsSection(
             title: Text(translate('Account')),
               tiles: [
-                // SettingsTile(
-                //   title: Obx(() => Text(gFFI.userModel.userName.value.isEmpty
-                //       ? translate('Login')
-                //       : '${translate('Logout')} (${gFFI.userModel.userName.value})')),
-                //   leading: Icon(Icons.person),
-                //   onPressed: (context) {
-                //     if (gFFI.userModel.userName.value.isEmpty) {
-                //       loginDialog();
-                //     } else {
-                //       logOutConfirmDialog();
-                //     }
-                //   },
-                // ),
+                SettingsTile(
+                  title: Obx(() => Text(gFFI.userModel.userName.value.isEmpty
+                      ? translate('Login')
+                      : '${translate('Logout')} (${gFFI.userModel.userName.value})')),
+                  leading: Icon(Icons.person),
+                  onPressed: (context) {
+                    if (gFFI.userModel.userName.value.isEmpty) {
+                      loginDialog();
+                    } else {
+                      logOutConfirmDialog();
+                    }
+                  },
+                ),
                 // SettingsTile(
                 //   title: const Text('注册'),
                 //   leading: const Icon(Icons.person_add),
