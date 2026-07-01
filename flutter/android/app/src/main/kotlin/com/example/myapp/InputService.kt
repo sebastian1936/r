@@ -143,7 +143,7 @@ class InputService : AccessibilityService() {
         }
 
         if (mask == RIGHT_UP) {
-            longPress(mouseX, mouseY)
+            performGlobalAction(GLOBAL_ACTION_BACK)
             return
         }
 
