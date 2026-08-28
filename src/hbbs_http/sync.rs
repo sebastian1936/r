@@ -146,7 +146,15 @@ async fn start_hbbs_sync_async() {
                     }
                     let ab_password = Config::get_option(keys::OPTION_PRESET_ADDRESS_BOOK_PASSWORD);
                     if !ab_password.is_empty() {
-                        v[keys::OPTION_PRESET_ADDRESS_BOOK_PASSWORD] = json!(ab_password);
+                        // CVE-2026-30796 修复：预置地址簿密码是可复用共享密钥，
+                        // 禁止明文放入同步包外发，这里改为发送 SHA-256 摘要（base64 编码）。
+                        // 服务端如需校验，应对已知密码做同样的哈希后比对，而不是接收明文。
+                        use sha2::{Digest, Sha256};
+                        let mut hasher = Sha256::new();
+                        hasher.update(ab_password.as_bytes());
+                        let res = hasher.finalize();
+                        v[keys::OPTION_PRESET_ADDRESS_BOOK_PASSWORD] =
+                            json!(hbb_common::base64::encode(&res[..]));
                     }
                     let ab_note = Config::get_option(keys::OPTION_PRESET_ADDRESS_BOOK_NOTE);
                     if !ab_note.is_empty() {

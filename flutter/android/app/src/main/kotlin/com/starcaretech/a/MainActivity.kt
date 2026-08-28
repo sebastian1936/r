@@ -41,6 +41,11 @@ class MainActivity : FlutterActivity() {
         private var _rdClipboardManager: RdClipboardManager? = null
         val rdClipboardManager: RdClipboardManager?
             get() = _rdClipboardManager;
+
+        // 主控/被控双包拆分：controller 包不含被控组件（Manifest 已移除），
+        // 所有被控服务调用路径必须拦截，避免运行时崩溃
+        val isController: Boolean
+            get() = BuildConfig.FLAVOR == "controller"
     }
 
     private val channelTag = "mChannel"
@@ -52,7 +57,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        if (MainService.isReady) {
+        if (!isController && MainService.isReady) {
             Intent(activity, MainService::class.java).also {
                 bindService(it, serviceConnection, Context.BIND_AUTO_CREATE)
             }
@@ -130,6 +135,11 @@ class MainActivity : FlutterActivity() {
             // make sure result will be invoked, otherwise flutter will await forever
             when (call.method) {
                 "init_service" -> {
+                    // controller 包无被控服务，直接拦截
+                    if (isController) {
+                        result.success(false)
+                        return@setMethodCallHandler
+                    }
                     Intent(activity, MainService::class.java).also {
                         bindService(it, serviceConnection, Context.BIND_AUTO_CREATE)
                     }
@@ -401,6 +411,10 @@ class MainActivity : FlutterActivity() {
 
     override fun onStop() {
         super.onStop()
+        // controller 包无 FloatingWindowService（Manifest 已移除），不启动
+        if (isController) {
+            return
+        }
         val disableFloatingWindow = FFI.getLocalOption("disable-floating-window") == "Y"
         if (!disableFloatingWindow && MainService.isReady) {
             startService(Intent(this, FloatingWindowService::class.java))

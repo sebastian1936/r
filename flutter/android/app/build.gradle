@@ -95,6 +95,11 @@ android {
         sourceCompatibility JavaVersion.VERSION_1_8
     }
 
+    // 显式启用 BuildConfig（AGP 8+ 默认关闭），controller/host flavor 判断依赖 BuildConfig.FLAVOR
+    buildFeatures {
+        buildConfig true
+    }
+
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId "com.starcaretech.a"
@@ -102,6 +107,21 @@ android {
         targetSdkVersion 33
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
+    }
+
+    // 主控/被控双包拆分：
+    // host       被控完整包（含无障碍/录屏/自启动，走自有渠道分发）
+    // controller 纯主控包（Manifest 裁剪被控组件，用于厂商市场上架）
+    flavorDimensions "role"
+    productFlavors {
+        host {
+            dimension "role"
+            applicationId "com.starcaretech.a"
+        }
+        controller {
+            dimension "role"
+            applicationId "com.starcaretech.a.controller"
+        }
     }
 
     signingConfigs {
