@@ -380,6 +380,8 @@ jobs:
               pushd flutter
               flutter build apk --release --flavor host --target-platform android-arm64 --split-per-abi
               mv build/app/outputs/flutter-apk/app-arm64-v8a-host-release.apk ../rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.apk
+              flutter build apk --release --flavor controller --target-platform android-arm64 --split-per-abi
+              mv build/app/outputs/flutter-apk/app-arm64-v8a-controller-release.apk ../rustdesk-${{ env.VERSION }}-controller-${{ matrix.job.arch }}.apk
             ;;
             armv7-linux-androideabi)
               mkdir -p ./flutter/android/app/src/main/jniLibs/armeabi-v7a
@@ -389,11 +391,14 @@ jobs:
               pushd flutter
               flutter build apk --release --flavor host --target-platform android-arm --split-per-abi
               mv build/app/outputs/flutter-apk/app-armeabi-v7a-host-release.apk ../rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.apk
+              flutter build apk --release --flavor controller --target-platform android-arm --split-per-abi
+              mv build/app/outputs/flutter-apk/app-armeabi-v7a-controller-release.apk ../rustdesk-${{ env.VERSION }}-controller-${{ matrix.job.arch }}.apk
             ;;
           esac
           popd
           mkdir -p signed-apk; pushd signed-apk
           mv ../rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.apk ./rustdesk-test-${{ matrix.job.ref }}-${{ matrix.job.ndk }}.apk
+          mv ../rustdesk-${{ env.VERSION }}-controller-${{ matrix.job.arch }}.apk ./rustdesk-test-controller-${{ matrix.job.ref }}-${{ matrix.job.ndk }}.apk
 
       - uses: r0adkll/sign-android-release@v1
         name: Sign app APK
@@ -415,4 +420,5 @@ jobs:
           prerelease: true
           tag_name: ${{ env.TAG_NAME }}
           files: |
-            ${{steps.sign-rustdesk.outputs.signedReleaseFile}}
+            signed-apk/rustdesk-test-${{ matrix.job.ref }}-${{ matrix.job.ndk }}-signed.apk
+            signed-apk/rustdesk-test-controller-${{ matrix.job.ref }}-${{ matrix.job.ndk }}-signed.apk

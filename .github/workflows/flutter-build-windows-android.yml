@@ -649,6 +649,8 @@ jobs:
               pushd flutter
               flutter build apk "--${{ matrix.job.reltype }}" --flavor host --target-platform android-arm64 --split-per-abi
               mv build/app/outputs/flutter-apk/app-arm64-v8a-host-${{ matrix.job.reltype }}.apk ../rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.apk
+              flutter build apk "--${{ matrix.job.reltype }}" --flavor controller --target-platform android-arm64 --split-per-abi
+              mv build/app/outputs/flutter-apk/app-arm64-v8a-controller-${{ matrix.job.reltype }}.apk ../rustdesk-${{ env.VERSION }}-controller-${{ matrix.job.arch }}${{ matrix.job.suffix }}.apk
             ;;
             armv7-linux-androideabi)
               mkdir -p ./flutter/android/app/src/main/jniLibs/armeabi-v7a
@@ -658,6 +660,8 @@ jobs:
               pushd flutter
               flutter build apk "--${{ matrix.job.reltype }}" --flavor host --target-platform android-arm --split-per-abi
               mv build/app/outputs/flutter-apk/app-armeabi-v7a-host-${{ matrix.job.reltype }}.apk ../rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.apk
+              flutter build apk "--${{ matrix.job.reltype }}" --flavor controller --target-platform android-arm --split-per-abi
+              mv build/app/outputs/flutter-apk/app-armeabi-v7a-controller-${{ matrix.job.reltype }}.apk ../rustdesk-${{ env.VERSION }}-controller-${{ matrix.job.arch }}${{ matrix.job.suffix }}.apk
             ;;
             x86_64-linux-android)
               mkdir -p ./flutter/android/app/src/main/jniLibs/x86_64
@@ -667,6 +671,8 @@ jobs:
               pushd flutter
               flutter build apk "--${{ matrix.job.reltype }}" --flavor host --target-platform android-x64 --split-per-abi
               mv build/app/outputs/flutter-apk/app-x86_64-host-${{ matrix.job.reltype }}.apk ../rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.apk
+              flutter build apk "--${{ matrix.job.reltype }}" --flavor controller --target-platform android-x64 --split-per-abi
+              mv build/app/outputs/flutter-apk/app-x86_64-controller-${{ matrix.job.reltype }}.apk ../rustdesk-${{ env.VERSION }}-controller-${{ matrix.job.arch }}${{ matrix.job.suffix }}.apk
             ;;
             i686-linux-android)
               mkdir -p ./flutter/android/app/src/main/jniLibs/x86
@@ -676,11 +682,14 @@ jobs:
               pushd flutter
               flutter build apk "--${{ matrix.job.reltype }}" --flavor host --target-platform android-x86 --split-per-abi
               mv build/app/outputs/flutter-apk/app-x86-host-${{ matrix.job.reltype }}.apk ../rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.apk
+              flutter build apk "--${{ matrix.job.reltype }}" --flavor controller --target-platform android-x86 --split-per-abi
+              mv build/app/outputs/flutter-apk/app-x86-controller-${{ matrix.job.reltype }}.apk ../rustdesk-${{ env.VERSION }}-controller-${{ matrix.job.arch }}${{ matrix.job.suffix }}.apk
             ;;
           esac
           popd
           mkdir -p signed-apk; pushd signed-apk
           mv ../rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}.apk .
+          mv ../rustdesk-${{ env.VERSION }}-controller-${{ matrix.job.arch }}${{ matrix.job.suffix }}.apk .
 
       # https://github.com/r0adkll/sign-android-release/issues/84#issuecomment-1889636075
       - name: Setup sign tool version variable
@@ -709,7 +718,9 @@ jobs:
         uses: actions/upload-artifact@master
         with:
           name: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.apk
-          path: ${{steps.sign-rustdesk.outputs.signedReleaseFile}}
+          path: |
+            signed-apk/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}-signed.apk
+            signed-apk/rustdesk-${{ env.VERSION }}-controller-${{ matrix.job.arch }}${{ matrix.job.suffix }}-signed.apk
 
       - name: Publish signed apk package
         if: env.ANDROID_SIGNING_KEY != null && env.UPLOAD_ARTIFACT == 'true'
@@ -718,7 +729,8 @@ jobs:
           prerelease: true
           tag_name: ${{ env.TAG_NAME }}
           files: |
-            ${{steps.sign-rustdesk.outputs.signedReleaseFile}}
+            signed-apk/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}${{ matrix.job.suffix }}-signed.apk
+            signed-apk/rustdesk-${{ env.VERSION }}-controller-${{ matrix.job.arch }}${{ matrix.job.suffix }}-signed.apk
 
       - name: Publish unsigned apk package
         if: env.ANDROID_SIGNING_KEY == null && env.UPLOAD_ARTIFACT == 'true'
@@ -728,4 +740,5 @@ jobs:
           tag_name: ${{ env.TAG_NAME }}
           files: |
             signed-apk/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.apk
+            signed-apk/rustdesk-${{ env.VERSION }}-controller-${{ matrix.job.arch }}.apk
 
