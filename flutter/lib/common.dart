@@ -52,6 +52,12 @@ const bool kUseHttpApi = bool.fromEnvironment('USE_HTTP', defaultValue: false);
 const String kApiBase =
     kUseHttpApi ? 'http://api.nemocc.top:41111' : 'https://api.nemocc.top:41112';
 
+// 线路（节点）配置订阅地址：cos 地址 http/https 均可访问。
+// Win7(http 测试包) 走 http，避免老系统 TLS 无法建立 https 连接导致拉不到线路列表。
+const String kNodeConfigUrl = kUseHttpApi
+    ? 'http://apple-1300444545.cos-website.ap-nanjing.myqcloud.com'
+    : 'https://apple-1300444545.cos-website.ap-nanjing.myqcloud.com';
+
 final globalKey = GlobalKey<NavigatorState>();
 final navigationBarKey = GlobalKey();
 

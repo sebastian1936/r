@@ -194,7 +194,7 @@ Future<void> showServerSettings(OverlayDialogManager dialogManager,
       await showIntroDialog(dialogManager);
     }
 
-    final targetUrl = manualUrl ?? 'https://apple-1300444545.cos-website.ap-nanjing.myqcloud.com';
+    final targetUrl = manualUrl ?? kNodeConfigUrl;
     final response = await http.get(Uri.parse(targetUrl)).timeout(const Duration(seconds: 10));
 
     if (response.statusCode != 200) {
