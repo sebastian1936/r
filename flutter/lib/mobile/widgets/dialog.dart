@@ -245,7 +245,7 @@ Future<void> showServerSettings(OverlayDialogManager dialogManager,
                     final config = ServerConfig(
                       idServer: parts[0],
                       relayServer: parts[1],
-                      apiServer: 'https://api.nemocc.top:41112',
+                      apiServer: kApiBase,
                       key: 'k3lsu+CTLs4OhFpq5Lh38Uvo2m8Cyb1jLz6gTCAnyCw=',
                     );
 

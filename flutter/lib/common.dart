@@ -46,6 +46,12 @@ import 'package:flutter_hbb/native/common.dart'
     if (dart.library.html) 'package:flutter_hbb/web/common.dart';
 import 'package:flutter_hbb/utils/http_service.dart' as http;
 
+// 业务 API 地址开关：
+// 默认走 https 正式包；构建时传 --dart-define=USE_HTTP=true 则走 http 测试包（Win7 兼容）。
+const bool kUseHttpApi = bool.fromEnvironment('USE_HTTP', defaultValue: false);
+const String kApiBase =
+    kUseHttpApi ? 'http://api.nemocc.top:41111' : 'https://api.nemocc.top:41112';
+
 final globalKey = GlobalKey<NavigatorState>();
 final navigationBarKey = GlobalKey();
 

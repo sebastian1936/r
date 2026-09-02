@@ -438,7 +438,9 @@ def build_flutter_windows(version, features, skip_portable_pack):
             print("cargo build failed, please check rust source code.")
             exit(-1)
     os.chdir('flutter')
-    system2('flutter build windows --release')
+    # 允许通过环境变量 FLUTTER_DART_DEFINE 透传 --dart-define（如 http 测试包传 USE_HTTP=true）
+    extra_dart_define = os.environ.get('FLUTTER_DART_DEFINE', '').strip()
+    system2(f'flutter build windows --release {extra_dart_define}')
     os.chdir('..')
     shutil.copy2('target/release/deps/dylib_virtual_display.dll',
                  flutter_build_dir_2)
