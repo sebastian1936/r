@@ -9,6 +9,19 @@ on:
       - "docs/**"
       - "README.md"
   workflow_dispatch:
+    inputs:
+      generate_keystore:
+        description: "仅生成签名密钥（首次配置用，不构建 APK）"
+        type: boolean
+        default: false
+      keystore_storepass:
+        description: "密钥库密码（自行设定，记录下来）"
+        type: string
+        required: false
+      keystore_keypass:
+        description: "密钥密码（自行设定，记录下来）"
+        type: string
+        required: false
 
 env:
   RUST_VERSION: "1.75"
@@ -22,10 +35,36 @@ env:
   ANDROID_KEYSTORE_BASE64: "${{ secrets.ANDROID_KEYSTORE_BASE64 }}"
 
 jobs:
+  # 一次性生成签名密钥：本地没有 Java 时，用它产出 keystore.jks 并下载，
+  # 再 base64 后存入 Secrets。注意：dispatch 输入的密码会出现在 run 页面，
+  # 公开仓库请改用本地 keytool 生成。
+  generate-keystore:
+    if: github.event_name == 'workflow_dispatch' && inputs.generate_keystore
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Generate keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore keystore.jks \
+            -storetype JKS \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -alias rustdesk \
+            -storepass "${{ inputs.keystore_storepass }}" \
+            -keypass "${{ inputs.keystore_keypass }}" \
+            -dname "CN=RustDesk, OU=Dev, O=RustDesk, L=Unknown, S=Unknown, C=CN"
+          keytool -list -v -keystore keystore.jks -storepass "${{ inputs.keystore_storepass }}"
+      - name: Upload keystore
+        uses: actions/upload-artifact@v4
+        with:
+          name: keystore-jks
+          path: keystore.jks
+
   generate-bridge:
     uses: ./.github/workflows/bridge.yml
 
   build-android:
+    # 生成密钥时不执行构建
+    if: github.event_name != 'workflow_dispatch' || !inputs.generate_keystore
     needs: [generate-bridge]
     name: android ${{ matrix.job.arch }}
     runs-on: ubuntu-24.04
@@ -161,7 +200,9 @@ jobs:
           # 被控完整包
           flutter build apk --release --flavor host --target-platform ${{ matrix.job.abi_flag }} --split-per-abi
           # 纯主控包（Manifest 已裁剪敏感权限与被控组件）
-          flutter build apk --release --flavor controller --target-platform ${{ matrix.job.abi_flag }} --split-per-abi
+          # CONTROLLER_ONLY=true 让 Dart 侧 isOutgoingOnlyMode() 恒为 true，
+          # 隐藏“共享本机桌面/ID/密码/被控设置”等入口
+          flutter build apk --release --flavor controller --target-platform ${{ matrix.job.abi_flag }} --split-per-abi --dart-define=CONTROLLER_ONLY=true
           popd
           mkdir -p apk-out
           cp flutter/build/app/outputs/flutter-apk/app-${{ matrix.job.android_target }}-host-release.apk \

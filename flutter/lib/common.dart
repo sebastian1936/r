@@ -1726,7 +1726,7 @@ String get windowFramePrefix =>
     kWindowPrefix +
     (bind.isIncomingOnly()
         ? "incoming_"
-        : (bind.isOutgoingOnly() ? "outgoing_" : ""));
+        : (isOutgoingOnlyMode() ? "outgoing_" : ""));
 
 typedef WindowKey = ({WindowType type, int? windowId});
 
@@ -2071,11 +2071,11 @@ Future<bool> restoreWindowPosition(WindowType type,
       }
       if (lpos.isMaximized == true) {
         await restorePos();
-        if (!(bind.isIncomingOnly() || bind.isOutgoingOnly())) {
+        if (!(bind.isIncomingOnly() || isOutgoingOnlyMode())) {
           await windowManager.maximize();
         }
       } else {
-        final storeSize = !bind.isIncomingOnly() || bind.isOutgoingOnly();
+        final storeSize = !bind.isIncomingOnly() || isOutgoingOnlyMode();
         if (isWindows) {
           if (storeSize) {
             // We need to set the window size first to avoid the incorrect size in some special cases.
@@ -2669,6 +2669,16 @@ Map<String, String> getHttpHeaders() {
     'Authorization': 'Bearer ${bind.mainGetLocalOption(key: 'access_token')}'
   };
 }
+
+/// 主控包（Android controller flavor）编译期开关。
+/// 由 `--dart-define=CONTROLLER_ONLY=true` 注入，用于在不改动 Rust 侧配置
+/// （conn-type / HARD_SETTINGS 位于 hbb_common 子模块）的前提下隐藏被控入口。
+const bool kControllerOnly =
+    bool.fromEnvironment('CONTROLLER_ONLY', defaultValue: false);
+
+/// 是否“仅主控”：controller 包恒为 true，其余由 Rust 侧配置(conn-type)决定。
+/// 注意：不要命名为 isOutgoingOnly，会与业务代码里的同名局部变量冲突。
+bool isOutgoingOnlyMode() => kControllerOnly || bind.isOutgoingOnly();
 
 // Simple wrapper of built-in types for reference use.
 class SimpleWrapper<T> {

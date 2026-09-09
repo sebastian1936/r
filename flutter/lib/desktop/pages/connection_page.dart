@@ -303,7 +303,7 @@ class _ConnectionPageState extends State<ConnectionPage>
 
   @override
   Widget build(BuildContext context) {
-    final isOutgoingOnly = bind.isOutgoingOnly();
+    final isOutgoingOnly = isOutgoingOnlyMode();
     return Column(
       children: [
         Expanded(
