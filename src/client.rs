@@ -4183,3 +4183,23 @@ async fn udp_nat_connect(
         })?;
     Ok((res.1, Some(res.0), typ))
 }
+
+/// MUST_LOGIN：服务端(hbbs/hbbr)开启 must-login 后，校验到用户未登录/未授权时，
+/// 会通过 PunchHoleResponse.other_failure 或 RelayResponse.refuse_reason 返回提示文案
+/// （hbbs 用 login_prompt，默认"请先在设置-账户中登录，注册地址见教程"）。
+/// 这里识别"登录"相关提示并通知 Flutter 跳转到 设置-账户，方便用户直接登录。
+fn notify_login_required(msg: &str) {
+    if !(msg.contains("登录") || msg.to_lowercase().contains("login")) {
+        return;
+    }
+    let mut m = HashMap::new();
+    m.insert("name", "login_required".to_owned());
+    m.insert("msg", msg.to_owned());
+    if let Ok(event) = serde_json::to_string(&m) {
+        // flutter 模块仅在 android/ios 或 feature="flutter" 下编译，与 common.rs 保持一致
+        #[cfg(feature = "flutter")]
+        let _ = crate::flutter::push_global_event(crate::flutter::APP_TYPE_MAIN, event);
+        #[cfg(not(feature = "flutter"))]
+        let _ = event;
+    }
+}
