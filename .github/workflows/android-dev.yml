@@ -31,40 +31,14 @@ env:
   NDK_VERSION: "r27c"
   VERSION: "1.4.4"
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
-  # 签名密钥（GitHub Secrets）。未配置时自动回退 debug 签名，构建不会失败
+  # 签名优先使用 Secrets 中的正式密钥；未配置则 CI 自动生成（开发/自测用）
   ANDROID_KEYSTORE_BASE64: "${{ secrets.ANDROID_KEYSTORE_BASE64 }}"
 
 jobs:
-  # 一次性生成签名密钥：本地没有 Java 时，用它产出 keystore.jks 并下载，
-  # 再 base64 后存入 Secrets。注意：dispatch 输入的密码会出现在 run 页面，
-  # 公开仓库请改用本地 keytool 生成。
-  generate-keystore:
-    if: github.event_name == 'workflow_dispatch' && inputs.generate_keystore
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Generate keystore
-        run: |
-          keytool -genkeypair -v \
-            -keystore keystore.jks \
-            -storetype JKS \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -alias rustdesk \
-            -storepass "${{ inputs.keystore_storepass }}" \
-            -keypass "${{ inputs.keystore_keypass }}" \
-            -dname "CN=RustDesk, OU=Dev, O=RustDesk, L=Unknown, S=Unknown, C=CN"
-          keytool -list -v -keystore keystore.jks -storepass "${{ inputs.keystore_storepass }}"
-      - name: Upload keystore
-        uses: actions/upload-artifact@v4
-        with:
-          name: keystore-jks
-          path: keystore.jks
-
   generate-bridge:
     uses: ./.github/workflows/bridge.yml
 
   build-android:
-    # 生成密钥时不执行构建
-    if: github.event_name != 'workflow_dispatch' || !inputs.generate_keystore
     needs: [generate-bridge]
     name: android ${{ matrix.job.arch }}
     runs-on: ubuntu-24.04
@@ -171,16 +145,46 @@ jobs:
           cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so \
              ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_target }}/librustdesk.so
 
-      # 未配置签名密钥时不生成 key.properties，build.gradle 会自动回退 debug 签名
+      # 用 cache 固定 CI 生成的密钥，尽量让多次构建复用同一签名，避免无法覆盖安装
+      - name: Restore CI keystore
+        id: keystore-cache
+        uses: actions/cache@v4
+        with:
+          path: flutter/android/app/keystore.jks
+          key: android-signing-keystore-v1
+
       - name: Prepare signing config
-        if: env.ANDROID_KEYSTORE_BASE64 != ''
+        env:
+          SECRET_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          SECRET_STOREPASS: ${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
+          SECRET_KEYPASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          SECRET_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > flutter/android/app/keystore.jks
+          KS=flutter/android/app/keystore.jks
+          ALIAS="$SECRET_ALIAS"; STOREPASS="$SECRET_STOREPASS"; KEYPASS="$SECRET_KEYPASS"
+
+          if [ -n "$SECRET_KEYSTORE" ]; then
+            echo "使用 Secrets 中的正式签名密钥"
+            echo "$SECRET_KEYSTORE" | base64 -d > "$KS"
+            [ -z "$ALIAS" ] && ALIAS=rustdesk
+          else
+            ALIAS=rustdesk; STOREPASS=rustdesk; KEYPASS=rustdesk
+            if [ ! -f "$KS" ]; then
+              echo "未配置 Secret：由 CI 生成本地签名密钥（同一 cache key 下会复用）"
+              keytool -genkeypair -v -keystore "$KS" -storetype JKS \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -alias "$ALIAS" -storepass "$STOREPASS" -keypass "$KEYPASS" \
+                -dname "CN=RustDesk, OU=Dev, O=RustDesk, L=Unknown, S=Unknown, C=CN"
+            else
+              echo "复用缓存中的签名密钥"
+            fi
+          fi
+
           cat > flutter/android/key.properties <<EOF
           storeFile=keystore.jks
-          storePassword=${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
-          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
-          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          storePassword=$STOREPASS
+          keyAlias=$ALIAS
+          keyPassword=$KEYPASS
           EOF
 
       - name: Build apk (host + controller)
