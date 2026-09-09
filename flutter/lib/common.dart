@@ -1152,7 +1152,11 @@ Widget createDialogContent(String text) {
         ..onTap = () {
           String linkText = match.group(0) ?? '';
           linkText = linkText.replaceAll(RegExp(r'[.,;!?]+$'), '');
-          launchUrl(Uri.parse(linkText));
+          // externalApplication：强制用系统浏览器打开。
+          // 默认的 platformDefault 在 iOS 上会走应用内 SFSafariViewController，
+          // 在部分 Android 上也可能被 WebView 接管，表现为"在软件里打开"。
+          launchUrl(Uri.parse(linkText),
+              mode: LaunchMode.externalApplication);
         },
     ));
     start = match.end;
@@ -1202,7 +1206,8 @@ void msgBox(SessionID sessionId, String type, String title, String text,
 
   jumplink() {
     if (link.startsWith('http')) {
-      launchUrl(Uri.parse(link));
+      // 同 createDialogContent：强制外部浏览器打开，避免应用内打开
+      launchUrl(Uri.parse(link), mode: LaunchMode.externalApplication);
     }
   }
 
