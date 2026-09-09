@@ -46,8 +46,9 @@ jobs:
       fail-fast: false
       matrix:
         job:
-          - { arch: aarch64, target: aarch64-linux-android, android_target: arm64-v8a, abi_flag: android-arm64 }
-          - { arch: armv7, target: armv7-linux-androideabi, android_target: armeabi-v7a, abi_flag: android-arm }
+          # sysroot = libc++_shared.so 所在的三元组目录名（armv7 与 target 名不同，需单独给出）
+          - { arch: aarch64, target: aarch64-linux-android,   android_target: arm64-v8a,   abi_flag: android-arm64, sysroot: aarch64-linux-android }
+          - { arch: armv7,   target: armv7-linux-androideabi, android_target: armeabi-v7a, abi_flag: android-arm,   sysroot: arm-linux-androideabi }
     steps:
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@main
@@ -196,8 +197,18 @@ jobs:
           export PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:$PATH
           sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g" ./flutter/android/gradle.properties
           mkdir -p ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_target }}
-          cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.job.sysroot }}/libc++_shared.so \
-             ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_target }}/
+          # 定位 libc++_shared.so：优先标准路径，找不到再按三元组兜底搜索，
+          # 避免 NDK 版本目录差异导致整条流水线失败
+          LIBCXX="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.job.sysroot }}/libc++_shared.so"
+          if [ ! -f "$LIBCXX" ]; then
+            LIBCXX=$(find "${ANDROID_NDK_HOME}" -name libc++_shared.so -path "*${{ matrix.job.sysroot }}*" | head -1)
+          fi
+          if [ -z "$LIBCXX" ] || [ ! -f "$LIBCXX" ]; then
+            echo "未找到 libc++_shared.so（sysroot=${{ matrix.job.sysroot }}）"
+            exit 1
+          fi
+          echo "libc++_shared.so: $LIBCXX"
+          cp "$LIBCXX" ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_target }}/
           cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so \
              ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_target }}/librustdesk.so
           pushd flutter
