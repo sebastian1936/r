@@ -313,23 +313,26 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   // 请求充值接口
   Future<void> _doRecharge(String cardNo) async {
     try {
+      // 后台接口：POST /api/recharge（RustAuth，用登录态 token 鉴权，用户身份由后台取）
       final response = await http.post(
-        Uri.parse('$kApiBase/recharge'),
-        headers: {"Content-Type": "application/json"},
+        Uri.parse('$kApiBase/api/recharge'),
+        headers: {
+          "Content-Type": "application/json",
+          ...getHttpHeaders(),
+        },
         body: jsonEncode({
-          "name": gFFI.userModel.userName.value, // 从全局模型获取当前用户名
           "card_no": cardNo,
         }),
       );
 
       final data = jsonDecode(response.body);
-      if (response.statusCode == 200 && data['code'] == 0) {
+      if (data is Map && data['code'] == 0) {
         if (Get.isDialogOpen!) Get.back();
-        Get.snackbar("成功", "充值成功！到期时间：${data['到期时间']}");
+        Get.snackbar("成功", "充值成功！到期时间：${data['expire_time'] ?? ''}");
         // 充值成功后建议刷新一次有效期
         _doQueryExpiry();
       } else {
-        Get.snackbar("充值失败", data['msg'] ?? "错误代码: ${data['code']}");
+        Get.snackbar("充值失败", (data is Map ? data['msg'] : null) ?? "错误代码: ${data is Map ? data['code'] : response.statusCode}");
       }
     } catch (e) {
       Get.snackbar("错误", "连接服务器失败: $e");
@@ -339,22 +342,16 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   // 查询有效期方法
   Future<void> _doQueryExpiry() async {
     try {
-      // 显示加载提示
-      // Get.showOverlay(asyncFunction: () async { ... }); // 可选
-
-      final response = await http.post(
-        Uri.parse('$kApiBase/query'),
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode({
-          "name": gFFI.userModel.userName.value,
-        }),
+      // 后台接口：GET /api/user/info，返回 UserPayload，含 expire_time1 / expire_time2
+      final response = await http.get(
+        Uri.parse('$kApiBase/api/user/info'),
+        headers: getHttpHeaders(),
       );
 
       final data = jsonDecode(response.body);
-      if (response.statusCode == 200 && data['code'] == 0) {
-        // 后端返回的Key是 "普通版" 和 "专业版"
-        String expire1 = data['普通版'].toString().split('T')[0]; // 简单处理只看日期
-        String expire2 = data['专业版'].toString().split('T')[0];
+      if (response.statusCode == 200 && data is Map) {
+        String expire1 = (data['expire_time1'] ?? '').toString();
+        String expire2 = (data['expire_time2'] ?? '').toString();
 
         Get.defaultDialog(
           title: "账号有效期",
@@ -363,12 +360,12 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
               ListTile(
                 leading: const Icon(Icons.star_border),
                 title: const Text("普通版"),
-                subtitle: Text(expire1),
+                subtitle: Text(expire1.isEmpty ? '-' : expire1),
               ),
               ListTile(
                 leading: const Icon(Icons.stars),
                 title: const Text("专业版"),
-                subtitle: Text(expire2),
+                subtitle: Text(expire2.isEmpty ? '-' : expire2),
               ),
             ],
           ),
@@ -376,7 +373,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
           onConfirm: () => Get.back(),
         );
       } else {
-        Get.snackbar("查询失败", data['msg'] ?? "未知错误");
+        Get.snackbar("查询失败", "HTTP ${response.statusCode}");
       }
     } catch (e) {
       Get.snackbar("错误", "无法获取有效期: $e");
@@ -399,6 +396,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   void registerDialog() {
     final nameController = TextEditingController();
     final pwdController = TextEditingController();
+    final cardController = TextEditingController();
     final regExp = RegExp(r'^[a-zA-Z0-9]+$');
 
     Get.defaultDialog(
@@ -414,12 +412,17 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             obscureText: false, // 明文展示
             decoration: InputDecoration(labelText: "请输入密码 (6-18位)"),
           ),
+          TextField(
+            controller: cardController,
+            decoration: InputDecoration(labelText: "请输入卡密"),
+          ),
         ],
       ).marginSymmetric(horizontal: 20),
       textConfirm: "提交注册",
       onConfirm: () async {
         String name = nameController.text.trim();
         String pwd = pwdController.text.trim();
+        String cardNo = cardController.text.trim();
 
         if (name.length < 2 || name.length > 18 || !regExp.hasMatch(name)) {
           Get.snackbar("错误", "账号必须为2-18位字母或数字");
@@ -429,29 +432,48 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
           Get.snackbar("错误", "密码必须为6-18位字母或数字");
           return;
         }
+        if (cardNo.isEmpty) {
+          Get.snackbar("错误", "请输入卡密");
+          return;
+        }
 
-        await _doRegister(name, pwd);
+        await _doRegister(name, pwd, cardNo);
       },
       textCancel: "取消",
     );
   }
 
-  Future<void> _doRegister(String name, String password) async {
+  Future<void> _doRegister(String name, String password, String cardNo) async {
     try {
+      // 与网页端一致：POST /api/admin/user/register
       final response = await http.post(
-        Uri.parse('$kApiBase/regist'),
+        Uri.parse('$kApiBase/api/admin/user/register'),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
-          "name": name,
+          "username": name,
+          "email": "",
           "password": password,
+          "confirm_password": password,
+          "card_no": cardNo,
         }),
       );
 
-      if (response.statusCode == 200) {
+      // 后端统一返回 HTTP 200 + {code, message, data}，需按 code 判断成败
+      bool ok = false;
+      String msg = "";
+      try {
+        final body = jsonDecode(response.body);
+        if (body is Map) {
+          ok = body['code'] == 0;
+          msg = (body['message'] ?? body['msg'] ?? '').toString();
+        }
+      } catch (_) {}
+
+      if (ok) {
         if (Get.isDialogOpen!) Get.back(); // 安全关闭对话框
-        Get.snackbar("成功", "注册成功");
+        Get.snackbar("成功", "注册成功，请登录");
       } else {
-        Get.snackbar("失败", "注册失败: ${response.statusCode}");
+        Get.snackbar("失败", msg.isNotEmpty ? msg : "注册失败: ${response.body}");
       }
     } catch (e) {
       Get.snackbar("错误", "无法连接到服务器: $e");

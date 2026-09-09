@@ -57,7 +57,20 @@ class HomePageState extends State<HomePage> {
       _pages.addAll([ChatPage(type: ChatPageType.mobileMain), ServerPage()]);
     }
     _pages.add(SettingsPage());
+    _settingsPageIndex = _pages.length - 1;
   }
+
+  /// 切换到底部导航的指定页
+  void switchToPage(int index) {
+    if (index < 0 || index >= _pages.length) return;
+    if (_selectedIndex == index) return;
+    setState(() {
+      _selectedIndex = index;
+    });
+  }
+
+  /// 跳转到设置页（账户相关入口都在该页）
+  void goToSettings() => switchToPage(_settingsPageIndex);
 
   @override
   Widget build(BuildContext context) {

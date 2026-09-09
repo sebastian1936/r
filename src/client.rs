@@ -476,6 +476,7 @@ impl Client {
                     Some(rendezvous_message::Union::PunchHoleResponse(ph)) => {
                         if ph.socket_addr.is_empty() {
                             if !ph.other_failure.is_empty() {
+                                notify_login_required(&ph.other_failure);
                                 bail!(ph.other_failure);
                             }
                             match ph.failure.enum_value() {
@@ -868,6 +869,7 @@ impl Client {
             {
                 if let Some(rendezvous_message::Union::RelayResponse(rs)) = msg_in.union {
                     if !rs.refuse_reason.is_empty() {
+                        notify_login_required(&rs.refuse_reason);
                         bail!(rs.refuse_reason);
                     }
                     succeed = true;

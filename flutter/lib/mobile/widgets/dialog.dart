@@ -284,7 +284,7 @@ Future<void> showIntroDialog(OverlayDialogManager dialogManager) async {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            '普通版无限制，不保证流畅度\n专业版保证流畅度，限制5个设备，不能传100M以上文件',
+            '普通版无限制，不保证流畅度\n专业版保证流畅度，不能传100M以上文件',
             style: TextStyle(fontSize: 15),
           ),
         ],

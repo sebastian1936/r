@@ -7,6 +7,7 @@ import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/widgets/overlay.dart';
+import 'package:flutter_hbb/desktop/pages/desktop_setting_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/desktop/pages/install_page.dart';
 import 'package:flutter_hbb/desktop/pages/server_page.dart';
@@ -574,6 +575,30 @@ _registerEventHandler() {
     platformFFI.registerEventHandler('native_ui', 'native_ui', (evt) async {
       NativeUiHandler.instance.onEvent(evt);
     });
+  }
+  // MUST_LOGIN：服务端(hbbs/hbbr)判定未登录时推送该事件，
+  // 提示用户并直接跳到账户入口，方便立即登录。
+  // 桌面端跳到 设置-账户 页签；移动端跳到底部导航的设置页。
+  if (isDesktop) {
+    if (desktopType == DesktopType.main) {
+      platformFFI.registerEventHandler(
+          'login_required', 'login_required', (evt) async {
+        final msg = evt['msg'];
+        if (msg is String && msg.isNotEmpty) {
+          showToast(msg);
+        }
+        DesktopSettingPage.switch2page(SettingsTabKey.account);
+      }, replace: true);
+    }
+  } else if (isMobile) {
+    platformFFI.registerEventHandler(
+        'login_required', 'login_required', (evt) async {
+      final msg = evt['msg'];
+      if (msg is String && msg.isNotEmpty) {
+        showToast(msg);
+      }
+      HomePage.homeKey.currentState?.goToSettings();
+    }, replace: true);
   }
 }
 
