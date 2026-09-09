@@ -1,0 +1,176 @@
+name: Android Dev Build (host + controller)
+
+# 研发分支自动构建：push 到 dev/1.4.4 即触发，只构建 Android 双包
+on:
+  push:
+    branches:
+      - dev/1.4.4
+    paths-ignore:
+      - "docs/**"
+      - "README.md"
+  workflow_dispatch:
+
+env:
+  RUST_VERSION: "1.75"
+  CARGO_NDK_VERSION: "3.1.2"
+  LLVM_VERSION: "15.0.6"
+  ANDROID_FLUTTER_VERSION: "3.24.5"
+  NDK_VERSION: "r27c"
+  VERSION: "1.4.4"
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  # 签名密钥（GitHub Secrets）。未配置时自动回退 debug 签名，构建不会失败
+  ANDROID_KEYSTORE_BASE64: "${{ secrets.ANDROID_KEYSTORE_BASE64 }}"
+
+jobs:
+  generate-bridge:
+    uses: ./.github/workflows/bridge.yml
+
+  build-android:
+    needs: [generate-bridge]
+    name: android ${{ matrix.job.arch }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { arch: aarch64, target: aarch64-linux-android, android_target: arm64-v8a, abi_flag: android-arm64 }
+          - { arch: armv7, target: armv7-linux-androideabi, android_target: armeabi-v7a, abi_flag: android-arm }
+    steps:
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+               clang cmake curl gcc-multilib git g++ g++-multilib \
+               libasound2-dev libc6-dev libclang-dev libunwind-dev \
+               libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+               libgtk-3-dev libpam0g-dev libpulse-dev libva-dev \
+               libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+               libxdo-dev libxfixes-dev llvm-dev nasm ninja-build \
+               openjdk-17-jdk-headless pkg-config wget
+
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.ANDROID_FLUTTER_VERSION }}
+
+      - name: Patch flutter
+        run: |
+          cd $(dirname $(dirname $(which flutter)))
+          [[ "3.24.5" == ${{ env.ANDROID_FLUTTER_VERSION }} ]] && git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+
+      - uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        env:
+          VCPKG_ROOT: /opt/artifacts/vcpkg
+        run: |
+          if ! ./flutter/build_android_deps.sh "${{ matrix.job.android_target }}"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"; echo "======"; cat "$_1"; echo "======"
+            done
+            exit 1
+          fi
+        shell: bash
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@master
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rustdesk-lib-cache-android
+          key: ${{ matrix.job.target }}
+
+      - name: Build rustdesk lib
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          rustup target add ${{ matrix.job.target }}
+          cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
+          case ${{ matrix.job.target }} in
+            aarch64-linux-android) ./flutter/ndk_arm64.sh ;;
+            armv7-linux-androideabi) ./flutter/ndk_arm.sh ;;
+          esac
+          mkdir -p ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_target }}
+          cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so \
+             ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_target }}/librustdesk.so
+
+      # 未配置签名密钥时不生成 key.properties，build.gradle 会自动回退 debug 签名
+      - name: Prepare signing config
+        if: env.ANDROID_KEYSTORE_BASE64 != ''
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > flutter/android/app/keystore.jks
+          cat > flutter/android/key.properties <<EOF
+          storeFile=keystore.jks
+          storePassword=${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          EOF
+
+      - name: Build apk (host + controller)
+        shell: bash
+        env:
+          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          export PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:$PATH
+          sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g" ./flutter/android/gradle.properties
+          mkdir -p ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_target }}
+          cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.job.sysroot }}/libc++_shared.so \
+             ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_target }}/
+          cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so \
+             ./flutter/android/app/src/main/jniLibs/${{ matrix.job.android_target }}/librustdesk.so
+          pushd flutter
+          # 被控完整包
+          flutter build apk --release --flavor host --target-platform ${{ matrix.job.abi_flag }} --split-per-abi
+          # 纯主控包（Manifest 已裁剪敏感权限与被控组件）
+          flutter build apk --release --flavor controller --target-platform ${{ matrix.job.abi_flag }} --split-per-abi
+          popd
+          mkdir -p apk-out
+          cp flutter/build/app/outputs/flutter-apk/app-${{ matrix.job.android_target }}-host-release.apk \
+             apk-out/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.apk
+          cp flutter/build/app/outputs/flutter-apk/app-${{ matrix.job.android_target }}-controller-release.apk \
+             apk-out/rustdesk-${{ env.VERSION }}-controller-${{ matrix.job.arch }}.apk
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@master
+        with:
+          name: rustdesk-android-${{ matrix.job.arch }}
+          path: apk-out/*.apk

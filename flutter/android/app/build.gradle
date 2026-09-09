@@ -95,13 +95,33 @@ android {
         sourceCompatibility JavaVersion.VERSION_1_8
     }
 
+    // 显式启用 BuildConfig（AGP 8+ 默认关闭），controller/host flavor 判断依赖 BuildConfig.FLAVOR
+    buildFeatures {
+        buildConfig true
+    }
+
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId "com.carriez.flutter_hbb"
+        // 自有包名，与官方 com.carriez.flutter_hbb 完全无关
+        applicationId "com.nemocc.rd"
         minSdkVersion 22
         targetSdkVersion 33
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
+    }
+
+    // 被控/主控双包拆分：
+    // host       被控完整包（含无障碍/录屏/开机自启，走自有渠道分发）
+    // controller 纯主控包（Manifest 裁剪被控组件与敏感权限，用于厂商市场上架）
+    flavorDimensions "role"
+    productFlavors {
+        host {
+            dimension "role"
+            applicationId "com.nemocc.rd"
+        }
+        controller {
+            dimension "role"
+            applicationId "com.nemocc.rd.controller"
+        }
     }
 
     signingConfigs {
@@ -115,9 +135,13 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig signingConfigs.release
+            // 优先用自有签名（key.properties）；未配置时回退 debug 签名，
+            // 保证本地 `flutter run --release` 与无密钥的 CI 也能构建。
+            if (keystorePropertiesFile.exists()) {
+                signingConfig signingConfigs.release
+            } else {
+                signingConfig signingConfigs.debug
+            }
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules'
         }
     }

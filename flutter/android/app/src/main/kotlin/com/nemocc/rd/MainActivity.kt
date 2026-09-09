@@ -1,4 +1,4 @@
-package com.carriez.flutter_hbb
+package com.nemocc.rd
 
 /**
  * Handle events from flutter
@@ -41,6 +41,10 @@ class MainActivity : FlutterActivity() {
         private var _rdClipboardManager: RdClipboardManager? = null
         val rdClipboardManager: RdClipboardManager?
             get() = _rdClipboardManager;
+        // 主控/被控双包拆分：controller 包不含被控组件（Manifest 已移除），
+        // 所有被控服务调用路径必须拦截，避免运行时崩溃
+        val isController: Boolean
+            get() = BuildConfig.FLAVOR == "controller"
     }
 
     private val channelTag = "mChannel"
@@ -52,7 +56,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        if (MainService.isReady) {
+        if (!isController && MainService.isReady) {
             Intent(activity, MainService::class.java).also {
                 bindService(it, serviceConnection, Context.BIND_AUTO_CREATE)
             }

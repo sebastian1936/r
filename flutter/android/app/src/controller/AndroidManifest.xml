@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  controller flavor（纯主控包）Manifest 覆盖：
+  通过 tools:node="remove" 从合并结果中删除被控组件与敏感权限声明，
+  使安装时静态扫描看不到无障碍服务、录屏前台服务、开机自启等高危特征。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 被控相关敏感权限：删除 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" tools:node="remove" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" tools:node="remove" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" tools:node="remove" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" tools:node="remove" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" tools:node="remove" />
+
+    <!-- 保留：INTERNET / ACCESS_NETWORK_STATE / POST_NOTIFICATIONS / WAKE_LOCK /
+         READ_EXTERNAL_STORAGE / WRITE_EXTERNAL_STORAGE / MANAGE_EXTERNAL_STORAGE（文件传输）-->
+
+    <application>
+        <!-- 被控组件：删除 -->
+        <service android:name=".InputService" tools:node="remove" />
+        <service android:name=".MainService" tools:node="remove" />
+        <service android:name=".FloatingWindowService" tools:node="remove" />
+        <receiver android:name=".BootReceiver" tools:node="remove" />
+        <activity android:name=".PermissionRequestTransparentActivity" tools:node="remove" />
+    </application>
+
+</manifest>
