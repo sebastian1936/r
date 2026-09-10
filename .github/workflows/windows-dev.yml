@@ -96,6 +96,10 @@ jobs:
           doNotCache: false
 
       - name: Install vcpkg dependencies
+        env:
+          # 与 1.4.4.1 上已验证的 Windows 构建保持一致：
+          # 需显式指定 host triplet，否则 vcpkg 解析宿主依赖会出问题
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
         run: |
           if ! $VCPKG_ROOT/vcpkg \
             install \
