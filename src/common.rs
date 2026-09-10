@@ -1074,13 +1074,9 @@ pub fn get_ipv6_punch_enabled() -> bool {
 
 pub fn get_local_option(key: &str) -> String {
     let v = LocalConfig::get_option(key);
-    if key == keys::OPTION_ENABLE_UDP_PUNCH || key == keys::OPTION_ENABLE_IPV6_PUNCH {
-        if v.is_empty() {
-            if !is_public(&Config::get_rendezvous_server()) {
-                return "N".to_owned();
-            }
-        }
-    }
+    // 定制：原版在自建（非公共）服务器且配置为空时，会把 UDP/IPv6 punch 强制当作 "N"（关闭），
+    // 导致自建服务器默认不启用 IPv6/UDP 直连。这里去掉该限制，让空值走 option2bool 的默认逻辑
+    // （enable- 开头且值 != "N" 即视为开启），使自建服务器也默认启用 UDP/IPv6 打洞。
     v
 }
 
