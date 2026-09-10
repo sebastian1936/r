@@ -116,6 +116,15 @@ jobs:
           fi
         shell: bash
 
+      # bridge_generated.rs(含 EventToUI 的 IntoIntoDart 实现)由 generate-bridge 任务生成，
+      # 必须下载到工作区，否则会报 E0583 file not found for module `bridge_generated`
+      # 并连锁触发 EventToUI: IntoIntoDart 未实现的一系列错误
+      - name: Restore bridge files
+        uses: actions/download-artifact@master
+        with:
+          name: bridge-artifact
+          path: ./
+
       - name: Build rustdesk
         run: |
           python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
