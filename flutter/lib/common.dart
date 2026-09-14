@@ -58,6 +58,29 @@ const String kNodeConfigUrl = kUseHttpApi
     ? 'http://apple-1300444545.cos-website.ap-nanjing.myqcloud.com'
     : 'https://apple-1300444545.cos-website.ap-nanjing.myqcloud.com';
 
+// 网页端地址：注册、充值统一在浏览器里完成。
+const String kWebBase = 'https://api.nemocc.top';
+
+// 注册统一走网页：客户端内不提供注册，点击注册按钮时用系统浏览器打开该地址。
+const String kRegisterUrl = kWebBase;
+
+Future<void> launchRegisterUrl() async {
+  await launchUrl(Uri.parse(kRegisterUrl),
+      mode: LaunchMode.externalApplication);
+}
+
+// 充值也走网页，并带上客户端已登录的 token。
+// user-web 是 hash 路由，?token= 位于 fragment 内，不会发到服务端、也不会进 Referer；
+// 网页端读取后写入 localStorage，用 api-token 头请求后端，
+// 与客户端的 Bearer token 走的是同一套 user_token 鉴权。
+Future<void> launchRechargeUrl() async {
+  final token = bind.mainGetLocalOption(key: 'access_token');
+  final url = token.isEmpty
+      ? '$kWebBase/#/recharge'
+      : '$kWebBase/#/recharge?token=${Uri.encodeComponent(token)}';
+  await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+}
+
 final globalKey = GlobalKey<NavigatorState>();
 final navigationBarKey = GlobalKey();
 

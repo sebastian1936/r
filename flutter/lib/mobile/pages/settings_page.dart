@@ -266,79 +266,6 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
     }
   }
 
-  void showRechargeConfirm() {
-    Get.defaultDialog(
-      title: "重要事项",
-      middleText: "充值完成后，选择对应的线路，默认是普通版线路",
-      textCancel: "取消",
-      textConfirm: "确定",
-      onConfirm: () {
-        Get.back(); // 关闭询问框
-        rechargeDialog(); // 弹出真正的输入表单框
-      },
-    );
-  }
-  // 充值对话框
-  void rechargeDialog() {
-    final cardController = TextEditingController();
-
-    Get.defaultDialog(
-      title: "会员充值",
-      content: Column(
-        children: [
-          Text("当前账号: ${gFFI.userModel.userName.value}"),
-          const SizedBox(height: 10),
-          TextField(
-            controller: cardController,
-            decoration: const InputDecoration(
-              labelText: "请输入卡密",
-              border: OutlineInputBorder(),
-            ),
-          ),
-        ],
-      ).marginSymmetric(horizontal: 20),
-      textConfirm: "立即充值",
-      onConfirm: () async {
-        String cardNo = cardController.text.trim();
-        if (cardNo.isEmpty) {
-          Get.snackbar("提示", "卡密不能为空");
-          return;
-        }
-        await _doRecharge(cardNo);
-      },
-      textCancel: "取消",
-    );
-  }
-
-  // 请求充值接口
-  Future<void> _doRecharge(String cardNo) async {
-    try {
-      // 后台接口：POST /api/recharge（RustAuth，用登录态 token 鉴权，用户身份由后台取）
-      final response = await http.post(
-        Uri.parse('$kApiBase/api/recharge'),
-        headers: {
-          "Content-Type": "application/json",
-          ...getHttpHeaders(),
-        },
-        body: jsonEncode({
-          "card_no": cardNo,
-        }),
-      );
-
-      final data = jsonDecode(response.body);
-      if (data is Map && data['code'] == 0) {
-        if (Get.isDialogOpen!) Get.back();
-        Get.snackbar("成功", "充值成功！到期时间：${data['expire_time'] ?? ''}");
-        // 充值成功后建议刷新一次有效期
-        _doQueryExpiry();
-      } else {
-        Get.snackbar("充值失败", (data is Map ? data['msg'] : null) ?? "错误代码: ${data is Map ? data['code'] : response.statusCode}");
-      }
-    } catch (e) {
-      Get.snackbar("错误", "连接服务器失败: $e");
-    }
-  }
-
   // 查询有效期方法
   Future<void> _doQueryExpiry() async {
     try {
@@ -379,107 +306,6 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
       Get.snackbar("错误", "无法获取有效期: $e");
     }
   }
-
-  void showRegisterConfirm() {
-    Get.defaultDialog(
-      title: "重要事项",
-      middleText: "1.多个设备，只用一个账号\n2.被控无需登录\n3.牢记账号",
-      textCancel: "取消",
-      textConfirm: "确定",
-      onConfirm: () {
-        Get.back(); // 关闭询问框
-        registerDialog(); // 弹出真正的输入表单框
-      },
-    );
-  }
-
-  void registerDialog() {
-    final nameController = TextEditingController();
-    final pwdController = TextEditingController();
-    final cardController = TextEditingController();
-    final regExp = RegExp(r'^[a-zA-Z0-9]+$');
-
-    Get.defaultDialog(
-      title: "用户注册",
-      content: Column(
-        children: [
-          TextField(
-            controller: nameController,
-            decoration: InputDecoration(labelText: "请输入账号 (2-18位)"),
-          ),
-          TextField(
-            controller: pwdController,
-            obscureText: false, // 明文展示
-            decoration: InputDecoration(labelText: "请输入密码 (6-18位)"),
-          ),
-          TextField(
-            controller: cardController,
-            decoration: InputDecoration(labelText: "请输入卡密"),
-          ),
-        ],
-      ).marginSymmetric(horizontal: 20),
-      textConfirm: "提交注册",
-      onConfirm: () async {
-        String name = nameController.text.trim();
-        String pwd = pwdController.text.trim();
-        String cardNo = cardController.text.trim();
-
-        if (name.length < 2 || name.length > 18 || !regExp.hasMatch(name)) {
-          Get.snackbar("错误", "账号必须为2-18位字母或数字");
-          return;
-        }
-        if (pwd.length < 6 || pwd.length > 18 || !regExp.hasMatch(pwd)) {
-          Get.snackbar("错误", "密码必须为6-18位字母或数字");
-          return;
-        }
-        if (cardNo.isEmpty) {
-          Get.snackbar("错误", "请输入卡密");
-          return;
-        }
-
-        await _doRegister(name, pwd, cardNo);
-      },
-      textCancel: "取消",
-    );
-  }
-
-  Future<void> _doRegister(String name, String password, String cardNo) async {
-    try {
-      // 与网页端一致：POST /api/admin/user/register
-      final response = await http.post(
-        Uri.parse('$kApiBase/api/admin/user/register'),
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode({
-          "username": name,
-          "email": "",
-          "password": password,
-          "confirm_password": password,
-          "card_no": cardNo,
-        }),
-      );
-
-      // 后端统一返回 HTTP 200 + {code, message, data}，需按 code 判断成败
-      bool ok = false;
-      String msg = "";
-      try {
-        final body = jsonDecode(response.body);
-        if (body is Map) {
-          ok = body['code'] == 0;
-          msg = (body['message'] ?? body['msg'] ?? '').toString();
-        }
-      } catch (_) {}
-
-      if (ok) {
-        if (Get.isDialogOpen!) Get.back(); // 安全关闭对话框
-        Get.snackbar("成功", "注册成功，请登录");
-      } else {
-        Get.snackbar("失败", msg.isNotEmpty ? msg : "注册失败: ${response.body}");
-      }
-    } catch (e) {
-      Get.snackbar("错误", "无法连接到服务器: $e");
-    }
-  }
-
 
   @override
   Widget build(BuildContext context) {
@@ -900,12 +726,8 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                   leading: const Icon(Icons.person_add),
 
                   onPressed: (context) {
-                    if (gFFI.userModel.userName.value.isEmpty) {
-                      showRegisterConfirm();
-                    } else {
-                      // 如果已登录，可以选择提示用户
-                      Get.snackbar("提示", "您已处于登录状态");
-                    }
+                    // 客户端内不注册，用系统浏览器打开注册地址
+                    launchRegisterUrl();
                   },
                 ),
 
@@ -929,7 +751,8 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                   leading: const Icon(Icons.card_membership),
                   onPressed: (context) {
                     if (gFFI.userModel.userName.value.isNotEmpty) {
-                      showRechargeConfirm();
+                      // 客户端内不充值，用系统浏览器打开网页充值（带登录 token）
+                      launchRechargeUrl();
                     } else {
                       Get.snackbar("提示", "请先登录/注册");
                     }
