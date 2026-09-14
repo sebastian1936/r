@@ -292,8 +292,10 @@ jobs:
   build-for-windows-sciter:
     name: ${{ matrix.job.target }} (${{ matrix.job.os }})
     runs-on: ${{ matrix.job.os }}
-    # Temporarily disable this action due to additional test is needed.
-    # if: false
+    # 32 位 Sciter 包已下线：不再需要，且新版 rustup 拒绝安装 i686 host 工具链
+    # （需要 --force-non-host 才能装，装完 rustup default 仍会报 host 校验错误）。
+    # 需要恢复时，同时把下面 Rust 工具链安装步骤改回可用写法。
+    if: false
     strategy:
       fail-fast: false
       matrix:
@@ -337,7 +339,9 @@ jobs:
             --profile minimal \
             --no-self-update \
             --force-non-host
-          rustup default "nightly-2023-10-13-${{ matrix.job.target }}"
+          # 不用 `rustup default`（它也会做 host 校验并报错），
+          # 改用 RUSTUP_TOOLCHAIN 指定工具链，后续步骤的 cargo/rustc 都会用它。
+          echo "RUSTUP_TOOLCHAIN=nightly-2023-10-13-${{ matrix.job.target }}" >> $GITHUB_ENV
 
       - uses: Swatinem/rust-cache@v2
         with:
