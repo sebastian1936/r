@@ -58,11 +58,13 @@ const String kNodeConfigUrl = kUseHttpApi
     ? 'http://apple-1300444545.cos-website.ap-nanjing.myqcloud.com'
     : 'https://apple-1300444545.cos-website.ap-nanjing.myqcloud.com';
 
-// 网页端地址：注册、充值统一在浏览器里完成。
-const String kWebBase = 'https://api.nemocc.top';
+// 网页端（user-web）地址：注册、充值统一在浏览器里完成。
+// 后端挂载点是 /_user（见 ra/http/router/router.go: g.StaticFS("/_user", ...)），
+// 直接跳到 /_user/#/xxx，避免再经过 "/" 的 302 跳转。
+const String kWebBase = '$kApiBase/_user';
 
 // 注册统一走网页：客户端内不提供注册，点击注册按钮时用系统浏览器打开该地址。
-const String kRegisterUrl = kWebBase;
+const String kRegisterUrl = '$kWebBase/#/register';
 
 Future<void> launchRegisterUrl() async {
   await launchUrl(Uri.parse(kRegisterUrl),
