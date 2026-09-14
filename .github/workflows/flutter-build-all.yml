@@ -319,11 +319,18 @@ jobs:
           version: ${{ env.LLVM_VERSION }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: nightly-2023-10-13-${{ matrix.job.target }} # must use nightly here, because of abi_thiscall feature required
-          targets: ${{ matrix.job.target }}
-          components: "rustfmt"
+        # 32 位 Sciter 包必须用它（abi_thiscall 特性需要 nightly）。
+        # 新版 rustup 会拒绝安装非本机 host 的工具链（runner 是 x86_64），
+        # 所以这里直接用 rustup 并加 --force-non-host，不能再走 dtolnay/rust-toolchain。
+        shell: bash
+        run: |
+          rustup toolchain install "nightly-2023-10-13-${{ matrix.job.target }}" \
+            --target "${{ matrix.job.target }}" \
+            --component rustfmt \
+            --profile minimal \
+            --no-self-update \
+            --force-non-host
+          rustup default "nightly-2023-10-13-${{ matrix.job.target }}"
 
       - uses: Swatinem/rust-cache@v2
         with:
