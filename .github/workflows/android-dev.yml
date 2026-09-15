@@ -230,3 +230,31 @@ jobs:
         with:
           name: rustdesk-android-${{ matrix.job.arch }}
           path: apk-out/*.apk
+
+  # 把两个架构的 APK 汇总后发布到 Release（tag: dev-1.4.4，预发布）
+  # Windows 流水线也往同一个 Release 传，所以这里用 gh release upload --clobber，
+  # Release 不存在时才创建，避免两条流水线同时跑时互相冲突。
+  publish-release:
+    name: Publish Release (dev-1.4.4)
+    needs: [build-android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download APK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rustdesk-android-*
+          merge-multiple: true
+          path: ./apk-out
+
+      - name: Upload to Release dev-1.4.4
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view dev-1.4.4 >/dev/null 2>&1 || \
+            gh release create dev-1.4.4 \
+              --prerelease \
+              --title "Dev 1.4.4 Build" \
+              --notes "dev/1.4.4 分支自动构建：Android(host/controller) + Windows" || true
+          gh release upload dev-1.4.4 ./apk-out/*.apk --clobber

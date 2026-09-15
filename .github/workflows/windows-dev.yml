@@ -183,3 +183,28 @@ jobs:
         with:
           name: rustdesk-windows-x86_64
           path: Out/
+
+  # 与 Android 流水线共用同一个 Release（tag: dev-1.4.4，预发布）
+  publish-release:
+    name: Publish Release (dev-1.4.4)
+    needs: [build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: rustdesk-windows-x86_64
+          path: ./Out
+
+      - name: Upload to Release dev-1.4.4
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view dev-1.4.4 >/dev/null 2>&1 || \
+            gh release create dev-1.4.4 \
+              --prerelease \
+              --title "Dev 1.4.4 Build" \
+              --notes "dev/1.4.4 分支自动构建：Android(host/controller) + Windows" || true
+          gh release upload dev-1.4.4 ./Out/* --clobber
