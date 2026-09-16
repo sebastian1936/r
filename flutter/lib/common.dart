@@ -2712,6 +2712,14 @@ Map<String, String> getHttpHeaders() {
   };
 }
 
+/// 会话的缩放方式：原始尺寸 original / 适应窗口 adaptive / 自定义 custom。
+/// 未设置过（空值，例如新会话、该连接没保存过缩放方式）时，
+/// 默认按“适应窗口”显示，避免一上来就是原始尺寸需要手动缩放。
+Future<String> getSessionViewStyle(SessionID sessionId) async {
+  final style = await bind.sessionGetViewStyle(sessionId: sessionId) ?? '';
+  return style.isEmpty ? kRemoteViewStyleAdaptive : style;
+}
+
 // Simple wrapper of built-in types for reference use.
 class SimpleWrapper<T> {
   T value;

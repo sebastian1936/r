@@ -2132,8 +2132,8 @@ class CanvasModel with ChangeNotifier {
   updateSize() => _size = getSize();
 
   updateViewStyle({refreshMousePos = true, notify = true}) async {
-    final style = await bind.sessionGetViewStyle(sessionId: sessionId);
-    if (style == null) {
+    final style = await getSessionViewStyle(sessionId);
+    if (style.isEmpty) {
       return;
     }
 
@@ -2205,7 +2205,7 @@ class CanvasModel with ChangeNotifier {
 
   tryUpdateScrollStyle(Duration duration, String? style) async {
     if (_scrollStyle == ScrollStyle.scrollauto) return;
-    style ??= await bind.sessionGetViewStyle(sessionId: sessionId);
+    style ??= await getSessionViewStyle(sessionId);
     if (style != kRemoteViewStyleOriginal && style != kRemoteViewStyleCustom) {
       return;
     }

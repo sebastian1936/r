@@ -109,7 +109,7 @@ abstract class CustomScaleControls<T extends StatefulWidget> extends State<T> {
           sessionId: ffi.sessionId,
           k: kCustomScalePercentKey,
           v: v.toString());
-      final curStyle = await bind.sessionGetViewStyle(sessionId: ffi.sessionId);
+      final curStyle = await getSessionViewStyle(ffi.sessionId);
       if (curStyle != kRemoteViewStyleCustom) {
         await bind.sessionSetViewStyle(
             sessionId: ffi.sessionId, value: kRemoteViewStyleCustom);

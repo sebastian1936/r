@@ -844,8 +844,7 @@ class ScreenAdjustor {
   }
 
   Future<bool> isWindowCanBeAdjusted() async {
-    final viewStyle =
-        await bind.sessionGetViewStyle(sessionId: ffi.sessionId) ?? '';
+    final viewStyle = await getSessionViewStyle(ffi.sessionId);
     if (viewStyle != kRemoteViewStyleOriginal) {
       return false;
     }
@@ -1048,7 +1047,7 @@ class _DisplayMenuState extends State<_DisplayMenu> {
 
   Widget _customControlsIfCustomSelected({ValueChanged<int>? onChanged}) {
     return futureBuilder(future: () async {
-      final current = await bind.sessionGetViewStyle(sessionId: ffi.sessionId);
+      final current = await getSessionViewStyle(ffi.sessionId);
       return current == kRemoteViewStyleCustom;
     }(), hasData: (data) {
       final isCustom = data as bool;
@@ -1065,8 +1064,7 @@ class _DisplayMenuState extends State<_DisplayMenu> {
 
   scrollStyle(_IconSubmenuButtonState state, ColorScheme colorScheme) {
     return futureBuilder(future: () async {
-      final viewStyle =
-          await bind.sessionGetViewStyle(sessionId: ffi.sessionId) ?? '';
+      final viewStyle = await getSessionViewStyle(ffi.sessionId);
       final visible = viewStyle == kRemoteViewStyleOriginal ||
           viewStyle == kRemoteViewStyleCustom;
       final scrollStyle =
