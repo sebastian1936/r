@@ -1,5 +1,6 @@
 package com.starcaretech.a.adb
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
@@ -13,6 +14,8 @@ import java.util.concurrent.TimeUnit
  *  - `_adb-tls-pairing._tcp`：无线调试"使用配对码配对设备"时广播（含端口）
  *  - `_adb-tls-connect._tcp`：无线调试主服务（TLS ADB 端口）
  */
+// 仅 Android 11+ 路径使用；getAttributes() 为 API 33，低版本走 try/catch 兜底
+@SuppressLint("NewApi")
 object AdbDiscovery {
 
     const val TYPE_PAIRING = "_adb-tls-pairing._tcp"

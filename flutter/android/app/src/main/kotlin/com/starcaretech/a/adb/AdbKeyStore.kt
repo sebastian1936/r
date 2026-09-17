@@ -1,5 +1,6 @@
 package com.starcaretech.a.adb
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.util.Base64
 import org.bouncycastle.asn1.x500.X500Name
@@ -33,6 +34,9 @@ import org.conscrypt.Conscrypt
  * 配对时把 [publicKeyString]（ANDROID_PUBKEY base64 格式）作为 PeerInfo 发给设备，
  * 设备保存为信任公钥；此后 TLS 连接（5555）出示同一张证书即可被 adbd 接受。
  */
+// 本类只在 Android 11+（API 30，无线调试）路径上被加载，X509ExtendedKeyManager 等 API24+
+// 引用在低版本系统不会触发；入口已由 AdbAuthManager.isSupported() 拦截。
+@SuppressLint("NewApi")
 object AdbKeyStore {
 
     private const val DIR = "adb_identity"
@@ -135,13 +139,13 @@ object AdbKeyStore {
         require(n.bitLength() == 2048)
 
         val words = 64
-        val b32 = BigInteger.TWO.pow(32)
+        val b32 = BigInteger.valueOf(2).pow(32)
         // n0inv = -1 / n[0] mod 2^32
         val n0 = n.mod(b32)
         val inv = n0.modInverse(b32)
         val n0inv = b32.subtract(inv).mod(b32)
         // rr = (2^2048)^2 mod n
-        val rr = BigInteger.TWO.pow(2048 * 2).mod(n)
+        val rr = BigInteger.valueOf(2).pow(2048 * 2).mod(n)
 
         val out = ByteArray(3 * 4 + 2 * (words * 4))
         putU32Le(out, 0, words.toLong())
@@ -214,6 +218,7 @@ object AdbKeyStore {
         return socket
     }
 
+    @SuppressLint("NewApi")
     private class FixedKeyManager(private val identity: Identity) : X509ExtendedKeyManager() {
         private val alias = "adb"
 
