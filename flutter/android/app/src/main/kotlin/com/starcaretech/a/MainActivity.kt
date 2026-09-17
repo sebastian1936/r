@@ -33,6 +33,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import kotlin.concurrent.thread
+import com.starcaretech.a.adb.AdbAuthManager
 
 
 class MainActivity : FlutterActivity() {
@@ -282,6 +283,45 @@ class MainActivity : FlutterActivity() {
                 }
                 "on_voice_call_closed" -> {
                     onVoiceCallClosed()
+                }
+                "adb_auth_status" -> {
+                    // ADB 一键授权状态：系统是否支持 + 是否已授权
+                    result.success(
+                        mapOf(
+                            "supported" to AdbAuthManager.isSupported(),
+                            "granted" to AdbAuthManager.isWriteSecureSettingsGranted(context),
+                            "reason" to (AdbAuthManager.unsupportedReason() ?: "")
+                        )
+                    )
+                }
+                "adb_pair_and_grant" -> {
+                    // args: 6 位配对码；自动 mDNS 扫描配对服务，全程后台线程
+                    val code = call.arguments as? String
+                    if (code == null || code.length != 6) {
+                        result.error("-1", "配对码必须为 6 位数字", null)
+                        return@setMethodCallHandler
+                    }
+                    if (!AdbAuthManager.isSupported()) {
+                        result.error("-1", AdbAuthManager.unsupportedReason() ?: "当前系统不支持", null)
+                        return@setMethodCallHandler
+                    }
+                    thread {
+                        try {
+                            val guid = AdbAuthManager.pairAndGrantAuto(context, code)
+                            activity.runOnUiThread { result.success(guid) }
+                        } catch (e: Exception) {
+                            activity.runOnUiThread {
+                                result.error("-1", e.message ?: "授权失败，请重试", null)
+                            }
+                        }
+                    }
+                }
+                "adb_repair" -> {
+                    // 手动触发一次无障碍自愈
+                    thread {
+                        val ok = AdbAuthManager.repairAccessibility(context)
+                        activity.runOnUiThread { result.success(ok) }
+                    }
                 }
                 else -> {
                     result.error("-1", "No such method", null)

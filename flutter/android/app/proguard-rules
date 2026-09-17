@@ -5,3 +5,8 @@
 
 # Keep rustls-platform-verifier classes for JNI
 -keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }
+
+# ADB 无线配对：Conscrypt（JNI + provider）与 BouncyCastle（HKDF/X509 构建）
+-keep class org.conscrypt.** { *; }
+-dontwarn org.conscrypt.**
+-dontwarn org.bouncycastle.**

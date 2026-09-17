@@ -614,7 +614,211 @@ class _PermissionCheckerState extends State<PermissionChecker> {
                 ]),
           PermissionRow(translate("Enable clipboard"), serverModel.clipboardOk,
               serverModel.toggleClipboard),
+          const AdbAuthSection(),
         ]));
+  }
+}
+
+/// ADB 一键授权（无线调试配对）入口：配对成功后获得 WRITE_SECURE_SETTINGS，
+/// 系统解绑无障碍时可自动恢复（重启/升级 App 不丢失）
+class AdbAuthSection extends StatefulWidget {
+  const AdbAuthSection({Key? key}) : super(key: key);
+
+  @override
+  State<AdbAuthSection> createState() => _AdbAuthSectionState();
+}
+
+class _AdbAuthSectionState extends State<AdbAuthSection> {
+  bool _supported = true;
+  bool _granted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  _refresh() async {
+    try {
+      final dynamic status = await gFFI.invokeMethod("adb_auth_status", null);
+      if (!mounted) return;
+      setState(() {
+        _supported = (status["supported"] ?? false) as bool;
+        _granted = (status["granted"] ?? false) as bool;
+      });
+    } catch (_) {}
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Android 11 以下系统没有无线调试，不展示
+    if (!_supported) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Divider(height: 20),
+        Row(children: [
+          Icon(
+            _granted ? Icons.verified_user_outlined : Icons.shield_outlined,
+            size: 22,
+            color: _granted ? Colors.green : Colors.grey,
+          ).marginOnly(right: 10),
+          Expanded(
+            child: Text(
+              _granted ? "权限自动恢复已开启" : "权限自动恢复（推荐）",
+              style: const TextStyle(fontSize: 14),
+            ),
+          ),
+        ]),
+        Padding(
+          padding: const EdgeInsets.only(left: 32, top: 4),
+          child: Text(
+            _granted
+                ? "无障碍服务被系统关闭时将自动重新开启"
+                : "通过系统「无线调试」配对一次即可，重启/升级不失效",
+            style: const TextStyle(fontSize: 12, color: MyTheme.darkGray),
+          ),
+        ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Container(
+            margin: const EdgeInsets.only(left: 32, top: 8),
+            child: _granted
+                ? TextButton(
+                    style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        minimumSize: const Size(0, 32),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                    onPressed: () async {
+                      await gFFI.invokeMethod("adb_repair", null);
+                      showToast("已执行一次恢复");
+                    },
+                    child: const Text("立即恢复", style: TextStyle(fontSize: 13)))
+                : ElevatedButton.icon(
+                    icon: const Icon(Icons.bolt, size: 18),
+                    style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 12)),
+                    onPressed: () async {
+                      final ok = await showDialog<bool>(
+                          context: context,
+                          builder: (_) => const _AdbPairDialog());
+                      if (ok == true) {
+                        await _refresh();
+                        checkService();
+                        gFFI.serverModel.checkAndroidPermission();
+                      }
+                    },
+                    label: const Text("一键开启", style: TextStyle(fontSize: 13))),
+          ),
+        )
+      ],
+    );
+  }
+}
+
+/// 无线调试配对对话框：引导用户拿到 6 位配对码并执行配对授权
+class _AdbPairDialog extends StatefulWidget {
+  const _AdbPairDialog({Key? key}) : super(key: key);
+
+  @override
+  State<_AdbPairDialog> createState() => _AdbPairDialogState();
+}
+
+class _AdbPairDialogState extends State<_AdbPairDialog> {
+  final _controller = TextEditingController();
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  _submit() async {
+    final code = _controller.text.trim();
+    if (code.length != 6) {
+      setState(() => _error = "请输入 6 位配对码");
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await gFFI.invokeMethod("adb_pair_and_grant", code);
+      if (!mounted) return;
+      Navigator.of(context).pop(true);
+      showToast("授权成功，权限自动恢复已开启");
+    } on PlatformException catch (e) {
+      setState(() {
+        _busy = false;
+        _error = e.message ?? "授权失败，请重试";
+      });
+    } catch (e) {
+      setState(() {
+        _busy = false;
+        _error = "授权失败，请重试";
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text("无线调试一键授权"),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            "操作步骤：",
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            "1. 打开系统「开发者选项 → 无线调试」\n"
+            "2. 点击「使用配对码配对设备」\n"
+            "3. 将页面上显示的 6 位配对码输入下方\n"
+            "4. 配对页面请保持停留，直到提示成功",
+            style: TextStyle(fontSize: 13, height: 1.5),
+          ),
+          const SizedBox(height: 14),
+          TextField(
+            controller: _controller,
+            enabled: !_busy,
+            keyboardType: TextInputType.number,
+            maxLength: 6,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: InputDecoration(
+              labelText: "6 位配对码",
+              counterText: "",
+              border: const OutlineInputBorder(),
+              errorText: _error,
+            ),
+            onSubmitted: (_) => _busy ? null : _submit(),
+          ),
+          if (_busy) ...[
+            const SizedBox(height: 12),
+            Row(children: const [
+              SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2)),
+              SizedBox(width: 10),
+              Expanded(child: Text("正在配对并授权，请稍候…",
+                  style: TextStyle(fontSize: 13)))
+            ])
+          ]
+        ],
+      ),
+      actions: [
+        TextButton(
+            onPressed: _busy ? null : () => Navigator.of(context).pop(false),
+            child: Text(translate("Cancel"))),
+        ElevatedButton(onPressed: _busy ? null : _submit, child: const Text("确定")),
+      ],
+    );
   }
 }
 

@@ -3,6 +3,7 @@ package com.starcaretech.a
 import android.app.Application
 import android.util.Log
 import ffi.FFI
+import com.starcaretech.a.adb.AdbSelfHeal
 
 class MainApplication : Application() {
     companion object {
@@ -18,5 +19,7 @@ class MainApplication : Application() {
             FFI.setHardOption("conn-type", "outgoing")
         }
         FFI.onAppStart(applicationContext)
+        // ADB 授权后的无障碍自愈监控（仅 Android 11+ 实际生效）
+        AdbSelfHeal.start(applicationContext)
     }
 }
