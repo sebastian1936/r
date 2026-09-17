@@ -139,10 +139,11 @@ object AdbPairingClient {
         val header = ByteArray(HEADER_SIZE).also { input.readFully(it) }
         val version = header[0].toInt() and 0xff
         val type = header[1].toInt() and 0xff
-        val payload = ((header[2].toInt() and 0xff) shl 24)
-                or ((header[3].toInt() and 0xff) shl 16)
-                or ((header[4].toInt() and 0xff) shl 8)
-                or (header[5].toInt() and 0xff)
+        // 大端 u32（运算符不能放在行首，否则 Kotlin 会把上一行当成完整语句）
+        var payload = header[2].toInt() and 0xff
+        payload = (payload shl 8) or (header[3].toInt() and 0xff)
+        payload = (payload shl 8) or (header[4].toInt() and 0xff)
+        payload = (payload shl 8) or (header[5].toInt() and 0xff)
         if (version != 1) throw PairingException("配对协议版本不匹配: $version")
         if (type != expectedType) throw PairingException("配对包类型不匹配: 期望 $expectedType 实际 $type")
         if (payload <= 0 || payload > MAX_PAYLOAD) throw PairingException("配对包长度异常: $payload")

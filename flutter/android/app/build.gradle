@@ -154,9 +154,11 @@ dependencies {
     implementation("org.jetbrains.kotlin:kotlin-stdlib") { version { strictly("1.9.10") } }
     implementation 'com.caverock:androidsvg-aar:1.4'
     implementation "rustls:rustls-platform-verifier:0.1.1"
-    // ADB 无线配对（SPAKE2 over Curve25519 需要自实现，这里只用 BC 生成 X509 证书与 HKDF）
-    // jdk15to18：兼容 minSdk 22（工程未开 desugaring），避免 jdk18on 潜在的高版本 JDK API 引用
-    implementation 'org.bouncycastle:bcprov-jdk15to18:1.78.1'
+    // ADB 无线配对（SPAKE2 over Curve25519 需要自实现，BC 只用于 X509 证书与 HKDF）
+    // 证书构建类（JcaX509v3CertificateBuilder 等）在 bcpkix 中，bcprov 只提供底层算法，
+    // bcpkix 会传递引入同版本 bcprov。
+    // jdk15to18：兼容 minSdk 22（工程未开 desugaring），避免高版本 JDK API 引用
+    implementation 'org.bouncycastle:bcpkix-jdk15to18:1.78.1'
     // TLS 1.3 exporter keying material（adb-label）需要 Conscrypt 公开 API
     implementation 'org.conscrypt:conscrypt-android:2.5.2'
 }
