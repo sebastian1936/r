@@ -295,8 +295,10 @@ class MainActivity : FlutterActivity() {
                     )
                 }
                 "adb_pair_and_grant" -> {
-                    // args: 6 位配对码；自动 mDNS 扫描配对服务，全程后台线程
-                    val code = call.arguments as? String
+                    // args: Map{code: String, port: Int?}；port 提供时直连不走 mDNS
+                    val args = call.arguments as? Map<*, *>
+                    val code = args?.get("code") as? String
+                    val port = (args?.get("port") as? Number)?.toInt()
                     if (code == null || code.length != 6) {
                         result.error("-1", "配对码必须为 6 位数字", null)
                         return@setMethodCallHandler
@@ -307,7 +309,13 @@ class MainActivity : FlutterActivity() {
                     }
                     thread {
                         try {
-                            val guid = AdbAuthManager.pairAndGrantAuto(context, code)
+                            // 有端口直接连（配对页面切后台后 mDNS 广播会停，但端口可能还活几秒；
+                            //  分屏模式下配对页保持前台，端口持续有效）
+                            val guid = if (port != null && port > 0) {
+                                AdbAuthManager.pairAndGrant(context, code, "127.0.0.1", port)
+                            } else {
+                                AdbAuthManager.pairAndGrantAuto(context, code)
+                            }
                             activity.runOnUiThread { result.success(guid) }
                         } catch (e: Exception) {
                             activity.runOnUiThread {

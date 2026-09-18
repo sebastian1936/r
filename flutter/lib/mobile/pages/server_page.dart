@@ -725,28 +725,32 @@ class _AdbPairDialog extends StatefulWidget {
 }
 
 class _AdbPairDialogState extends State<_AdbPairDialog> {
-  final _controller = TextEditingController();
+  final _codeController = TextEditingController();
+  final _portController = TextEditingController();
   bool _busy = false;
   String? _error;
 
   @override
   void dispose() {
-    _controller.dispose();
+    _codeController.dispose();
+    _portController.dispose();
     super.dispose();
   }
 
   _submit() async {
-    final code = _controller.text.trim();
+    final code = _codeController.text.trim();
     if (code.length != 6) {
       setState(() => _error = "请输入 6 位配对码");
       return;
     }
+    final portStr = _portController.text.trim();
+    final port = int.tryParse(portStr);
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
-      await gFFI.invokeMethod("adb_pair_and_grant", code);
+      await gFFI.invokeMethod("adb_pair_and_grant", {"code": code, "port": port});
       if (!mounted) return;
       Navigator.of(context).pop(true);
       showToast("授权成功，权限自动恢复已开启");
@@ -767,50 +771,103 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
   Widget build(BuildContext context) {
     return AlertDialog(
       title: const Text("无线调试一键授权"),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            "操作步骤：",
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-          ),
-          const SizedBox(height: 6),
-          const Text(
-            "1. 打开系统「开发者选项 → 无线调试」\n"
-            "2. 点击「使用配对码配对设备」\n"
-            "3. 将页面上显示的 6 位配对码输入下方\n"
-            "4. 配对页面请保持停留，直到提示成功",
-            style: TextStyle(fontSize: 13, height: 1.5),
-          ),
-          const SizedBox(height: 14),
-          TextField(
-            controller: _controller,
-            enabled: !_busy,
-            keyboardType: TextInputType.number,
-            maxLength: 6,
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            decoration: InputDecoration(
-              labelText: "6 位配对码",
-              counterText: "",
-              border: const OutlineInputBorder(),
-              errorText: _error,
+      content: SizedBox(
+        width: double.maxInfinity,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              "操作步骤：",
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
             ),
-            onSubmitted: (_) => _busy ? null : _submit(),
-          ),
-          if (_busy) ...[
+            const SizedBox(height: 6),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.orange.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: const Text(
+                "⚠️ 重要：请用「分屏模式」操作\n"
+                "上屏：系统配对码页面（保持前台）\n"
+                "下屏：本页面填写端口和配对码\n"
+                "切屏会导致配对码失效，分屏可避免",
+                style: TextStyle(fontSize: 12, height: 1.5, color: Colors.deepOrange),
+              ),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              "1. 系统「开发者选项 → 无线调试」\n"
+              "2. 点「使用配对码配对设备」\n"
+              "3. 开分屏，把配对页放上半屏\n"
+              "4. 抄下配对页的端口号和 6 位码填下方",
+              style: TextStyle(fontSize: 12, height: 1.5),
+            ),
             const SizedBox(height: 12),
-            Row(children: const [
-              SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2)),
-              SizedBox(width: 10),
-              Expanded(child: Text("正在配对并授权，请稍候…",
-                  style: TextStyle(fontSize: 13)))
-            ])
-          ]
-        ],
+            Row(
+              children: [
+                const SizedBox(
+                  width: 70,
+                  child: Text("配对端口", style: TextStyle(fontSize: 13)),
+                ),
+                Expanded(
+                  child: TextField(
+                    controller: _portController,
+                    enabled: !_busy,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      hintText: "如 43251",
+                      counterText: "",
+                      border: OutlineInputBorder(),
+                      contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                const SizedBox(
+                  width: 70,
+                  child: Text("配对码", style: TextStyle(fontSize: 13)),
+                ),
+                Expanded(
+                  child: TextField(
+                    controller: _codeController,
+                    enabled: !_busy,
+                    keyboardType: TextInputType.number,
+                    maxLength: 6,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    decoration: InputDecoration(
+                      isDense: true,
+                      hintText: "6 位数字",
+                      counterText: "",
+                      border: const OutlineInputBorder(),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                      errorText: _error,
+                    ),
+                    onSubmitted: (_) => _busy ? null : _submit(),
+                  ),
+                ),
+              ],
+            ),
+            if (_busy) ...[
+              const SizedBox(height: 12),
+              Row(children: const [
+                SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2)),
+                SizedBox(width: 10),
+                Expanded(child: Text("正在配对并授权，请稍候…",
+                    style: TextStyle(fontSize: 13)))
+              ])
+            ]
+          ],
+        ),
       ),
       actions: [
         TextButton(
