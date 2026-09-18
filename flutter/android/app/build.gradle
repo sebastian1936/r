@@ -164,6 +164,20 @@ flutter {
     source '../..'
 }
 
+// AGP 7.3.1 内部调用 com.google.prefab:cli:2.0.0 处理 prefab AAR，
+// 该版本不识别新版 boringssl/libcxx AAR 内置的 riscv64 ABI 目录，
+// configureCMakeRelWithDebInfo 直接抛 "Unknown ABI: riscv64"。
+// 强制升到 2.1.0（首个支持 riscv64 的版本，CLI 参数协议与 2.0.0 兼容）。
+// configurations.all 对 AGP 创建的 detached configuration 同样生效。
+configurations.all {
+    resolutionStrategy.eachDependency { details ->
+        if (details.requested.group == 'com.google.prefab' && details.requested.name == 'cli') {
+            details.useVersion '2.1.0'
+            details.because 'prefab 2.0.0 does not know riscv64 ABI shipped in new prefab AARs'
+        }
+    }
+}
+
 dependencies {
     implementation 'com.google.protobuf:protobuf-javalite:3.20.1'
     implementation "androidx.media:media:1.6.0"
