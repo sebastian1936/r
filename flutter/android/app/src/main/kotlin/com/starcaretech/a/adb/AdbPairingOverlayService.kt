@@ -161,7 +161,7 @@ class AdbPairingOverlayService : Service() {
         container.addView(btnRow)
 
         // 宽度
-        container.layoutParams = LinearLayout.LayoutParams(dp(280), WRAP_CONTENT)
+        container.layoutParams = LinearLayout.LayoutParams(dp(280), WRAP)
 
         // 确定
         okBtn.setOnClickListener {
