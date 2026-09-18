@@ -117,9 +117,16 @@ object AdbConnection {
             }
 
             // ---- OPEN shell ----
+            // 关键：destination 必须带 "shell:" 服务前缀，adbd 按冒号前的服务名路由；
+            // 不带前缀 adbd 找不到服务会直接 CLSE（无输出），命令不会执行。
             val localId = 1L
+            val destination = if (command.startsWith("shell:") || command.startsWith("exec:")) {
+                command
+            } else {
+                "shell:$command"
+            }
             try {
-                send(out, Frame(A_OPEN, localId, 0L, command.toByteArray(StandardCharsets.US_ASCII)))
+                send(out, Frame(A_OPEN, localId, 0L, destination.toByteArray(StandardCharsets.US_ASCII)))
             } catch (e: Exception) {
                 throw AdbException("阶段4-发送命令失败：${e.javaClass.simpleName}: ${e.message}", e)
             }

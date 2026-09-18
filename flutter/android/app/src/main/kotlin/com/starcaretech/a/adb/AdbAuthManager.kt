@@ -118,9 +118,22 @@ object AdbAuthManager {
             throw AuthException("【pm grant 未成功】\n$trimmed")
         }
 
-        // 4. 验证
-        if (!isWriteSecureSettingsGranted(context)) {
-            throw AuthException("授权流程完成但权限未生效")
+        // 4. 验证（授权状态落库可能有轻微延迟，1.5s 内重试 3 次）
+        var granted = isWriteSecureSettingsGranted(context)
+        if (!granted) {
+            for (i in 1..2) {
+                Thread.sleep(1500)
+                granted = isWriteSecureSettingsGranted(context)
+                if (granted) break
+            }
+        }
+        if (!granted) {
+            throw AuthException(
+                "【授权流程完成但权限未生效】\n" +
+                "pm grant 已执行但系统未授予 WRITE_SECURE_SETTINGS，常见原因：\n" +
+                "1. 该 ROM（多见于华为/荣耀部分机型）限制通过无线调试授予安全权限\n" +
+                "2. 需要关闭无线调试后重新配对再试一次\n" +
+                "3. 命令输出：${trimmed.ifEmpty { "(空，标准 AOSP 上表示成功)" }}")
         }
 
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
