@@ -83,6 +83,11 @@ protobuf {
 
 android {
     compileSdkVersion 34
+    // 必须锁定 NDK r27c：org.lsposed.libcxx:libcxx:27 的 libc++ 头要求 Clang 16+，
+    // AGP 7.3.1 默认 NDK 23.1（Clang 12）编译 adb_pairing.cpp 会在 libc++ 头里报
+    // "Libc++ only supports Clang 16 and later" 及大量命名空间语法错误。
+    // CI 由 nttld/setup-ndk@v1 安装 r27c 到 SDK ndk 目录；本地构建在 SDK Manager 装同版本即可。
+    ndkVersion "27.2.12479018"
     sourceSets {
         main.java.srcDirs += 'src/main/kotlin'
 
