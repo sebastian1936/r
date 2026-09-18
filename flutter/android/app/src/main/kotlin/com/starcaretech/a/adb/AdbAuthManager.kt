@@ -60,20 +60,34 @@ object AdbAuthManager {
             throw AuthException("配对失败：请确认配对码正确且页面停留在此界面", e)
         }
 
-        // 2. 找 TLS connect 端口（mDNS；找不到则尝试固定端口兜底）
+        // 配对刚完成，connect 服务可能还没就绪，等一下再连
+        Thread.sleep(2000)
+
+        // 2. 找 TLS connect 端口（mDNS 获取端口，host 强制 127.0.0.1 本机回环）
         val connect = discoverConnect(context)
 
-        // 3. pm grant
-        val output = try {
-            AdbConnection.shell(
-                identity,
-                connect.host,
-                connect.port,
-                "pm grant ${context.packageName} $PERM_WRITE_SECURE_SETTINGS",
-                timeoutMs = 10_000
-            )
-        } catch (e: Exception) {
-            throw AuthException("已配对但连接 adbd 失败（host=${connect.host}:${connect.port}）", e)
+        // 3. pm grant（连接失败重试 3 次，每次间隔 2s）
+        var lastError: Exception? = null
+        var output = ""
+        for (attempt in 1..3) {
+            try {
+                output = AdbConnection.shell(
+                    identity,
+                    connect.host,
+                    connect.port,
+                    "pm grant ${context.packageName} $PERM_WRITE_SECURE_SETTINGS",
+                    timeoutMs = 10_000
+                )
+                lastError = null
+                break
+            } catch (e: Exception) {
+                lastError = e
+                Log.w(TAG, "连接 adbd 失败 尝试 $attempt/3 host=${connect.host}:${connect.port}", e)
+                if (attempt < 3) Thread.sleep(2000)
+            }
+        }
+        if (lastError != null) {
+            throw AuthException("已配对但连接 adbd 失败（host=${connect.host}:${connect.port}）", lastError)
         }
         val trimmed = output.trim()
         if (trimmed.isNotEmpty()) {
@@ -99,7 +113,8 @@ object AdbAuthManager {
     fun pairAndGrantAuto(context: Context, pairingCode: String): String {
         val service = AdbDiscovery.findFirst(context, AdbDiscovery.TYPE_PAIRING, timeoutMs = 20_000)
             ?: throw AuthException("未发现配对服务：请确认无线调试配对码页面已打开")
-        return pairAndGrant(context, pairingCode, service.host, service.port)
+        // host 强制 127.0.0.1（本机连本机）
+        return pairAndGrant(context, pairingCode, "127.0.0.1", service.port)
     }
 
     fun isWriteSecureSettingsGranted(context: Context): Boolean =
@@ -134,7 +149,10 @@ object AdbAuthManager {
     }
 
     private fun discoverConnect(context: Context): AdbDiscovery.DiscoveredService {
-        AdbDiscovery.findFirst(context, AdbDiscovery.TYPE_CONNECT, timeoutMs = 15_000)?.let { return it }
+        // 只从 mDNS 获取端口，host 强制 127.0.0.1（本机连本机回环最可靠）
+        AdbDiscovery.findFirst(context, AdbDiscovery.TYPE_CONNECT, timeoutMs = 15_000)?.let {
+            return AdbDiscovery.DiscoveredService(it.serviceName, "127.0.0.1", it.port, it.attributes)
+        }
         // 兜底：部分 ROM（或旧版无线调试）监听固定 5555
         return AdbDiscovery.DiscoveredService("fallback", "127.0.0.1", 5555, emptyMap())
     }
