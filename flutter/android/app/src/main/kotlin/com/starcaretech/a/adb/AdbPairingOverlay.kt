@@ -58,26 +58,29 @@ object AdbPairingOverlay {
             setPadding(0, 0, 0, dp(ctx, 8))
         })
         container.addView(TextView(ctx).apply {
-            text = "保持配对页前台，在下方填入\n端口号和配对码后点确定"
+            text = "1. 系统「开发者选项 → 无线调试」\n" +
+                    "2. 点「使用配对码配对设备」\n" +
+                    "3. 页面上有一行「IP:端口」，抄到第一框\n" +
+                    "4. 页面上的 6 位配对码，抄到第二框"
             setTextColor(0xCCCCCC); textSize = 11f
             setPadding(0, 0, 0, dp(ctx, 12))
         })
 
         container.addView(TextView(ctx).apply {
-            text = "配对端口"; setTextColor(0xAAAAAA); textSize = 12f
+            text = "IP:端口"; setTextColor(0xAAAAAA); textSize = 12f
         })
-        val portEdit = EditText(ctx).apply {
-            inputType = InputType.TYPE_CLASS_NUMBER
-            hint = "如 43251"
+        val addrEdit = EditText(ctx).apply {
+            inputType = InputType.TYPE_TEXT_VARIATION_URI
+            hint = "如 192.168.1.10:43251"
             setTextColor(Color.WHITE); setHintTextColor(0x666666); textSize = 13f
             background = roundBg(0x33FFFFFF, dp(ctx, 4))
             setPadding(dp(ctx, 8), dp(ctx, 6), dp(ctx, 8), dp(ctx, 6))
             layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(ctx, 8) }
         }
-        container.addView(portEdit)
+        container.addView(addrEdit)
 
         container.addView(TextView(ctx).apply {
-            text = "配对码（6 位）"; setTextColor(0xAAAAAA); textSize = 12f
+            text = "6 位配对码"; setTextColor(0xAAAAAA); textSize = 12f
         })
         val codeEdit = EditText(ctx).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
@@ -142,23 +145,29 @@ object AdbPairingOverlay {
 
         okBtn.setOnClickListener {
             val code = codeEdit.text.toString().trim()
-            val port = portEdit.text.toString().trim().toIntOrNull()
+            val addr = addrEdit.text.toString().trim()
+            // 解析 IP:端口（支持粘贴的整行地址）
+            val port = try {
+                val parts = addr.split(':')
+                parts.last().toInt()
+            } catch (_: Exception) { null }
             if (code.length != 6) {
                 errorText.text = "请输入 6 位配对码"
                 errorText.visibility = View.VISIBLE; return@setOnClickListener
             }
             if (port == null || port <= 0) {
-                errorText.text = "请输入配对端口"
+                errorText.text = "请输入正确的 IP:端口，如 192.168.1.10:43251"
                 errorText.visibility = View.VISIBLE; return@setOnClickListener
             }
             errorText.visibility = View.GONE
             okBtn.isEnabled = false; cancelBtn.isEnabled = false
-            portEdit.isEnabled = false; codeEdit.isEnabled = false
+            addrEdit.isEnabled = false; codeEdit.isEnabled = false
             busyRow.visibility = View.VISIBLE
             statusText.text = "正在配对并授权…"
 
             thread {
                 try {
+                    // host 强制 127.0.0.1：本机连本机，不用局域网 IP
                     AdbAuthManager.pairAndGrant(ctx, code, "127.0.0.1", port)
                     handler.post {
                         busyRow.visibility = View.GONE
@@ -170,7 +179,7 @@ object AdbPairingOverlay {
                     handler.post {
                         busyRow.visibility = View.GONE
                         okBtn.isEnabled = true; cancelBtn.isEnabled = true
-                        portEdit.isEnabled = true; codeEdit.isEnabled = true
+                        addrEdit.isEnabled = true; codeEdit.isEnabled = true
                         val sb = StringBuilder(e.message ?: "授权失败")
                         var cause: Throwable? = e.cause
                         while (cause != null) {
@@ -205,9 +214,9 @@ object AdbPairingOverlay {
         wm.addView(container, params)
         rootView = container
 
-        portEdit.requestFocus()
+        addrEdit.requestFocus()
         (ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
-            .showSoftInput(portEdit, InputMethodManager.SHOW_IMPLICIT)
+            .showSoftInput(addrEdit, InputMethodManager.SHOW_IMPLICIT)
 
         return container
     }
