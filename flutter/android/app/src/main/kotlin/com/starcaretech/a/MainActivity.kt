@@ -88,13 +88,6 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun requestMediaProjection() {
-        val intent = Intent(this, PermissionRequestTransparentActivity::class.java).apply {
-            action = ACT_REQUEST_MEDIA_PROJECTION
-        }
-        startActivityForResult(intent, REQ_INVOKE_PERMISSION_ACTIVITY_MEDIA_PROJECTION)
-    }
-
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQ_INVOKE_PERMISSION_ACTIVITY_MEDIA_PROJECTION && resultCode == RES_FAILED) {
@@ -148,7 +141,15 @@ class MainActivity : FlutterActivity() {
                         result.success(false)
                         return@setMethodCallHandler
                     }
-                    requestMediaProjection()
+                    // 优先静默恢复缓存的录屏授权，失败由 MainService 弹系统确认框
+                    Intent(activity, MainService::class.java).apply {
+                        action = ACT_TRY_RESTORE_MEDIA_PROJECTION
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            activity.startForegroundService(this)
+                        } else {
+                            activity.startService(this)
+                        }
+                    }
                     result.success(true)
                 }
                 "start_capture" -> {

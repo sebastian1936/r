@@ -156,6 +156,17 @@ object AdbAuthManager {
     fun isWriteSecureSettingsGranted(context: Context): Boolean =
         ContextCompat.checkSelfPermission(context, PERM_WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED
 
+    /** InputService 当前是否在系统无障碍名单中（只读安全设置） */
+    fun isAccessibilityListed(context: Context): Boolean = try {
+        val current = Settings.Secure.getString(
+            context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: ""
+        current.split(':').contains(accessibilityComponent(context))
+    } catch (e: Exception) {
+        Log.w(TAG, "读取无障碍名单失败", e)
+        false
+    }
+
     /**
      * 无障碍自愈：把本应用的 InputService 写回系统无障碍开关（需要已获得 WRITE_SECURE_SETTINGS）。
      * 保留列表中其他应用的服务，只确保我们的服务在列。
@@ -173,8 +184,7 @@ object AdbAuthManager {
                 true
             }
             if (changed) {
-                Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, services.joinToString(":"))
-                Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+                writeAccessibilityList(cr, services)
             }
             Log.i(TAG, "无障碍自愈${if (changed) "已执行" else "无需变更"}")
             true
@@ -182,6 +192,43 @@ object AdbAuthManager {
             Log.w(TAG, "无障碍自愈失败", e)
             false
         }
+    }
+
+    /**
+     * 强制重绑：先把 InputService 从名单移除，等系统完成解绑，再加回。
+     *
+     * 适用场景：组件仍在 ENABLED_ACCESSIBILITY_SERVICES 名单里，但系统已解绑服务
+     * （很多国产 ROM 的实际表现：无障碍开关显示开启，但 InputService 不在运行）。
+     * 同名重复 putString 不会触发 AccessibilityManagerService 重新绑定，必须先移除再加回。
+     *
+     * 本方法会阻塞约 800ms（等待系统响应名单变更），只能在后台线程调用。
+     */
+    fun forceRebindAccessibility(context: Context): Boolean {
+        if (!isWriteSecureSettingsGranted(context)) return false
+        return try {
+            val cr = context.contentResolver
+            val component = accessibilityComponent(context)
+            val current = Settings.Secure.getString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
+            val others = current.split(':').filter { it.isNotEmpty() && it != component }
+
+            // 1) 移除我方组件并提交，触发系统解绑
+            writeAccessibilityList(cr, others)
+            Log.i(TAG, "强制重绑：已从无障碍名单移除 InputService")
+            // 2) 等待 AccessibilityManagerService 处理变更（不能太短，否则两次写入可能被合并）
+            Thread.sleep(800)
+            // 3) 加回，触发系统重新绑定
+            writeAccessibilityList(cr, others + component)
+            Log.i(TAG, "强制重绑：已写回 InputService，等待系统重新绑定")
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "强制重绑无障碍失败", e)
+            false
+        }
+    }
+
+    private fun writeAccessibilityList(cr: android.content.ContentResolver, services: List<String>) {
+        Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, services.joinToString(":"))
+        Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
     }
 
     private fun discoverConnect(context: Context): AdbDiscovery.DiscoveredService {

@@ -1,19 +1,14 @@
 package com.starcaretech.a.adb
 
-import org.bouncycastle.crypto.digests.SHA256Digest
-import org.bouncycastle.crypto.generators.HKDFBytesGenerator
-import org.bouncycastle.crypto.params.HKDFParameters
+import moe.shizuku.manager.adb.PairingContext
 import org.conscrypt.Conscrypt
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.nio.charset.StandardCharsets
-import javax.crypto.Cipher
-import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.SecretKeySpec
 
 /**
- * ADB 无线配对客户端（对照 AOSP pairing_connection.cpp 实现）。
+ * ADB 无线配对客户端（对照 AOSP pairing_connection.cpp 与 Shizuku AdbPairingClient 实现）。
  *
  * 线上协议（全部小端/大端见注释）：
  *  - PairingPacketHeader（6 字节 packed）：u8 version=1, u8 type, u32 payload（大端）
@@ -25,6 +20,9 @@ import javax.crypto.spec.SecretKeySpec
  *    nonce = 12 字节零 + u64 小端序号（从 0 开始，收发独立计数），tag 16 字节
  *  - 我方 PeerInfo: type=ADB_RSA_PUB_KEY(0)，data = 公钥串 + NUL（整段 8192 字节）
  *  - 设备回的 PeerInfo: type=ADB_DEVICE_GUID(1)，data = 设备 guid 字符串
+ *
+ * 密码学部分（SPAKE2 Curve25519 / HKDF / AES-128-GCM）由 libadb.so 内的 BoringSSL
+ * 完成（[PairingContext]，源自 Shizuku），不再使用 JVM 层手写曲线运算。
  */
 object AdbPairingClient {
 
@@ -32,6 +30,7 @@ object AdbPairingClient {
     private const val MAX_PAYLOAD = 8192 * 2 // pairing_connection.cpp: kMaxPayloadSize
     private const val PEER_INFO_SIZE = 8192  // kMaxPeerInfoSize
     private const val GCM_TAG_LEN = 16
+    private const val SPAKE2_MSG_SIZE = 32   // BoringSSL SPAKE2_MAX_MSG_SIZE
 
     private const val TYPE_SPAKE2_MSG: Int = 0
     private const val TYPE_PEER_INFO: Int = 1
@@ -40,7 +39,6 @@ object AdbPairingClient {
     private const val PEER_TYPE_DEVICE_GUID: Int = 1
 
     private const val EXPORT_LABEL = "adb-label\u0000" // Conscrypt 内部 US_ASCII 编码 -> "adb-label\0"（10 字节）
-    private const val HKDF_INFO = "adb pairing_auth aes-128-gcm key"
 
     class PairingException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
@@ -52,51 +50,57 @@ object AdbPairingClient {
     fun pair(identity: AdbKeyStore.Identity, host: String, port: Int, pairingCode: String): String {
         require(pairingCode.length == 6) { "配对码必须为 6 位数字" }
 
+        // 配对端口是 implicit TLS：连上即 TLS（与 connect 端口先明文再 STLS 升级不同）
         val socket = AdbKeyStore.createTlsSocket(identity, host, port, 10_000)
+        var pairingContext: PairingContext? = null
         try {
             val ekm = Conscrypt.exportKeyingMaterial(socket, EXPORT_LABEL, null, 64)
             val password = pairingCode.toByteArray(StandardCharsets.US_ASCII) + ekm
-            val spake = Spake2Client(Spake2Client.Role.CLIENT, password)
+            pairingContext = PairingContext.create(true, password)
+                ?: throw PairingException("SPAKE2 上下文创建失败（libadb.so nativeConstructor 返回 0）")
 
             val out = DataOutputStream(socket.getOutputStream().buffered())
             val input = DataInputStream(socket.getInputStream().buffered())
 
-            // ---- ExchangeMsgs：先发后收（对齐 DoExchangeMsgs）----
-            val myMsg = spake.generateMessage()
+            // ---- ExchangeMsgs：先发后收（对齐 DoExchangeMsgs / Shizuku）----
+            val myMsg = pairingContext.msg
             writeHeader(out, TYPE_SPAKE2_MSG, myMsg.size)
             out.write(myMsg)
             out.flush()
 
-            readHeader(input, expectedType = TYPE_SPAKE2_MSG).let { payloadLen ->
-                if (payloadLen != 32) throw PairingException("SPAKE2 消息长度异常: $payloadLen")
+            val payloadLen = readHeader(input, expectedType = TYPE_SPAKE2_MSG)
+            if (payloadLen != SPAKE2_MSG_SIZE) {
+                throw PairingException("SPAKE2 消息长度异常: $payloadLen（应为 $SPAKE2_MSG_SIZE）")
             }
-            val theirMsg = ByteArray(32).also { input.readFully(it) }
-            val keyMaterial = spake.processMessage(theirMsg)
-
-            // ---- 建立 AES-128-GCM ----
-            val hkdf = HKDFBytesGenerator(SHA256Digest())
-            hkdf.init(HKDFParameters(keyMaterial, null, HKDF_INFO.toByteArray(StandardCharsets.US_ASCII)))
-            val aesKey = ByteArray(16).also { hkdf.generateBytes(it, 0, 16) }
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            val theirMsg = ByteArray(SPAKE2_MSG_SIZE).also { input.readFully(it) }
+            if (!pairingContext.initCipher(theirMsg)) {
+                throw PairingException("SPAKE2 密钥协商失败：对端消息处理失败（initCipher=false，协议不匹配）")
+            }
 
             // ---- ExchangePeerInfo：先发后收（对齐 DoExchangePeerInfo）----
             val peerInfo = buildPeerInfo(identity.publicKeyString)
-            val encrypted = aesGcm(cipher, Cipher.ENCRYPT_MODE, aesKey, peerInfo, seq = 0)
+            val encrypted = pairingContext.encrypt(peerInfo)
+                ?: throw PairingException("PeerInfo 加密失败（AES-128-GCM seal 返回 null）")
             writeHeader(out, TYPE_PEER_INFO, encrypted.size)
             out.write(encrypted)
             out.flush()
 
             val respLen = readHeader(input, expectedType = TYPE_PEER_INFO)
             if (respLen < GCM_TAG_LEN || respLen - GCM_TAG_LEN != PEER_INFO_SIZE) {
-                throw PairingException("对端 PeerInfo 长度异常: $respLen")
+                throw PairingException("对端 PeerInfo 长度异常: $respLen（应为 ${PEER_INFO_SIZE + GCM_TAG_LEN}）")
             }
             val respCipher = ByteArray(respLen).also { input.readFully(it) }
-            val respPlain = aesGcm(cipher, Cipher.DECRYPT_MODE, aesKey, respCipher, seq = 0)
-            if (respPlain.size != PEER_INFO_SIZE) throw PairingException("PeerInfo 解密结果异常")
+            // GCM tag 校验不过 = 密码（配对码）错误，Shizuku 在此抛 AdbInvalidPairingCodeException
+            val respPlain = pairingContext.decrypt(respCipher)
+                ?: throw PairingException(
+                    "配对码错误或已过期：设备返回的 PeerInfo 解密失败（AES-GCM 校验不通过）。\n" +
+                    "请退回无线调试页重新打开\"使用配对码配对设备\"获取新配对码后再试"
+                )
+            if (respPlain.size != PEER_INFO_SIZE) throw PairingException("PeerInfo 解密结果长度异常: ${respPlain.size}")
 
             val respType = respPlain[0].toInt() and 0xff
             if (respType != PEER_TYPE_DEVICE_GUID) {
-                throw PairingException("对端 PeerInfo 类型异常: $respType")
+                throw PairingException("对端 PeerInfo 类型异常: $respType（应为 DEVICE_GUID=1）")
             }
             // data 为 NUL 结尾的 guid 字符串
             val guidBytes = ByteArrayOutputStream()
@@ -106,6 +110,7 @@ object AdbPairingClient {
             }
             return guidBytes.toString(StandardCharsets.US_ASCII.name())
         } finally {
+            pairingContext?.let { runCatching { it.destroy() } }
             runCatching { socket.close() }
         }
     }
@@ -148,17 +153,5 @@ object AdbPairingClient {
         if (type != expectedType) throw PairingException("配对包类型不匹配: 期望 $expectedType 实际 $type")
         if (payload <= 0 || payload > MAX_PAYLOAD) throw PairingException("配对包长度异常: $payload")
         return payload
-    }
-
-    /** AES-128-GCM，nonce = 12 字节零 + u64 小端序号（对齐 aes_128_gcm.cpp） */
-    private fun aesGcm(cipher: Cipher, mode: Int, key: ByteArray, data: ByteArray, seq: Long): ByteArray {
-        val nonce = ByteArray(12)
-        var s = seq
-        for (i in 0 until 8) {
-            nonce[i] = (s and 0xffL).toByte()
-            s = s ushr 8
-        }
-        cipher.init(mode, SecretKeySpec(key, "AES"), GCMParameterSpec(GCM_TAG_LEN * 8, nonce))
-        return cipher.doFinal(data)
     }
 }

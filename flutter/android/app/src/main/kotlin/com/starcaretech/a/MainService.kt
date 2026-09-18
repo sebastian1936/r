@@ -198,6 +198,9 @@ class MainService : Service() {
         private var _isReady = false // media permission ready status
         private var _isStart = false // screen capture start status
         private var _isAudioStart = false // audio capture start status
+
+        // 录屏授权失效时的全屏引导通知（区别于常驻前台服务通知 DEFAULT_NOTIFY_ID）
+        const val RECOVERY_NOTIFY_ID = 2
         val isReady: Boolean
             get() = _isReady
         val isStart: Boolean
@@ -214,6 +217,12 @@ class MainService : Service() {
 
     // video
     private var mediaProjection: MediaProjection? = null
+    private var projectionCallback: MediaProjection.Callback? = null
+
+    /** 服务主动销毁标记：为 true 时忽略系统迟到的 MediaProjection.onStop 回调 */
+    @Volatile
+    private var serviceDestroyed = false
+
     private var surface: Surface? = null
     private val sendVP9Thread = Executors.newSingleThreadExecutor()
     private var videoEncoder: MediaCodec? = null
@@ -249,6 +258,14 @@ class MainService : Service() {
     }
 
     override fun onDestroy() {
+        // 静态状态复位：否则系统销毁本实例后（如绑定断开），新实例的 mediaProjection 为 null
+        // 但 isReady 仍为 true，远程连接进来时 startCapture 会静默失败
+        _isReady = false
+        _isStart = false
+        serviceDestroyed = true
+        projectionCallback?.let { cb -> runCatching { mediaProjection?.unregisterCallback(cb) } }
+        projectionCallback = null
+        mediaProjection = null
         checkMediaPermission()
         stopService(Intent(this, FloatingWindowService::class.java))
         super.onDestroy()
@@ -326,27 +343,117 @@ class MainService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d("whichService", "this service: ${Thread.currentThread()}")
         super.onStartCommand(intent, flags, startId)
-        if (intent?.action == ACT_INIT_MEDIA_PROJECTION_AND_SERVICE) {
-            createForegroundNotification()
+        when (intent?.action) {
+            ACT_INIT_MEDIA_PROJECTION_AND_SERVICE -> {
+                createForegroundNotification()
 
-            if (intent.getBooleanExtra(EXT_INIT_FROM_BOOT, false)) {
-                FFI.startService()
+                if (intent.getBooleanExtra(EXT_INIT_FROM_BOOT, false)) {
+                    FFI.startService()
+                }
+                Log.d(logTag, "service starting: ${startId}:${Thread.currentThread()}")
+                val mediaProjectionManager =
+                    getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+
+                intent.getParcelableExtra<Intent>(EXT_MEDIA_PROJECTION_RES_INTENT)?.let { token ->
+                    // 用户刚完成确认：缓存 token 供后续静默恢复
+                    if (!applyProjection(mediaProjectionManager, token)) {
+                        Log.w(logTag, "新鲜授权 token 也无法建立 MediaProjection，回退重新请求")
+                        requestMediaProjectionWithNotice()
+                    } else {
+                        MediaProjectionTokenStore.save(this, token)
+                        checkMediaPermission()
+                        _isReady = true
+                    }
+                } ?: let {
+                    Log.d(logTag, "getParcelableExtra intent null, try restore then request")
+                    // 开机/无 token 启动：先试缓存静默恢复，失败再弹窗
+                    if (!tryRestoreMediaProjection(mediaProjectionManager)) {
+                        requestMediaProjectionWithNotice()
+                    }
+                }
             }
-            Log.d(logTag, "service starting: ${startId}:${Thread.currentThread()}")
-            val mediaProjectionManager =
-                getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-
-            intent.getParcelableExtra<Intent>(EXT_MEDIA_PROJECTION_RES_INTENT)?.let {
-                mediaProjection =
-                    mediaProjectionManager.getMediaProjection(Activity.RESULT_OK, it)
-                checkMediaPermission()
-                _isReady = true
-            } ?: let {
-                Log.d(logTag, "getParcelableExtra intent null, invoke requestMediaProjection")
-                requestMediaProjection()
+            ACT_TRY_RESTORE_MEDIA_PROJECTION -> {
+                // App 在前台（init_service）触发：先静默恢复，失败再走确认框
+                createForegroundNotification()
+                val mediaProjectionManager =
+                    getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                if (!tryRestoreMediaProjection(mediaProjectionManager)) {
+                    requestMediaProjectionWithNotice()
+                }
             }
         }
         return START_NOT_STICKY // don't use sticky (auto restart), the new service (from auto restart) will lose control
+    }
+
+    /**
+     * 用授权结果 Intent 建立 MediaProjection 并注册掉线回调。
+     * @return false 表示 token 已失效（SecurityException/IllegalStateException）
+     */
+    private fun applyProjection(manager: MediaProjectionManager, token: Intent): Boolean {
+        return try {
+            val mp = manager.getMediaProjection(Activity.RESULT_OK, token)
+            if (mp == null) {
+                Log.w(logTag, "getMediaProjection 返回 null")
+                false
+            } else {
+                val cb = object : MediaProjection.Callback() {
+                    override fun onStop() {
+                        Log.w(logTag, "MediaProjection onStop：会话被系统收回")
+                        onProjectionInvalid()
+                    }
+                }
+                mp.registerCallback(cb, Handler(Looper.getMainLooper()))
+                projectionCallback = cb
+                mediaProjection = mp
+                true
+            }
+        } catch (e: SecurityException) {
+            Log.w(logTag, "getMediaProjection SecurityException，授权 token 已失效", e)
+            false
+        } catch (e: IllegalStateException) {
+            Log.w(logTag, "getMediaProjection IllegalStateException，授权 token 已失效", e)
+            false
+        }
+    }
+
+    /** 尝试用缓存的授权 Intent 静默恢复；成功返回 true，失败（无缓存/失效）返回 false */
+    @Synchronized
+    fun tryRestoreMediaProjection(
+        manager: MediaProjectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+    ): Boolean {
+        if (mediaProjection != null) return true
+        val token = MediaProjectionTokenStore.load(this) ?: return false
+        if (!applyProjection(manager, token)) {
+            MediaProjectionTokenStore.clear(this)
+            return false
+        }
+        Log.i(logTag, "MediaProjection 已用缓存授权静默恢复")
+        _isReady = true
+        checkMediaPermission()
+        return true
+    }
+
+    /**
+     * MediaProjection 会话失效（Callback.onStop 或 createVirtualDisplay 抛 SecurityException）。
+     * 释放采集资源、同步状态，并重新拉起用户确认流程。
+     */
+    private fun onProjectionInvalid() {
+        if (serviceDestroyed) {
+            Log.d(logTag, "服务已销毁，忽略 MediaProjection 失效回调")
+            return
+        }
+        if (mediaProjection == null) {
+            // Callback.onStop 与 createVirtualDisplay 的 SecurityException 可能先后到达，只处理一次
+            return
+        }
+        if (isStart) {
+            stopCapture()
+        }
+        projectionCallback = null
+        mediaProjection = null
+        _isReady = false
+        checkMediaPermission()
+        requestMediaProjectionWithNotice()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -354,12 +461,48 @@ class MainService : Service() {
         updateScreenInfo(newConfig.orientation)
     }
 
-    private fun requestMediaProjection() {
+    /**
+     * 重新请求 MediaProjection 授权：
+     * 1. 先直接拉起透明授权页——App 有前台界面时可直接弹出系统确认框；
+     * 2. 同时发一条带 fullScreenIntent 的高优先级通知——App 在后台/锁屏时
+     *    Android 10+ 禁止后台启动 Activity，全屏通知是唯一能把用户一键带到确认框的手段
+     */
+    private fun requestMediaProjectionWithNotice() {
         val intent = Intent(this, PermissionRequestTransparentActivity::class.java).apply {
             action = ACT_REQUEST_MEDIA_PROJECTION
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
         }
-        startActivity(intent)
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.w(logTag, "后台拉起授权页被系统拦截，改由全屏通知引导", e)
+        }
+        postProjectionRecoveryNotification(intent)
+    }
+
+    private fun postProjectionRecoveryNotification(fullScreenTarget: Intent) {
+        try {
+            val pendingIntent = PendingIntent.getActivity(
+                this, 0, fullScreenTarget,
+                FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE
+            )
+            val notification = notificationBuilder
+                .setOngoing(false)
+                .setSmallIcon(R.mipmap.ic_stat_logo)
+                .setPriority(NotificationCompat.PRIORITY_MAX)
+                .setCategory(NotificationCompat.CATEGORY_CALL)
+                .setAutoCancel(true)
+                .setContentTitle("录屏授权已失效")
+                .setContentText("点击恢复屏幕共享（需要重新确认一次）")
+                .setContentIntent(pendingIntent)
+                // 锁屏/无前台界面时由系统直接展开为全屏授权页
+                .setFullScreenIntent(pendingIntent, true)
+                .setWhen(System.currentTimeMillis())
+                .build()
+            notificationManager.notify(RECOVERY_NOTIFY_ID, notification)
+        } catch (e: Exception) {
+            Log.w(logTag, "发送授权恢复通知失败", e)
+        }
     }
 
     @SuppressLint("WrongConstant")
@@ -476,6 +619,8 @@ class MainService : Service() {
 
     fun destroy() {
         Log.d(logTag, "destroy service")
+        // 先注销回调并置位销毁标记，防止系统随后回调 onStop 又弹出授权请求
+        serviceDestroyed = true
         _isReady = false
         _isAudioStart = false
 
@@ -486,6 +631,8 @@ class MainService : Service() {
             virtualDisplay = null
         }
 
+        projectionCallback?.let { cb -> runCatching { mediaProjection?.unregisterCallback(cb) } }
+        projectionCallback = null
         mediaProjection = null
         checkMediaPermission()
         stopForeground(true)
@@ -494,6 +641,10 @@ class MainService : Service() {
     }
 
     fun checkMediaPermission(): Boolean {
+        if (isReady) {
+            // 授权恢复成功，撤下"录屏授权已失效"的引导通知
+            runCatching { notificationManager.cancel(RECOVERY_NOTIFY_ID) }
+        }
         Handler(Looper.getMainLooper()).post {
             MainActivity.flutterMethodChannel?.invokeMethod(
                 "on_state_changed",
@@ -546,9 +697,9 @@ class MainService : Service() {
                 )
             }
         } catch (e: SecurityException) {
-            Log.w(logTag, "createOrSetVirtualDisplay: got SecurityException, re-requesting confirmation");
-            // This initiates a prompt dialog for the user to confirm screen projection.
-            requestMediaProjection()
+            Log.w(logTag, "createOrSetVirtualDisplay: got SecurityException, projection revoked")
+            // 会话已失效：释放状态并重新拉起用户确认流程（带全屏通知兜底）
+            onProjectionInvalid()
         }
     }
 
