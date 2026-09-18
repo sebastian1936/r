@@ -628,14 +628,28 @@ class AdbAuthSection extends StatefulWidget {
   State<AdbAuthSection> createState() => _AdbAuthSectionState();
 }
 
-class _AdbAuthSectionState extends State<AdbAuthSection> {
+class _AdbAuthSectionState extends State<AdbAuthSection>
+    with WidgetsBindingObserver {
   bool _supported = true;
   bool _granted = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _refresh();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 用户在通知栏完成配对授权后回到 App，自动刷新授权状态
+    if (state == AppLifecycleState.resumed) _refresh();
   }
 
   _refresh() async {
@@ -716,7 +730,9 @@ class _AdbAuthSectionState extends State<AdbAuthSection> {
   }
 }
 
-/// 无线调试配对对话框：引导用户分屏后填 IP:端口 和 配对码
+/// 无线调试配对对话框。
+/// 默认走通知栏配对（仿 Shizuku，无需分屏、无需手填端口）；
+/// 通知被 ROM 禁用等极端情况下可切到手动输入 IP:端口（仍需分屏）。
 class _AdbPairDialog extends StatefulWidget {
   const _AdbPairDialog({Key? key}) : super(key: key);
 
@@ -728,6 +744,7 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
   final _addrController = TextEditingController();
   final _codeController = TextEditingController();
   bool _busy = false;
+  bool _manualMode = false;
   String? _error;
 
   @override
@@ -737,7 +754,32 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
     super.dispose();
   }
 
-  _submit() async {
+  /// 通知栏方式：启动前台配对服务，后续全部在通知里完成
+  _startNotificationPairing() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await gFFI.invokeMethod("adb_start_pairing", null);
+      if (!mounted) return;
+      Navigator.of(context).pop(true);
+      showToast("通知已就绪：打开系统配对页后，下拉通知栏输入配对码");
+    } on PlatformException catch (e) {
+      setState(() {
+        _busy = false;
+        _error = e.message ?? "启动失败，请重试";
+      });
+    } catch (e) {
+      setState(() {
+        _busy = false;
+        _error = "启动失败，请重试";
+      });
+    }
+  }
+
+  /// 手动方式（兜底）：用户分屏后自行填写 IP:端口
+  _submitManual() async {
     final addr = _addrController.text.trim();
     final code = _codeController.text.trim();
     if (addr.isEmpty || !addr.contains(':')) {
@@ -770,6 +812,175 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
     }
   }
 
+  Widget _buildErrorBox() {
+    if (_error == null) return const SizedBox.shrink();
+    return Container(
+      width: double.maxFinite,
+      margin: const EdgeInsets.only(top: 12),
+      constraints: const BoxConstraints(maxHeight: 220),
+      decoration: BoxDecoration(
+        color: Colors.red.withOpacity(0.08),
+        border: Border.all(color: Colors.red.withOpacity(0.4)),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            const Icon(Icons.error_outline, size: 16, color: Colors.red),
+            const SizedBox(width: 6),
+            const Expanded(
+              child: Text("失败详情（可长按选择文字）",
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.red)),
+            ),
+            InkWell(
+              onTap: () {
+                Clipboard.setData(ClipboardData(text: _error!));
+                showToast("错误信息已复制");
+              },
+              child: const Padding(
+                padding: EdgeInsets.all(4),
+                child: Icon(Icons.copy, size: 15, color: Colors.red),
+              ),
+            )
+          ]),
+          const Divider(height: 14),
+          Flexible(
+            child: SingleChildScrollView(
+              child: SelectableText(
+                _error!,
+                style: const TextStyle(fontSize: 12, height: 1.5),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGuideContent() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "不用分屏，也不用填写端口，4 步完成：\n\n"
+          "1. 打开系统「开发者选项 → 无线调试」并开启\n"
+          "2. 点「使用配对码配对设备」，停在显示 6 位码的页面\n"
+          "3. 从屏幕顶部下拉通知栏，点本应用通知上的\n"
+          "   「输入配对码」\n"
+          "4. 输入 6 位配对码并发送，等「授权成功」通知即可\n\n"
+          "原理：通知栏是系统浮层，下拉它不会让系统配对页\n"
+          "切到后台，配对码因此不会失效；端口由系统广播自动发现。",
+          style: TextStyle(fontSize: 12, height: 1.6),
+        ),
+        Container(
+          margin: const EdgeInsets.only(top: 10),
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: Colors.orange.withOpacity(0.12),
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: const Text(
+            "若通知一直停留在“正在搜索配对服务”：\n"
+            "请在系统设置中允许本应用「后台运行」并关闭\n"
+            "电池优化（部分国产 ROM 会禁止应用在设置页面时联网）。",
+            style: TextStyle(fontSize: 12, height: 1.6, color: Colors.deepOrange),
+          ),
+        ),
+        _buildErrorBox(),
+        if (_busy) ...[
+          const SizedBox(height: 12),
+          Row(children: const [
+            SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2)),
+            SizedBox(width: 10),
+            Expanded(child: Text("正在启动配对服务…", style: TextStyle(fontSize: 13)))
+          ])
+        ],
+      ],
+    );
+  }
+
+  Widget _buildManualContent() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: Colors.orange.withOpacity(0.12),
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: const Text(
+            "手动方式仍需「分屏模式」：配对页面一切到后台，\n"
+            "配对码就会失效。推荐返回使用上方的通知栏方式。",
+            style: TextStyle(fontSize: 12, height: 1.6, color: Colors.deepOrange),
+          ),
+        ),
+        const SizedBox(height: 12),
+        const Text(
+          "1. 分屏：上屏打开系统「使用配对码配对设备」页\n"
+          "2. 把页面上的「IP:端口」抄到第一框\n"
+          "3. 把 6 位配对码填到第二框，点确定",
+          style: TextStyle(fontSize: 12, height: 1.6),
+        ),
+        const SizedBox(height: 14),
+        TextField(
+          controller: _addrController,
+          enabled: !_busy,
+          keyboardType: TextInputType.url,
+          autocorrect: false,
+          enableSuggestions: false,
+          decoration: const InputDecoration(
+            isDense: true,
+            labelText: "IP:端口",
+            hintText: "如 192.168.1.10:43251",
+            border: OutlineInputBorder(),
+            contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+          ),
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _codeController,
+          enabled: !_busy,
+          keyboardType: TextInputType.number,
+          maxLength: 6,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          decoration: const InputDecoration(
+            isDense: true,
+            labelText: "6 位配对码",
+            counterText: "",
+            border: OutlineInputBorder(),
+            contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+          ),
+          onSubmitted: (_) => _busy ? null : _submitManual(),
+        ),
+        _buildErrorBox(),
+        if (_busy) ...[
+          const SizedBox(height: 12),
+          Row(children: const [
+            SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2)),
+            SizedBox(width: 10),
+            Expanded(child: Text("正在配对并授权，请保持分屏…",
+                style: TextStyle(fontSize: 13)))
+          ])
+        ]
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
@@ -777,135 +988,39 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
       content: SizedBox(
         width: double.maxFinite,
         child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: Colors.orange.withOpacity(0.12),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: const Text(
-                  "请先开启「分屏模式」再操作！\n"
-                  "配对页面一切到后台，配对码就会失效。\n"
-                  "分屏方法：打开配对页后，点最近任务键，\n"
-                  "在系统设置卡片上长按/点分屏图标，再选 RustDesk。",
-                  style: TextStyle(fontSize: 12, height: 1.6, color: Colors.deepOrange),
-                ),
-              ),
-              const SizedBox(height: 12),
-              const Text(
-                "分屏后：\n"
-                "1. 上屏：系统「开发者选项 → 无线调试 →\n"
-                "   使用配对码配对设备」\n"
-                "2. 把页面上的「IP:端口」整行抄到下面第一框\n"
-                "3. 把页面上的 6 位配对码填到第二框\n"
-                "4. 点确定，全程不要退出配对页",
-                style: TextStyle(fontSize: 12, height: 1.6),
-              ),
-              const SizedBox(height: 14),
-              TextField(
-                controller: _addrController,
-                enabled: !_busy,
-                keyboardType: TextInputType.url,
-                autocorrect: false,
-                enableSuggestions: false,
-                decoration: const InputDecoration(
-                  isDense: true,
-                  labelText: "IP:端口",
-                  hintText: "如 192.168.1.10:43251",
-                  border: OutlineInputBorder(),
-                  contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-                ),
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: _codeController,
-                enabled: !_busy,
-                keyboardType: TextInputType.number,
-                maxLength: 6,
-                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                decoration: const InputDecoration(
-                  isDense: true,
-                  labelText: "6 位配对码",
-                  counterText: "",
-                  border: OutlineInputBorder(),
-                  contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-                ),
-                onSubmitted: (_) => _busy ? null : _submit(),
-              ),
-              if (_error != null) ...[
-                const SizedBox(height: 10),
-                Container(
-                  width: double.maxFinite,
-                  constraints: const BoxConstraints(maxHeight: 220),
-                  decoration: BoxDecoration(
-                    color: Colors.red.withOpacity(0.08),
-                    border: Border.all(color: Colors.red.withOpacity(0.4)),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(children: [
-                        const Icon(Icons.error_outline, size: 16, color: Colors.red),
-                        const SizedBox(width: 6),
-                        const Expanded(
-                          child: Text("失败详情（可长按选择文字）",
-                              style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.red)),
-                        ),
-                        InkWell(
-                          onTap: () {
-                            Clipboard.setData(ClipboardData(text: _error!));
-                            showToast("错误信息已复制");
-                          },
-                          child: const Padding(
-                            padding: EdgeInsets.all(4),
-                            child: Icon(Icons.copy, size: 15, color: Colors.red),
-                          ),
-                        )
-                      ]),
-                      const Divider(height: 14),
-                      Expanded(
-                        child: SingleChildScrollView(
-                          child: SelectableText(
-                            _error!,
-                            style: const TextStyle(fontSize: 12, height: 1.5),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                )
-              ],
-              if (_busy) ...[
-                const SizedBox(height: 12),
-                Row(children: const [
-                  SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2)),
-                  SizedBox(width: 10),
-                  Expanded(child: Text("正在配对并授权，请保持分屏…",
-                      style: TextStyle(fontSize: 13)))
-                ])
-              ]
-            ],
-          ),
+          child: _manualMode ? _buildManualContent() : _buildGuideContent(),
         ),
       ),
       actions: [
+        if (_manualMode)
+          TextButton(
+            onPressed: _busy
+                ? null
+                : () => setState(() {
+                      _manualMode = false;
+                      _error = null;
+                    }),
+            child: const Text("返回通知方式"),
+          )
+        else
+          TextButton(
+            onPressed: _busy
+                ? null
+                : () => setState(() {
+                      _manualMode = true;
+                      _error = null;
+                    }),
+            child: const Text("收不到通知？手动输入", style: TextStyle(fontSize: 12)),
+          ),
         TextButton(
             onPressed: _busy ? null : () => Navigator.of(context).pop(false),
             child: Text(translate("Cancel"))),
-        ElevatedButton(onPressed: _busy ? null : _submit, child: const Text("确定")),
+        ElevatedButton(
+          onPressed: _busy
+              ? null
+              : (_manualMode ? _submitManual : _startNotificationPairing),
+          child: Text(_manualMode ? "确定" : "开始配对"),
+        ),
       ],
     );
   }

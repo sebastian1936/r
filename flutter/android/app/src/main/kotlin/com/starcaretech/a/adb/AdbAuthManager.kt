@@ -78,14 +78,24 @@ object AdbAuthManager {
         // 配对刚完成，connect 服务可能还没就绪，等一下再连
         Thread.sleep(2000)
 
-        // 2. 找 TLS connect 端口（mDNS 获取端口，host 强制 127.0.0.1 本机回环）
-        val connect = discoverConnect(context)
-        Log.i(TAG, "配对成功 guid=$guid，连接 adbd ${connect.host}:${connect.port}（来源:${connect.serviceName}）")
-
-        // 3. pm grant（连接失败重试 3 次，每次间隔 2s；完整保留每次异常详情）
+        // 2 + 3. 找 TLS connect 端口并执行 pm grant。
+        // 关键：connect 端口每次尝试都重新发现，不能首次发现后固定重试——
+        // NsdManager 可能返回上一次无线调试会话的陈旧记录（端口已关，ECONNREFUSED），
+        // 且部分 ROM 在配对完成后 connect 端口才刚注册/会变化。
         val attempts = mutableListOf<String>()
         var output = ""
         for (attempt in 1..3) {
+            val connect = discoverConnect(context)
+            if (connect == null) {
+                Log.w(TAG, "第 $attempt/3 次未发现有效的 connect 服务")
+                attempts.add(
+                    "第 $attempt 次：mDNS 未发现有效的 connect 服务（无记录或端口未监听）。\n" +
+                    "请确认系统「无线调试」开关仍处于开启状态，然后重试"
+                )
+                if (attempt < 3) Thread.sleep(2000)
+                continue
+            }
+            Log.i(TAG, "配对成功 guid=$guid，第 $attempt/3 次连接 adbd ${connect.host}:${connect.port}（来源:${connect.serviceName}）")
             try {
                 output = AdbConnection.shell(
                     identity,
@@ -98,16 +108,14 @@ object AdbAuthManager {
                 break
             } catch (e: Exception) {
                 Log.w(TAG, "连接 adbd 失败 尝试 $attempt/3 ${connect.host}:${connect.port}", e)
-                attempts.add("第 $attempt 次（${connect.host}:${connect.port}）:\n${e.chainText()}")
+                attempts.add("第 $attempt 次（${connect.host}:${connect.port}，来源:${connect.serviceName}）:\n${e.chainText()}")
                 if (attempt < 3) Thread.sleep(2000)
             }
         }
         if (attempts.isNotEmpty()) {
-            val sourceHint = if (connect.serviceName == "fallback")
-                "\n（mDNS 未发现 connect 服务，使用了兜底端口 5555；若系统无线调试端口不是 5555 请重试）" else ""
             throw AuthException(
                 "【已配对，但连接本机 adbd 执行授权失败】\n" +
-                "目标：${connect.host}:${connect.port}（端口来源:${connect.serviceName}）$sourceHint\n\n" +
+                "connect 端口由 mDNS 自动发现并已校验 127.0.0.1 存活：\n\n" +
                 attempts.joinToString("\n\n"),
                 null
             )
@@ -231,12 +239,20 @@ object AdbAuthManager {
         Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
     }
 
-    private fun discoverConnect(context: Context): AdbDiscovery.DiscoveredService {
-        // 只从 mDNS 获取端口，host 强制 127.0.0.1（本机连本机回环最可靠）
-        AdbDiscovery.findFirst(context, AdbDiscovery.TYPE_CONNECT, timeoutMs = 15_000)?.let {
-            return AdbDiscovery.DiscoveredService(it.serviceName, "127.0.0.1", it.port, it.attributes)
+    private fun discoverConnect(context: Context): AdbDiscovery.DiscoveredService? {
+        // 只从 mDNS 获取端口，host 强制 127.0.0.1（本机连本机回环最可靠）。
+        // findFirst 已做"本机网卡地址 + 127.0.0.1 端口存活"双重校验，自动跳过陈旧记录；
+        // 分多轮扫描，覆盖配对完成后 connect 服务刚注册的时间窗。
+        val deadline = System.currentTimeMillis() + 15_000
+        while (System.currentTimeMillis() < deadline) {
+            val s = AdbDiscovery.findFirst(context, AdbDiscovery.TYPE_CONNECT, timeoutMs = 5_000)
+            if (s != null) {
+                return AdbDiscovery.DiscoveredService(s.serviceName, "127.0.0.1", s.port, s.attributes)
+            }
         }
-        // 兜底：部分 ROM（或旧版无线调试）监听固定 5555
-        return AdbDiscovery.DiscoveredService("fallback", "127.0.0.1", 5555, emptyMap())
+        // 兜底：部分 ROM（或旧版无线调试）监听固定 5555，同样要求端口真的在监听
+        return if (AdbDiscovery.isLoopbackPortListening(5555))
+            AdbDiscovery.DiscoveredService("fallback", "127.0.0.1", 5555, emptyMap())
+        else null
     }
 }

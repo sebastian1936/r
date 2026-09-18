@@ -96,6 +96,12 @@
             android:name=".FloatingWindowService"
             android:enabled="true" />
 
+        <!-- ADB 无线调试配对：通知栏 RemoteInput 输入配对码的前台服务（仅 host 包） -->
+        <service
+            android:name=".adb.AdbPairingService"
+            android:enabled="true"
+            android:exported="false" />
+
         <!--
  Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java

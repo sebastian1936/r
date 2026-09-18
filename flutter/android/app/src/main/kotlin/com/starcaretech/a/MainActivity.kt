@@ -33,7 +33,9 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import kotlin.concurrent.thread
+import androidx.core.content.ContextCompat
 import com.starcaretech.a.adb.AdbAuthManager
+import com.starcaretech.a.adb.AdbPairingService
 
 
 class MainActivity : FlutterActivity() {
@@ -327,6 +329,46 @@ class MainActivity : FlutterActivity() {
                                 result.error("-1", e.message ?: "授权失败，请重试", null)
                             }
                         }
+                    }
+                }
+                "adb_start_pairing" -> {
+                    // 通知栏 RemoteInput 配对（仿 Shizuku，无需分屏）：
+                    // 启动前台服务，mDNS 自动发现配对端口，用户在通知里输入 6 位码即可。
+                    if (isController) {
+                        result.error("-1", "当前安装包不支持该功能", null)
+                        return@setMethodCallHandler
+                    }
+                    if (!AdbAuthManager.isSupported()) {
+                        result.error("-1", AdbAuthManager.unsupportedReason() ?: "当前系统不支持", null)
+                        return@setMethodCallHandler
+                    }
+                    val notificationPermission = android.Manifest.permission.POST_NOTIFICATIONS
+                    val launchService = {
+                        ContextCompat.startForegroundService(
+                            context, AdbPairingService.startIntent(context)
+                        )
+                    }
+                    if (XXPermissions.isGranted(context, notificationPermission)) {
+                        launchService()
+                        result.success(true)
+                    } else {
+                        // 必须在 Activity 前台时申请；系统配对页之后不能再打断
+                        XXPermissions.with(activity)
+                            .permission(notificationPermission)
+                            .request { _, all ->
+                                if (all) {
+                                    launchService()
+                                    activity.runOnUiThread { result.success(true) }
+                                } else {
+                                    activity.runOnUiThread {
+                                        result.error(
+                                            "-1",
+                                            "需要通知权限：配对码要在下拉通知栏里输入（这样系统配对页不会切后台失效）。请授予通知权限后重试",
+                                            null
+                                        )
+                                    }
+                                }
+                            }
                     }
                 }
                 "adb_repair" -> {
