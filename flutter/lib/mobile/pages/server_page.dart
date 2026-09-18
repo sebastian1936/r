@@ -807,10 +807,13 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
       _errorCode = null;
     });
     try {
-      await gFFI.invokeMethod("adb_pair_and_grant", {"addr": addr, "code": code});
+      final res = await gFFI.invokeMethod("adb_pair_and_grant", {"addr": addr, "code": code});
       if (!mounted) return;
+      final shellDirect = res is Map && res["shell_direct"] == true;
       Navigator.of(context).pop(true);
-      showToast("授权成功，权限自动恢复已开启");
+      showToast(shellDirect
+          ? "已开启无障碍（兼容模式）；App 被杀后若失效请重新配对"
+          : "授权成功，权限自动恢复已开启");
     } on PlatformException catch (e) {
       setState(() {
         _busy = false;

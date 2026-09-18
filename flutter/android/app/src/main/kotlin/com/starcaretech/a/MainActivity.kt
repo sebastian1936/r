@@ -324,8 +324,10 @@ class MainActivity : FlutterActivity() {
                     }
                     thread {
                         try {
-                            val guid = AdbAuthManager.pairAndGrant(context, code, "127.0.0.1", port)
-                            activity.runOnUiThread { result.success(guid) }
+                            val r = AdbAuthManager.pairAndGrant(context, code, "127.0.0.1", port)
+                            activity.runOnUiThread {
+                                result.success(mapOf("guid" to r.guid, "shell_direct" to r.shellDirect))
+                            }
                         } catch (e: Exception) {
                             activity.runOnUiThread {
                                 result.error("-1", e.message ?: "授权失败，请重试", null)

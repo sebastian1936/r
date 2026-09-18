@@ -165,11 +165,25 @@ class AdbPairingService : Service() {
 
         thread(name = "adb-pair-grant") {
             try {
-                // 完整闭环：配对 → 发现 connect 端口 → pm grant → 验证
-                val guid = AdbAuthManager.pairAndGrant(
+                // 完整闭环：配对 → 发现 connect 端口 → pm grant / shell 直写兜底 → 验证
+                val r = AdbAuthManager.pairAndGrant(
                     applicationContext, code, "127.0.0.1", port
                 )
-                postResult(success = true, shortText = "授权成功，权限自动恢复已开启", detail = "设备 GUID：$guid")
+                if (r.shellDirect) {
+                    postResult(
+                        success = true,
+                        shortText = "已开启无障碍（兼容模式）",
+                        detail = "系统限制了 ADB 授权权限，已改用 shell 直接开启无障碍，功能可正常使用。\n" +
+                            "注意：此模式下 App 被系统彻底杀掉后无法自行恢复，如失效请重新运行一次配对。\n" +
+                            "设备 GUID：${r.guid}"
+                    )
+                } else {
+                    postResult(
+                        success = true,
+                        shortText = "授权成功，权限自动恢复已开启",
+                        detail = "设备 GUID：${r.guid}"
+                    )
+                }
                 finishAndStop(removeNotification = false)
             } catch (e: Exception) {
                 Log.w(TAG, "配对授权失败", e)

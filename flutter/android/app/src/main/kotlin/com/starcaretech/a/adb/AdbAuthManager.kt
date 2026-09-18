@@ -30,6 +30,16 @@ object AdbAuthManager {
 
     class AuthException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
+    /**
+     * @param guid 配对返回的设备 guid
+     * @param shellDirect true=未能 pm grant（ROM 限制），已退而用 shell 直接写 secure settings
+     *                    开启无障碍；此模式下 App 自身没有 WRITE_SECURE_SETTINGS，进程被杀后
+     *                    无法自愈，需要重新跑一次本流程
+     */
+    data class GrantResult(val guid: String, val shellDirect: Boolean)
+
+    private const val MARKER = "__ADB_SHELL_MARKER__"
+
     /** 把异常链（含异常类型）展开成可展示文本 */
     private fun Throwable?.chainText(): String {
         val sb = StringBuilder()
@@ -57,14 +67,20 @@ object AdbAuthManager {
     fun unsupportedReason(): String? =
         if (isSupported()) null else "该功能需要 Android 11 及以上系统（需系统支持无线调试）"
 
+    /** 一轮 shell 执行结果：连接都失败时 connected=false（attempts 为各次原因） */
+    private class ShellRun(
+        val connected: Boolean,
+        val output: String = "",
+        val attempts: List<String> = emptyList()
+    )
+
     /**
      * 完整闭环：配对 → 授权 → 验证。
      * @param pairingCode 6 位配对码
      * @param pairingHost 配对服务地址（一般 127.0.0.1）
      * @param pairingPort 系统无线调试配对页显示的端口（或 mDNS 扫描得到）
-     * @return 设备 guid
      */
-    fun pairAndGrant(context: Context, pairingCode: String, pairingHost: String = "127.0.0.1", pairingPort: Int): String {
+    fun pairAndGrant(context: Context, pairingCode: String, pairingHost: String = "127.0.0.1", pairingPort: Int): GrantResult {
         val identity = AdbKeyStore.getOrCreate(context)
 
         // 1. 配对（成功后设备保存我们的公钥，并开放 TLS connect 服务）
@@ -78,12 +94,78 @@ object AdbAuthManager {
         // 配对刚完成，connect 服务可能还没就绪，等一下再连
         Thread.sleep(2000)
 
-        // 2 + 3. 找 TLS connect 端口并执行 pm grant。
-        // 关键：connect 端口每次尝试都重新发现，不能首次发现后固定重试——
-        // NsdManager 可能返回上一次无线调试会话的陈旧记录（端口已关，ECONNREFUSED），
-        // 且部分 ROM 在配对完成后 connect 端口才刚注册/会变化。
+        // 2. pm grant（标准路径）。connect 端口每轮都重新 mDNS 发现，
+        //    自动跳过 NsdManager 的陈旧记录。
+        val grantRun = runShellWithRetry(context, identity) {
+            "pm grant ${context.packageName} $PERM_WRITE_SECURE_SETTINGS"
+        }
+        if (!grantRun.connected) {
+            throw AuthException(
+                "【已配对，但连接本机 adbd 执行授权失败】\n" +
+                "connect 端口由 mDNS 自动发现并已校验 127.0.0.1 存活：\n\n" +
+                grantRun.attempts.joinToString("\n\n"),
+                null
+            )
+        }
+
+        val grantOut = grantRun.output.trim()
+        if (grantOut.isEmpty()) {
+            // 3a. 标准路径：验证 WRITE_SECURE_SETTINGS 落库
+            var granted = isWriteSecureSettingsGranted(context)
+            if (!granted) {
+                for (i in 1..2) {
+                    Thread.sleep(1500)
+                    granted = isWriteSecureSettingsGranted(context)
+                    if (granted) break
+                }
+            }
+            if (granted) {
+                saveResult(context, guid, "pm_grant")
+                Log.i(TAG, "ADB 自授权完成（pm grant）guid=$guid")
+                return GrantResult(guid, shellDirect = false)
+            }
+            // 输出为空但权限没落下：落到兜底再试一次
+            Log.w(TAG, "pm grant 无输出但权限未生效，转 shell 直写兜底")
+        }
+
+        // 3b. 兜底：很多国产 ROM（MIUI/HyperOS/ColorOS 等）只拦截 pm grant
+        //     （shell 无 GRANT_RUNTIME_PERMISSIONS），但 shell 自身仍持有
+        //     WRITE_SECURE_SETTINGS，可以直接 settings put secure 开启无障碍——
+        //     Shizuku 生态的免 root 工具普遍用这个通道。
+        val directOut = try {
+            shellDirectEnableAccessibility(context, identity)
+        } catch (e: Exception) {
+            Log.w(TAG, "shell 直写兜底失败", e)
+            null
+        }
+        if (directOut == true) {
+            saveResult(context, guid, "shell_direct")
+            Log.i(TAG, "ADB 授权完成（shell 直写兼容模式）guid=$guid")
+            return GrantResult(guid, shellDirect = true)
+        }
+
+        // 4. 两条路都失败：按特征给出对应指引
+        val romHint = when {
+            grantOut.contains("GRANT_RUNTIME_PERMISSIONS") -> buildRomSecurityHint(grantOut)
+            grantOut.isEmpty() ->
+                "【授权未生效】\npm grant 与 shell 直写均未把无障碍/权限写入系统。\n" +
+                "请尝试：关闭无线调试后重新打开 → 重新配对；若仍失败请重启手机后再试。"
+            else -> "【pm grant 未成功】\n$grantOut"
+        }
+        throw AuthException(romHint)
+    }
+
+    /**
+     * 最多 3 轮：每轮重新发现 connect 端口（端口会变/陈旧记录要跳过），
+     * 连接成功即返回命令输出；3 次都连不上才判定连接失败。
+     */
+    private fun runShellWithRetry(
+        context: Context,
+        identity: AdbKeyStore.Identity,
+        command: () -> String
+    ): ShellRun {
+        val cmd = command()
         val attempts = mutableListOf<String>()
-        var output = ""
         for (attempt in 1..3) {
             val connect = discoverConnect(context)
             if (connect == null) {
@@ -95,66 +177,99 @@ object AdbAuthManager {
                 if (attempt < 3) Thread.sleep(2000)
                 continue
             }
-            Log.i(TAG, "配对成功 guid=$guid，第 $attempt/3 次连接 adbd ${connect.host}:${connect.port}（来源:${connect.serviceName}）")
+            Log.i(TAG, "第 $attempt/3 次连接 adbd ${connect.host}:${connect.port}（来源:${connect.serviceName}）")
             try {
-                output = AdbConnection.shell(
-                    identity,
-                    connect.host,
-                    connect.port,
-                    "pm grant ${context.packageName} $PERM_WRITE_SECURE_SETTINGS",
-                    timeoutMs = 10_000
+                val output = AdbConnection.shell(
+                    identity, connect.host, connect.port, cmd, timeoutMs = 10_000
                 )
-                attempts.clear()
-                break
+                return ShellRun(connected = true, output = output)
             } catch (e: Exception) {
                 Log.w(TAG, "连接 adbd 失败 尝试 $attempt/3 ${connect.host}:${connect.port}", e)
                 attempts.add("第 $attempt 次（${connect.host}:${connect.port}，来源:${connect.serviceName}）:\n${e.chainText()}")
                 if (attempt < 3) Thread.sleep(2000)
             }
         }
-        if (attempts.isNotEmpty()) {
-            throw AuthException(
-                "【已配对，但连接本机 adbd 执行授权失败】\n" +
-                "connect 端口由 mDNS 自动发现并已校验 127.0.0.1 存活：\n\n" +
-                attempts.joinToString("\n\n"),
-                null
-            )
-        }
-        val trimmed = output.trim()
-        if (trimmed.isNotEmpty()) {
-            // pm grant 失败会输出异常信息
-            throw AuthException("【pm grant 未成功】\n$trimmed")
-        }
+        return ShellRun(connected = false, attempts = attempts)
+    }
 
-        // 4. 验证（授权状态落库可能有轻微延迟，1.5s 内重试 3 次）
-        var granted = isWriteSecureSettingsGranted(context)
-        if (!granted) {
-            for (i in 1..2) {
-                Thread.sleep(1500)
-                granted = isWriteSecureSettingsGranted(context)
-                if (granted) break
-            }
-        }
-        if (!granted) {
-            throw AuthException(
-                "【授权流程完成但权限未生效】\n" +
-                "pm grant 已执行但系统未授予 WRITE_SECURE_SETTINGS，常见原因：\n" +
-                "1. 该 ROM（多见于华为/荣耀部分机型）限制通过无线调试授予安全权限\n" +
-                "2. 需要关闭无线调试后重新配对再试一次\n" +
-                "3. 命令输出：${trimmed.ifEmpty { "(空，标准 AOSP 上表示成功)" }}")
-        }
+    /**
+     * shell 直写开启无障碍。在 adb shell 内用一条复合命令完成"读-改-写-校验"，
+     * 保留名单里其他应用的服务。返回 true 表示系统名单已包含我们的组件。
+     */
+    private fun shellDirectEnableAccessibility(context: Context, identity: AdbKeyStore.Identity): Boolean {
+        val comp = accessibilityComponent(context)
+        // 组件名只含 [a-z0-9./]，直接内联安全；其余全部用 sh 变量，避免转义问题
+        val script = """
+            old=${'$'}(settings get secure enabled_accessibility_services)
+            target='$comp'
+            case ":${'$'}old:" in
+              *":${'$'}target:"*) nval="${'$'}old";;
+              ":null:"|"::") nval="${'$'}target";;
+              *) nval="${'$'}old:${'$'}target";;
+            esac
+            settings put secure accessibility_enabled 1
+            settings put secure enabled_accessibility_services "${'$'}nval"
+            echo $MARKER
+            settings get secure enabled_accessibility_services
+        """.trimIndent()
 
+        val run = runShellWithRetry(context, identity) { script }
+        if (!run.connected) {
+            Log.w(TAG, "shell 直写时连接 adbd 失败：\n${run.attempts.joinToString("\n")}")
+            return false
+        }
+        val out = run.output
+        if (out.contains("SecurityException") || out.contains("Permission denial")) {
+            Log.w(TAG, "shell 直写被系统拒绝：$out")
+            return false
+        }
+        val afterMarker = out.substringAfter(MARKER, "")
+        val listed = afterMarker.split('\n', ':', ' ').any { it.trim() == comp }
+        if (!listed) return false
+
+        // 系统设置落库后再用 App 侧视角确认一次（最多等 3 秒）
+        if (isAccessibilityListed(context)) return true
+        for (i in 1..2) {
+            Thread.sleep(1500)
+            if (isAccessibilityListed(context)) return true
+        }
+        return false
+    }
+
+    private fun saveResult(context: Context, guid: String, mode: String) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putBoolean("granted", true)
+            .putBoolean("granted", mode == "pm_grant")
+            .putString("grant_mode", mode)
             .putString("guid", guid)
             .putLong("granted_at", System.currentTimeMillis())
             .apply()
-        Log.i(TAG, "ADB 自授权完成 guid=$guid")
-        return guid
     }
 
+    /** GRANT_RUNTIME_PERMISSIONS 特征错误：国产 ROM 的"USB 调试安全设置"未开 */
+    private fun buildRomSecurityHint(rawError: String): String =
+        """
+        【系统限制了 ADB 授权权限，配对本身是成功的】
+        设备厂商给 ADB 加了安全开关：当前 ADB shell 没有授予权限的能力
+        （缺少 GRANT_RUNTIME_PERMISSIONS）。此状态下任何 ADB 工具（Shizuku、
+        电脑端 adb 命令）执行 pm grant 都会报同一个错，不是本 App 的问题。
+
+        请到「开发者选项」打开下面对应开关，然后回到本页重新点「开始配对」：
+        · 小米 / 红米（MIUI、HyperOS）：
+          打开「USB 调试（安全设置）」；若要求登录小米账号，登录时不要勾选同步
+        · OPPO / 一加 / realme（ColorOS）：
+          打开「USB 调试（安全设置）」，或关闭「权限监控」后重试
+        · vivo / iQOO（OriginOS）：打开「USB 模拟点击」
+        · 华为 / 荣耀：打开「仅充电模式下允许 ADB 调试」（可能需先用 USB 连一次电脑）
+        · 其他品牌：在开发者选项里搜索「安全」「权限」「模拟点击」类开关
+
+        打开开关后一般需要重新配对一次（重开系统配对码页面即可）。
+
+        系统原始错误：
+        $rawError
+        """.trimIndent()
+
     /** 自动扫描配对服务再走完整流程（需要用户停在配对码页面） */
-    fun pairAndGrantAuto(context: Context, pairingCode: String): String {
+    fun pairAndGrantAuto(context: Context, pairingCode: String): GrantResult {
         val service = AdbDiscovery.findFirst(context, AdbDiscovery.TYPE_PAIRING, timeoutMs = 20_000)
             ?: throw AuthException("未发现配对服务：请确认无线调试配对码页面已打开")
         // host 强制 127.0.0.1（本机连本机）
