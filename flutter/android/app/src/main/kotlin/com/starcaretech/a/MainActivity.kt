@@ -14,9 +14,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.ClipboardManager
+import android.net.Uri
 import android.os.Bundle
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import android.util.Log
 import android.view.WindowManager
 import android.media.MediaCodecInfo
@@ -34,6 +36,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import kotlin.concurrent.thread
 import com.starcaretech.a.adb.AdbAuthManager
+import com.starcaretech.a.adb.AdbPairingOverlayService
 
 
 class MainActivity : FlutterActivity() {
@@ -295,34 +298,38 @@ class MainActivity : FlutterActivity() {
                     )
                 }
                 "adb_pair_and_grant" -> {
-                    // args: Map{code: String, port: Int?}；port 提供时直连不走 mDNS
-                    val args = call.arguments as? Map<*, *>
-                    val code = args?.get("code") as? String
-                    val port = (args?.get("port") as? Number)?.toInt()
-                    if (code == null || code.length != 6) {
-                        result.error("-1", "配对码必须为 6 位数字", null)
-                        return@setMethodCallHandler
-                    }
+                    // 启动悬浮窗配对（用户在系统配对码页面上方填写端口和码）
                     if (!AdbAuthManager.isSupported()) {
                         result.error("-1", AdbAuthManager.unsupportedReason() ?: "当前系统不支持", null)
                         return@setMethodCallHandler
                     }
-                    thread {
-                        try {
-                            // 有端口直接连（配对页面切后台后 mDNS 广播会停，但端口可能还活几秒；
-                            //  分屏模式下配对页保持前台，端口持续有效）
-                            val guid = if (port != null && port > 0) {
-                                AdbAuthManager.pairAndGrant(context, code, "127.0.0.1", port)
-                            } else {
-                                AdbAuthManager.pairAndGrantAuto(context, code)
-                            }
-                            activity.runOnUiThread { result.success(guid) }
-                        } catch (e: Exception) {
-                            activity.runOnUiThread {
-                                result.error("-1", e.message ?: "授权失败，请重试", null)
-                            }
+                    if (!Settings.canDrawOverlays(context)) {
+                        result.error("-2", "需要悬浮窗权限", null)
+                        return@setMethodCallHandler
+                    }
+                    // 设置回调：悬浮窗完成配对后通知 Flutter
+                    AdbPairingOverlayService.onResult = { success, msg ->
+                        runOnUiThread {
+                            if (success) result.success(msg)
+                            else result.error("-1", msg, null)
                         }
                     }
+                    val intent = Intent(context, AdbPairingOverlayService::class.java)
+                    context.startService(intent)
+                }
+                "adb_check_overlay_permission" -> {
+                    result.success(Settings.canDrawOverlays(context))
+                }
+                "adb_request_overlay_permission" -> {
+                    if (!Settings.canDrawOverlays(context)) {
+                        val intent = Intent(
+                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            Uri.parse("package:${context.packageName}")
+                        )
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        context.startActivity(intent)
+                    }
+                    result.success(true)
                 }
                 "adb_repair" -> {
                     // 手动触发一次无障碍自愈
