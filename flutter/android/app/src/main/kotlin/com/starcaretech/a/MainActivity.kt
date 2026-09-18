@@ -14,11 +14,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.ClipboardManager
-import android.net.Uri
 import android.os.Bundle
 import android.os.Build
 import android.os.IBinder
-import android.provider.Settings
 import android.util.Log
 import android.view.WindowManager
 import android.media.MediaCodecInfo
@@ -36,7 +34,6 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import kotlin.concurrent.thread
 import com.starcaretech.a.adb.AdbAuthManager
-import com.starcaretech.a.adb.AdbPairingOverlayService
 
 
 class MainActivity : FlutterActivity() {
@@ -298,38 +295,23 @@ class MainActivity : FlutterActivity() {
                     )
                 }
                 "adb_pair_and_grant" -> {
-                    // 启动悬浮窗配对（用户在系统配对码页面上方填写端口和码）
+                    // 启动无障碍悬浮窗配对（覆盖系统设置页）
                     if (!AdbAuthManager.isSupported()) {
                         result.error("-1", AdbAuthManager.unsupportedReason() ?: "当前系统不支持", null)
                         return@setMethodCallHandler
                     }
-                    if (!Settings.canDrawOverlays(context)) {
-                        result.error("-2", "需要悬浮窗权限", null)
+                    if (!InputService.isOpen) {
+                        result.error("-3", "需要先开启无障碍服务", null)
                         return@setMethodCallHandler
                     }
                     // 设置回调：悬浮窗完成配对后通知 Flutter
-                    AdbPairingOverlayService.onResult = { success, msg ->
+                    AdbAuthManager.pairingOverlayCallback = { success, msg ->
                         runOnUiThread {
                             if (success) result.success(msg)
                             else result.error("-1", msg, null)
                         }
                     }
-                    val intent = Intent(context, AdbPairingOverlayService::class.java)
-                    context.startService(intent)
-                }
-                "adb_check_overlay_permission" -> {
-                    result.success(Settings.canDrawOverlays(context))
-                }
-                "adb_request_overlay_permission" -> {
-                    if (!Settings.canDrawOverlays(context)) {
-                        val intent = Intent(
-                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                            Uri.parse("package:${context.packageName}")
-                        )
-                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        context.startActivity(intent)
-                    }
-                    result.success(true)
+                    InputService.ctx?.showAdbPairingOverlay()
                 }
                 "adb_repair" -> {
                     // 手动触发一次无障碍自愈

@@ -699,26 +699,15 @@ class _AdbAuthSectionState extends State<AdbAuthSection> {
                     style: ElevatedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(horizontal: 12)),
                     onPressed: () async {
-                      // 检查悬浮窗权限
-                      final hasOverlay = await gFFI.invokeMethod(
-                          "adb_check_overlay_permission", null) as bool;
-                      if (!hasOverlay) {
-                        await gFFI.invokeMethod(
-                            "adb_request_overlay_permission", null);
-                        showToast("请授予悬浮窗权限后重试");
-                        return;
-                      }
-                      // 启动悬浮窗：用户切到系统配对码页面后，悬浮窗浮在上面
+                      // 启动无障碍悬浮窗（覆盖系统设置页填写配对码）
                       try {
                         await gFFI.invokeMethod("adb_pair_and_grant", null);
                         await _refresh();
                         checkService();
                         gFFI.serverModel.checkAndroidPermission();
                       } on PlatformException catch (e) {
-                        if (e.code == "-2") {
-                          await gFFI.invokeMethod(
-                              "adb_request_overlay_permission", null);
-                          showToast("请授予悬浮窗权限后重试");
+                        if (e.code == "-3") {
+                          showToast("请先开启本应用的无障碍服务");
                         }
                         // 其他错误（含用户取消、配对失败）悬浮窗内已提示，静默
                       } catch (_) {

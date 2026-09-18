@@ -68,6 +68,21 @@ class InputService : AccessibilityService() {
             get() = ctx != null
     }
 
+    // ADB 配对悬浮窗（TYPE_ACCESSIBILITY_OVERLAY，可覆盖系统设置页）
+    private var adbOverlayView: android.view.View? = null
+
+    /** 显示 ADB 配对悬浮窗（由 MainActivity 通道调用） */
+    fun showAdbPairingOverlay() {
+        if (adbOverlayView != null) return
+        val wm = getSystemService(WINDOW_SERVICE) as android.view.WindowManager
+        adbOverlayView = com.starcaretech.a.adb.AdbPairingOverlay.show(this, wm)
+    }
+
+    fun hideAdbPairingOverlay() {
+        adbOverlayView?.let { runCatching { (getSystemService(WINDOW_SERVICE) as android.view.WindowManager).removeView(it) } }
+        adbOverlayView = null
+    }
+
     private val logTag = "input service"
     private var leftIsDown = false
     private var touchPath = Path()
