@@ -70,6 +70,7 @@ class AdbPairingService : Service() {
                     setSound(null, null)
                     setShowBadge(false)
                 }
+            )
         }
     }
 
@@ -273,9 +274,10 @@ class AdbPairingService : Service() {
         // 成功路径：结果通知已在 stopForeground 之前 post，这里需要重新补发一次
         // （STOP_FOREGROUND_REMOVE 会连普通通知一并移除；DETACH 常量需 API 24，minSdk 22 不能用）
         if (!removeNotification) {
-            // 重新发送最近一次结果：由调用方在 stopSelf 前通过 postResult 已构造，这里简单重发成功通知
-            getSystemService(NotificationManager::class.java)
-                .notify(NOTIFICATION_ID, lastResultNotification)
+            // 重新发送最近一次结果：由调用方在 stopSelf 前通过 postResult 已构造
+            lastResultNotification?.let {
+                getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, it)
+            }
         }
         stopSelf()
     }
