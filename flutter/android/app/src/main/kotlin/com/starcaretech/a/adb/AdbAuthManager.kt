@@ -30,6 +30,20 @@ object AdbAuthManager {
 
     class AuthException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
+    /** 把异常链（含异常类型）展开成可展示文本 */
+    private fun Throwable?.chainText(): String {
+        val sb = StringBuilder()
+        var cur: Throwable? = this
+        var depth = 0
+        while (cur != null && depth < 6) {
+            if (depth > 0) sb.append("\n  ↳ ")
+            sb.append(cur.javaClass.name).append(": ").append(cur.message ?: "(无错误信息)")
+            cur = cur.cause
+            depth++
+        }
+        return sb.toString()
+    }
+
     /**
      * 功能是否可用：
      * - "无线调试"（配对码页面 + mDNS 配对服务 + SPAKE2 协议）是 Android 11（API 30）引入的，
@@ -57,7 +71,8 @@ object AdbAuthManager {
         val guid = try {
             AdbPairingClient.pair(identity, pairingHost, pairingPort, pairingCode)
         } catch (e: Exception) {
-            throw AuthException("配对失败：请确认配对码正确且页面停留在此界面", e)
+            Log.w(TAG, "配对失败", e)
+            throw AuthException("【配对阶段失败】\n${e.chainText()}", e)
         }
 
         // 配对刚完成，connect 服务可能还没就绪，等一下再连
@@ -65,9 +80,10 @@ object AdbAuthManager {
 
         // 2. 找 TLS connect 端口（mDNS 获取端口，host 强制 127.0.0.1 本机回环）
         val connect = discoverConnect(context)
+        Log.i(TAG, "配对成功 guid=$guid，连接 adbd ${connect.host}:${connect.port}（来源:${connect.serviceName}）")
 
-        // 3. pm grant（连接失败重试 3 次，每次间隔 2s）
-        var lastError: Exception? = null
+        // 3. pm grant（连接失败重试 3 次，每次间隔 2s；完整保留每次异常详情）
+        val attempts = mutableListOf<String>()
         var output = ""
         for (attempt in 1..3) {
             try {
@@ -78,21 +94,28 @@ object AdbAuthManager {
                     "pm grant ${context.packageName} $PERM_WRITE_SECURE_SETTINGS",
                     timeoutMs = 10_000
                 )
-                lastError = null
+                attempts.clear()
                 break
             } catch (e: Exception) {
-                lastError = e
-                Log.w(TAG, "连接 adbd 失败 尝试 $attempt/3 host=${connect.host}:${connect.port}", e)
+                Log.w(TAG, "连接 adbd 失败 尝试 $attempt/3 ${connect.host}:${connect.port}", e)
+                attempts.add("第 $attempt 次（${connect.host}:${connect.port}）:\n${e.chainText()}")
                 if (attempt < 3) Thread.sleep(2000)
             }
         }
-        if (lastError != null) {
-            throw AuthException("已配对但连接 adbd 失败（host=${connect.host}:${connect.port}）", lastError)
+        if (attempts.isNotEmpty()) {
+            val sourceHint = if (connect.serviceName == "fallback")
+                "\n（mDNS 未发现 connect 服务，使用了兜底端口 5555；若系统无线调试端口不是 5555 请重试）" else ""
+            throw AuthException(
+                "【已配对，但连接本机 adbd 执行授权失败】\n" +
+                "目标：${connect.host}:${connect.port}（端口来源:${connect.serviceName}）$sourceHint\n\n" +
+                attempts.joinToString("\n\n"),
+                null
+            )
         }
         val trimmed = output.trim()
         if (trimmed.isNotEmpty()) {
             // pm grant 失败会输出异常信息
-            throw AuthException("pm grant 未成功：$trimmed")
+            throw AuthException("【pm grant 未成功】\n$trimmed")
         }
 
         // 4. 验证

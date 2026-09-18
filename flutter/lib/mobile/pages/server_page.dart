@@ -827,16 +827,64 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
                 keyboardType: TextInputType.number,
                 maxLength: 6,
                 inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                decoration: InputDecoration(
+                decoration: const InputDecoration(
                   isDense: true,
                   labelText: "6 位配对码",
                   counterText: "",
-                  border: const OutlineInputBorder(),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-                  errorText: _error,
+                  border: OutlineInputBorder(),
+                  contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 12),
                 ),
                 onSubmitted: (_) => _busy ? null : _submit(),
               ),
+              if (_error != null) ...[
+                const SizedBox(height: 10),
+                Container(
+                  width: double.maxFinite,
+                  constraints: const BoxConstraints(maxHeight: 220),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withOpacity(0.08),
+                    border: Border.all(color: Colors.red.withOpacity(0.4)),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(children: [
+                        const Icon(Icons.error_outline, size: 16, color: Colors.red),
+                        const SizedBox(width: 6),
+                        const Expanded(
+                          child: Text("失败详情（可长按选择文字）",
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.red)),
+                        ),
+                        InkWell(
+                          onTap: () {
+                            Clipboard.setData(ClipboardData(text: _error!));
+                            showToast("错误信息已复制");
+                          },
+                          child: const Padding(
+                            padding: EdgeInsets.all(4),
+                            child: Icon(Icons.copy, size: 15, color: Colors.red),
+                          ),
+                        )
+                      ]),
+                      const Divider(height: 14),
+                      Expanded(
+                        child: SingleChildScrollView(
+                          child: SelectableText(
+                            _error!,
+                            style: const TextStyle(fontSize: 12, height: 1.5),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              ],
               if (_busy) ...[
                 const SizedBox(height: 12),
                 Row(children: const [

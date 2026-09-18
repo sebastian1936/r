@@ -202,14 +202,26 @@ object AdbKeyStore {
      *    官方 adb 客户端同样是无条件出示指定证书）
      */
     fun createTlsSocket(identity: Identity, host: String, port: Int, timeoutMs: Int): SSLSocket {
+        val socket = Socket()
+        socket.tcpNoDelay = true
+        socket.soTimeout = timeoutMs
+        socket.connect(InetSocketAddress(host, port), timeoutMs)
+        return wrapTlsSocket(identity, socket, host, port, timeoutMs)
+    }
+
+    /**
+     * 在一条已连接的明文 socket 上包裹 TLS（A_STLS 升级路径，对照 Shizuku AdbClient）。
+     * 无线调试的 _adb-tls-connect._tcp 端口要求：先明文 A_CNXN → 对端回 A_STLS →
+     * 我方回 A_STLS → 在此把同一 socket 升级为 TLSv1.3。
+     */
+    fun wrapTlsSocket(identity: Identity, plain: Socket, host: String, port: Int, timeoutMs: Int): SSLSocket {
         val sslContext = SSLContext.getInstance("TLS", Conscrypt.newProvider())
         sslContext.init(arrayOf<KeyManager>(FixedKeyManager(identity)), arrayOf<javax.net.ssl.TrustManager>(TrustAllManager()), null)
-        val socket = sslContext.socketFactory.createSocket() as SSLSocket
+        val socket = sslContext.socketFactory.createSocket(plain, host, port, true) as SSLSocket
         try {
             socket.tcpNoDelay = true
             socket.soTimeout = timeoutMs
             socket.enabledProtocols = arrayOf("TLSv1.3")
-            socket.connect(InetSocketAddress(host, port), timeoutMs)
             socket.startHandshake()
         } catch (e: Exception) {
             runCatching { socket.close() }
