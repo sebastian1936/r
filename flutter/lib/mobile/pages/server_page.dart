@@ -807,7 +807,7 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
       _errorCode = null;
     });
     try {
-      final res = await gFFI.invokeMethod("adb_pair_and_grant", {"addr": addr, "code": code});
+      final dynamic res = await gFFI.invokeMethod("adb_pair_and_grant", {"addr": addr, "code": code});
       if (!mounted) return;
       final shellDirect = res is Map && res["shell_direct"] == true;
       Navigator.of(context).pop(true);
