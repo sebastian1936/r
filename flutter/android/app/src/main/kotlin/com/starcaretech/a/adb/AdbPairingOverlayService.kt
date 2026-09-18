@@ -112,10 +112,15 @@ class AdbPairingOverlayService : Service() {
         }
         container.addView(codeEdit)
 
-        // 错误
+        // 错误（醒目：红色背景 + 大字 + 完整错误链）
         val errorText = TextView(ctx).apply {
-            setTextColor(0xFF6666); textSize = 12f
-            setPadding(0, dp(6), 0, dp(6)); visibility = View.GONE
+            setTextColor(Color.WHITE); textSize = 14f
+            background = roundBg(0xCCFF3333.toInt(), 6)
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply {
+                topMargin = dp(6); bottomMargin = dp(4)
+            }
         }
         container.addView(errorText)
 
@@ -190,7 +195,14 @@ class AdbPairingOverlayService : Service() {
                         busyRow.visibility = View.GONE
                         okBtn.isEnabled = true; cancelBtn.isEnabled = true
                         portEdit.isEnabled = true; codeEdit.isEnabled = true
-                        errorText.text = e.message ?: "授权失败，请重试"
+                        // 完整错误链：message + cause chain，方便用户截图反馈
+                        val sb = StringBuilder(e.message ?: "授权失败")
+                        var cause: Throwable? = e.cause
+                        while (cause != null) {
+                            sb.append("\n→ ").append(cause.message ?: cause.javaClass.simpleName)
+                            cause = cause.cause
+                        }
+                        errorText.text = sb.toString()
                         errorText.visibility = View.VISIBLE
                     }
                 }
