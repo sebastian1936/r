@@ -9,6 +9,7 @@ package com.starcaretech.a
 
 import ffi.FFI
 
+import android.app.NotificationManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -17,6 +18,7 @@ import android.content.ClipboardManager
 import android.os.Bundle
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import android.util.Log
 import android.view.WindowManager
 import android.media.MediaCodecInfo
@@ -342,34 +344,88 @@ class MainActivity : FlutterActivity() {
                         result.error("-1", AdbAuthManager.unsupportedReason() ?: "当前系统不支持", null)
                         return@setMethodCallHandler
                     }
-                    val notificationPermission = android.Manifest.permission.POST_NOTIFICATIONS
-                    val launchService = {
-                        ContextCompat.startForegroundService(
-                            context, AdbPairingService.startIntent(context)
-                        )
+                    val nm = context.getSystemService(NotificationManager::class.java)
+                    AdbPairingService.ensureChannel(context)
+
+                    // 权限/开关全部通过后的真正启动逻辑
+                    fun proceed() {
+                        // 国产 ROM 常见：运行时权限已授予，但通知总开关或本渠道默认关闭，
+                        // 此时 startForeground 不报错，通知却完全不显示——必须提前拦截
+                        val globalEnabled = nm.areNotificationsEnabled()
+                        val channel = nm.getNotificationChannel(AdbPairingService.CHANNEL_ID)
+                        val channelEnabled =
+                            channel == null || channel.importance != NotificationManager.IMPORTANCE_NONE
+                        if (!globalEnabled || !channelEnabled) {
+                            activity.runOnUiThread {
+                                result.error(
+                                    "NOTIFICATION_DISABLED",
+                                    "系统通知已被关闭（部分国产 ROM 默认关闭新应用通知），配对通知无法显示。请点下方「打开通知设置」开启后重试",
+                                    null
+                                )
+                            }
+                            return
+                        }
+                        try {
+                            ContextCompat.startForegroundService(
+                                context, AdbPairingService.startIntent(context)
+                            )
+                            activity.runOnUiThread { result.success(true) }
+                        } catch (e: Exception) {
+                            Log.e("MainActivity", "start pairing service failed", e)
+                            activity.runOnUiThread {
+                                result.error(
+                                    "START_FAILED",
+                                    "配对服务启动失败：${e.message ?: e.javaClass.simpleName}",
+                                    null
+                                )
+                            }
+                        }
                     }
-                    if (XXPermissions.isGranted(context, notificationPermission)) {
-                        launchService()
-                        result.success(true)
-                    } else {
-                        // 必须在 Activity 前台时申请；系统配对页之后不能再打断
+
+                    // POST_NOTIFICATIONS 是 Android 13(API33) 才引入的运行时权限；
+                    // Android 11/12 上该权限名不存在，绝不能去申请（系统会直接判拒绝）
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        !XXPermissions.isGranted(context, android.Manifest.permission.POST_NOTIFICATIONS)
+                    ) {
+                        // 必须在 Activity 前台时申请；进入系统配对页之后不能再打断
                         XXPermissions.with(activity)
-                            .permission(notificationPermission)
+                            .permission(android.Manifest.permission.POST_NOTIFICATIONS)
                             .request { _, all ->
                                 if (all) {
-                                    launchService()
-                                    activity.runOnUiThread { result.success(true) }
+                                    proceed()
                                 } else {
                                     activity.runOnUiThread {
                                         result.error(
-                                            "-1",
+                                            "NEED_PERMISSION",
                                             "需要通知权限：配对码要在下拉通知栏里输入（这样系统配对页不会切后台失效）。请授予通知权限后重试",
                                             null
                                         )
                                     }
                                 }
                             }
+                    } else {
+                        proceed()
                     }
+                }
+                "adb_open_notification_settings" -> {
+                    // 直达本应用系统通知设置（国产 ROM 自救入口），失败再退到应用详情页
+                    val opened = try {
+                        context.startActivity(
+                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                        true
+                    } catch (e: Exception) {
+                        runCatching {
+                            context.startActivity(
+                                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                                    .setData(android.net.Uri.fromParts("package", context.packageName, null))
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        }.isSuccess
+                    }
+                    result.success(opened)
                 }
                 "adb_repair" -> {
                     // 手动触发一次无障碍自愈

@@ -746,6 +746,7 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
   bool _busy = false;
   bool _manualMode = false;
   String? _error;
+  String? _errorCode;
 
   @override
   void dispose() {
@@ -759,6 +760,7 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
     setState(() {
       _busy = true;
       _error = null;
+      _errorCode = null;
     });
     try {
       await gFFI.invokeMethod("adb_start_pairing", null);
@@ -769,13 +771,22 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
       setState(() {
         _busy = false;
         _error = e.message ?? "启动失败，请重试";
+        _errorCode = e.code;
       });
     } catch (e) {
       setState(() {
         _busy = false;
         _error = "启动失败，请重试";
+        _errorCode = null;
       });
     }
+  }
+
+  /// 跳系统通知设置（国产 ROM 通知被默认关闭时的自救入口）
+  _openNotificationSettings() async {
+    try {
+      await gFFI.invokeMethod("adb_open_notification_settings", null);
+    } catch (_) {}
   }
 
   /// 手动方式（兜底）：用户分屏后自行填写 IP:端口
@@ -793,6 +804,7 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
     setState(() {
       _busy = true;
       _error = null;
+      _errorCode = null;
     });
     try {
       await gFFI.invokeMethod("adb_pair_and_grant", {"addr": addr, "code": code});
@@ -858,6 +870,22 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
               ),
             ),
           ),
+          if (_errorCode == "NEED_PERMISSION" ||
+              _errorCode == "NOTIFICATION_DISABLED")
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.red,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: const Size(0, 36),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onPressed: _openNotificationSettings,
+                icon: const Icon(Icons.notifications_active, size: 16),
+                label: const Text("打开通知设置", style: TextStyle(fontSize: 12)),
+              ),
+            ),
         ],
       ),
     );
@@ -891,6 +919,19 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
             "请在系统设置中允许本应用「后台运行」并关闭\n"
             "电池优化（部分国产 ROM 会禁止应用在设置页面时联网）。",
             style: TextStyle(fontSize: 12, height: 1.6, color: Colors.deepOrange),
+          ),
+        ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 6),
+              minimumSize: const Size(0, 32),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            onPressed: _busy ? null : _openNotificationSettings,
+            child: const Text("通知栏完全不显示通知？打开系统通知设置",
+                style: TextStyle(fontSize: 12)),
           ),
         ),
         _buildErrorBox(),
@@ -999,6 +1040,7 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
                 : () => setState(() {
                       _manualMode = false;
                       _error = null;
+                      _errorCode = null;
                     }),
             child: const Text("返回通知方式"),
           )
@@ -1009,6 +1051,7 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
                 : () => setState(() {
                       _manualMode = true;
                       _error = null;
+                      _errorCode = null;
                     }),
             child: const Text("收不到通知？手动输入", style: TextStyle(fontSize: 12)),
           ),

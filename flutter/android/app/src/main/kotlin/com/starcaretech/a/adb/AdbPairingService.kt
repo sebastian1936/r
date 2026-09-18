@@ -31,7 +31,7 @@ class AdbPairingService : Service() {
 
     companion object {
         private const val TAG = "AdbPairingService"
-        private const val CHANNEL_ID = "adb_pairing"
+        const val CHANNEL_ID = "adb_pairing"
         private const val NOTIFICATION_ID = 3
 
         private const val ACTION_START = "com.starcaretech.a.adb.START"
@@ -44,6 +44,24 @@ class AdbPairingService : Service() {
 
         fun startIntent(context: Context): Intent =
             Intent(context, AdbPairingService::class.java).setAction(ACTION_START)
+
+        /** 提前/重复创建通知渠道（Service.onCreate 与 Activity 启动前自检共用） */
+        fun ensureChannel(context: Context) {
+            val nm = context.getSystemService(NotificationManager::class.java)
+            if (nm.getNotificationChannel(CHANNEL_ID) == null) {
+                nm.createNotificationChannel(
+                    NotificationChannel(
+                        CHANNEL_ID,
+                        "无线调试配对",
+                        NotificationManager.IMPORTANCE_HIGH
+                    ).apply {
+                        description = "无线调试一键配对授权时显示"
+                        setSound(null, null)
+                        setShowBadge(false)
+                    }
+                )
+            }
+        }
     }
 
     private var discovery: AdbDiscovery.Continuous? = null
@@ -58,20 +76,7 @@ class AdbPairingService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        val nm = getSystemService(NotificationManager::class.java)
-        if (nm.getNotificationChannel(CHANNEL_ID) == null) {
-            nm.createNotificationChannel(
-                NotificationChannel(
-                    CHANNEL_ID,
-                    "无线调试配对",
-                    NotificationManager.IMPORTANCE_HIGH
-                ).apply {
-                    description = "无线调试一键配对授权时显示"
-                    setSound(null, null)
-                    setShowBadge(false)
-                }
-            )
-        }
+        ensureChannel(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -90,18 +95,24 @@ class AdbPairingService : Service() {
     // ---------------------------------------------------------------- 搜索阶段
 
     private fun beginSearch() {
-        busy = false
-        currentPort = -1
-        startForeground(NOTIFICATION_ID, searchingNotification())
-        if (discovery == null) {
-            discovery = AdbDiscovery.Continuous(
-                this,
-                AdbDiscovery.TYPE_PAIRING,
-                onValidPort = { port -> onPairingPortFound(port) },
-                onLost = { onPairingServiceLost() }
-            )
+        try {
+            busy = false
+            currentPort = -1
+            startForeground(NOTIFICATION_ID, searchingNotification())
+            if (discovery == null) {
+                discovery = AdbDiscovery.Continuous(
+                    this,
+                    AdbDiscovery.TYPE_PAIRING,
+                    onValidPort = { port -> onPairingPortFound(port) },
+                    onLost = { onPairingServiceLost() }
+                )
+            }
+            discovery?.start()
+        } catch (e: Exception) {
+            // 任何启动异常都不能让服务静默死掉（否则用户只看到通知栏空空如也）
+            Log.e(TAG, "配对服务启动失败", e)
+            stopSelf()
         }
-        discovery?.start()
     }
 
     private fun onPairingPortFound(port: Int) {
@@ -286,7 +297,8 @@ class AdbPairingService : Service() {
     private var lastResultNotification: Notification? = null
 
     override fun onDestroy() {
-        discovery?.stop()
+        discovery?.release()
+        discovery = null
         super.onDestroy()
     }
 

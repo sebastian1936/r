@@ -154,9 +154,14 @@ object AdbDiscovery {
         private val onLost: (() -> Unit)? = null
     ) {
         private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
+        // NsdManager 在调用 discoverServices 的线程（按其 Looper）派发所有回调。
+        // 必须用专用 HandlerThread：回调里要做 ServerSocket 端口探测，
+        // 在主线程执行会抛 NetworkOnMainThreadException 直接杀掉前台服务。
+        private val thread = HandlerThread("AdbNsdContinuous").apply { start() }
+        private val handler = Handler(thread.looper)
         @Volatile private var running = false
         private var registered = false
-        private var serviceName: String? = null
+        @Volatile private var serviceName: String? = null
 
         private val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(regType: String?) { registered = true }
@@ -194,16 +199,36 @@ object AdbDiscovery {
         fun start() {
             if (running) return
             running = true
-            runCatching { nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, listener) }
+            handler.post {
+                if (running) {
+                    runCatching { nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, listener) }
+                }
+            }
         }
 
         fun stop() {
             if (!running) return
             running = false
-            if (registered) {
-                runCatching { nsdManager.stopServiceDiscovery(listener) }
+            // registered 只在 handler 线程读写，整段 post 过去避免竞态
+            handler.post {
+                if (registered) {
+                    runCatching { nsdManager.stopServiceDiscovery(listener) }
+                    registered = false
+                }
             }
             serviceName = null
+        }
+
+        /** 服务彻底销毁时释放线程；之后不可再 start */
+        fun release() {
+            running = false
+            handler.post {
+                if (registered) {
+                    runCatching { nsdManager.stopServiceDiscovery(listener) }
+                    registered = false
+                }
+                thread.quitSafely()
+            }
         }
     }
 }
