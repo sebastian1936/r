@@ -295,23 +295,38 @@ class MainActivity : FlutterActivity() {
                     )
                 }
                 "adb_pair_and_grant" -> {
-                    // 启动无障碍悬浮窗配对（覆盖系统设置页）
+                    // args: Map{addr: String(IP:端口), code: String(6位码)}，分屏模式下由 Dialog 传入
+                    val args = call.arguments as? Map<*, *>
+                    val code = args?.get("code") as? String
+                    val addr = args?.get("addr") as? String
+                    if (code == null || code.length != 6) {
+                        result.error("-1", "配对码必须为 6 位数字", null)
+                        return@setMethodCallHandler
+                    }
+                    if (addr.isNullOrBlank()) {
+                        result.error("-1", "请输入配对页显示的 IP:端口", null)
+                        return@setMethodCallHandler
+                    }
+                    // 解析端口（取冒号后最后一段），host 强制 127.0.0.1
+                    val port = try { addr.trim().split(':').last().toInt() } catch (_: Exception) { 0 }
+                    if (port <= 0) {
+                        result.error("-1", "IP:端口格式不正确", null)
+                        return@setMethodCallHandler
+                    }
                     if (!AdbAuthManager.isSupported()) {
                         result.error("-1", AdbAuthManager.unsupportedReason() ?: "当前系统不支持", null)
                         return@setMethodCallHandler
                     }
-                    if (!InputService.isOpen) {
-                        result.error("-3", "需要先开启无障碍服务", null)
-                        return@setMethodCallHandler
-                    }
-                    // 设置回调：悬浮窗完成配对后通知 Flutter
-                    AdbAuthManager.pairingOverlayCallback = { success, msg ->
-                        runOnUiThread {
-                            if (success) result.success(msg)
-                            else result.error("-1", msg, null)
+                    thread {
+                        try {
+                            val guid = AdbAuthManager.pairAndGrant(context, code, "127.0.0.1", port)
+                            activity.runOnUiThread { result.success(guid) }
+                        } catch (e: Exception) {
+                            activity.runOnUiThread {
+                                result.error("-1", e.message ?: "授权失败，请重试", null)
+                            }
                         }
                     }
-                    InputService.ctx?.showAdbPairingOverlay()
                 }
                 "adb_repair" -> {
                     // 手动触发一次无障碍自愈

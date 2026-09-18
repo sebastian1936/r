@@ -21,10 +21,6 @@ object AdbAuthManager {
     private const val TAG = "AdbAuthManager"
     private const val PREFS = "adb_auth"
 
-    /** 悬浮窗配对完成回调（由 MainActivity 设置，悬浮窗 UI 触发） */
-    @Volatile
-    var pairingOverlayCallback: ((success: Boolean, message: String) -> Unit)? = null
-
     /** 目标权限：signature|privileged|development，shell 可以 grant */
     private const val PERM_WRITE_SECURE_SETTINGS = "android.permission.WRITE_SECURE_SETTINGS"
 

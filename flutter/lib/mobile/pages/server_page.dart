@@ -699,24 +699,165 @@ class _AdbAuthSectionState extends State<AdbAuthSection> {
                     style: ElevatedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(horizontal: 12)),
                     onPressed: () async {
-                      // 启动无障碍悬浮窗（覆盖系统设置页填写配对码）
-                      try {
-                        await gFFI.invokeMethod("adb_pair_and_grant", null);
+                      final ok = await showDialog<bool>(
+                          context: context,
+                          builder: (_) => const _AdbPairDialog());
+                      if (ok == true) {
                         await _refresh();
                         checkService();
                         gFFI.serverModel.checkAndroidPermission();
-                      } on PlatformException catch (e) {
-                        if (e.code == "-3") {
-                          showToast("请先开启本应用的无障碍服务");
-                        }
-                        // 其他错误（含用户取消、配对失败）悬浮窗内已提示，静默
-                      } catch (_) {
-                        // 静默
                       }
                     },
                     label: const Text("一键开启", style: TextStyle(fontSize: 13))),
           ),
         )
+      ],
+    );
+  }
+}
+
+/// 无线调试配对对话框：引导用户分屏后填 IP:端口 和 配对码
+class _AdbPairDialog extends StatefulWidget {
+  const _AdbPairDialog({Key? key}) : super(key: key);
+
+  @override
+  State<_AdbPairDialog> createState() => _AdbPairDialogState();
+}
+
+class _AdbPairDialogState extends State<_AdbPairDialog> {
+  final _addrController = TextEditingController();
+  final _codeController = TextEditingController();
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _addrController.dispose();
+    _codeController.dispose();
+    super.dispose();
+  }
+
+  _submit() async {
+    final addr = _addrController.text.trim();
+    final code = _codeController.text.trim();
+    if (addr.isEmpty || !addr.contains(':')) {
+      setState(() => _error = "请填写配对页上的 IP:端口，如 192.168.1.10:43251");
+      return;
+    }
+    if (code.length != 6) {
+      setState(() => _error = "请输入 6 位配对码");
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await gFFI.invokeMethod("adb_pair_and_grant", {"addr": addr, "code": code});
+      if (!mounted) return;
+      Navigator.of(context).pop(true);
+      showToast("授权成功，权限自动恢复已开启");
+    } on PlatformException catch (e) {
+      setState(() {
+        _busy = false;
+        _error = e.message ?? "授权失败，请重试";
+      });
+    } catch (e) {
+      setState(() {
+        _busy = false;
+        _error = "授权失败，请重试";
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text("无线调试一键授权"),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: const Text(
+                  "请先开启「分屏模式」再操作！\n"
+                  "配对页面一切到后台，配对码就会失效。\n"
+                  "分屏方法：打开配对页后，点最近任务键，\n"
+                  "在系统设置卡片上长按/点分屏图标，再选 RustDesk。",
+                  style: TextStyle(fontSize: 12, height: 1.6, color: Colors.deepOrange),
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                "分屏后：\n"
+                "1. 上屏：系统「开发者选项 → 无线调试 →\n"
+                "   使用配对码配对设备」\n"
+                "2. 把页面上的「IP:端口」整行抄到下面第一框\n"
+                "3. 把页面上的 6 位配对码填到第二框\n"
+                "4. 点确定，全程不要退出配对页",
+                style: TextStyle(fontSize: 12, height: 1.6),
+              ),
+              const SizedBox(height: 14),
+              TextField(
+                controller: _addrController,
+                enabled: !_busy,
+                keyboardType: TextInputType.url,
+                autocorrect: false,
+                enableSuggestions: false,
+                decoration: const InputDecoration(
+                  isDense: true,
+                  labelText: "IP:端口",
+                  hintText: "如 192.168.1.10:43251",
+                  border: OutlineInputBorder(),
+                  contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _codeController,
+                enabled: !_busy,
+                keyboardType: TextInputType.number,
+                maxLength: 6,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                decoration: InputDecoration(
+                  isDense: true,
+                  labelText: "6 位配对码",
+                  counterText: "",
+                  border: const OutlineInputBorder(),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+                  errorText: _error,
+                ),
+                onSubmitted: (_) => _busy ? null : _submit(),
+              ),
+              if (_busy) ...[
+                const SizedBox(height: 12),
+                Row(children: const [
+                  SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2)),
+                  SizedBox(width: 10),
+                  Expanded(child: Text("正在配对并授权，请保持分屏…",
+                      style: TextStyle(fontSize: 13)))
+                ])
+              ]
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: _busy ? null : () => Navigator.of(context).pop(false),
+            child: Text(translate("Cancel"))),
+        ElevatedButton(onPressed: _busy ? null : _submit, child: const Text("确定")),
       ],
     );
   }
