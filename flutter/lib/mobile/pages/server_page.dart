@@ -632,6 +632,10 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     with WidgetsBindingObserver {
   bool _supported = true;
   bool _granted = false;
+  /// 最近一次状态查询的原始返回/异常（诊断弹窗用）
+  Map<dynamic, dynamic> _lastSnap = const {};
+  String _lastPackage = "";
+  String _lastError = "";
 
   @override
   void initState() {
@@ -660,22 +664,71 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     try {
       final dynamic status = await gFFI.invokeMethod("adb_auth_status", null);
       if (!mounted) return;
-      final capturePending = (status["capture_pending"] ?? false) as bool;
-      grantedNow = (status["granted"] ?? false) as bool;
-      setState(() {
-        _supported = (status["supported"] ?? false) as bool;
-        _granted = grantedNow;
-      });
-      // 通知栏配对成功后用户回到 App：自动拉起一次系统录屏授权框
-      // （录屏是系统级授权，无法静默授予；已授权/缓存有效时不会弹窗）
-      if (capturePending) {
-        gFFI.invokeMethod("adb_ensure_capture", null);
+      if (status is Map) {
+        final capturePending = (status["capture_pending"] ?? false) as bool;
+        grantedNow = (status["granted"] ?? false) as bool;
+        final dynamic snap = status["snap"];
+        setState(() {
+          _supported = (status["supported"] ?? false) as bool;
+          _granted = grantedNow;
+          _lastSnap = snap is Map ? snap : const {};
+          _lastPackage = (status["package"] ?? "") as String;
+          _lastError = "";
+        });
+        // 通知栏配对成功后用户回到 App：自动拉起一次系统录屏授权框
+        // （录屏是系统级授权，无法静默授予；已授权/缓存有效时不会弹窗）
+        if (capturePending) {
+          gFFI.invokeMethod("adb_ensure_capture", null);
+        }
+      } else {
+        // 通道返回了非 Map（防御：某些异常路径可能返回 bool）
+        setState(() {
+          _lastError = "通道返回异常: $status";
+        });
+        debugPrint("adb_auth_status unexpected result: $status");
       }
-    } catch (_) {}
+    } catch (e) {
+      if (mounted) setState(() => _lastError = "$e");
+      debugPrint("adb_auth_status failed: $e");
+    }
     if (delayedRescan && !grantedNow && mounted) {
       await Future.delayed(const Duration(milliseconds: 1500));
       if (mounted) _refresh();
     }
+  }
+
+  /// 配对状态诊断：显示三重判据与系统名单原始内容，便于定位
+  /// "已配对/系统无障碍开关已开但页面仍显示一键开启"
+  void _showDiag() {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("配对状态诊断", style: TextStyle(fontSize: 16)),
+        content: SingleChildScrollView(
+          child: SelectableText(
+            "包名: $_lastPackage\n"
+            "WRITE_SECURE_SETTINGS 已授权: ${_lastSnap["wss"]}\n"
+            "系统无障碍名单含本应用: ${_lastSnap["a11y_listed"]}\n"
+            "无障碍服务运行中: ${_lastSnap["a11y_running"]}\n"
+            "目标组件: ${_lastSnap["component"]}\n"
+            "系统名单原始内容:\n${_lastSnap["a11y_list_raw"] ?? "(空/读不到)"}\n"
+            "${_lastError.isNotEmpty ? "查询异常: $_lastError" : ""}",
+            style: const TextStyle(fontSize: 12, height: 1.4),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                _refresh();
+              },
+              child: const Text("重新检测")),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("关闭")),
+        ],
+      ),
+    );
   }
 
   /// 一键开启：先跑环境清单检查（开发者模式/无线调试/通知/自启动/电池等），
@@ -812,12 +865,30 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
                               style: TextStyle(fontSize: 13))),
                     ],
                   )
-                : ElevatedButton.icon(
-                    icon: const Icon(Icons.bolt, size: 18),
-                    style: ElevatedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(horizontal: 12)),
-                    onPressed: _startPairing,
-                    label: const Text("一键开启", style: TextStyle(fontSize: 13))),
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      ElevatedButton.icon(
+                          icon: const Icon(Icons.bolt, size: 18),
+                          style: ElevatedButton.styleFrom(
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 12)),
+                          onPressed: _startPairing,
+                          label: const Text("一键开启",
+                              style: TextStyle(fontSize: 13))),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: GestureDetector(
+                          onTap: _showDiag,
+                          child: const Text(
+                            "已配对但仍显示此页？点此诊断",
+                            style: TextStyle(
+                                fontSize: 12, color: MyTheme.darkGray),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
           ),
         )
       ],

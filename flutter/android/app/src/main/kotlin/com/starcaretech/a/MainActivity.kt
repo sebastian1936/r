@@ -322,13 +322,18 @@ class MainActivity : FlutterActivity() {
                     // 服务运行中，三重判据）+ 是否有待引导的录屏授权
                     val granted = AdbAuthManager.isEnabled(context)
                     // 明细只进日志，不进 UI；状态误报时用 logcat（tag AdbAuth）定位
-                    Log.i("AdbAuth", "auth status granted=$granted snap=${AdbAuthManager.statusSnapshot(context)}")
+                    val snap = AdbAuthManager.statusSnapshot(context)
+                    Log.i("AdbAuth", "auth status granted=$granted snap=$snap")
                     result.success(
                         mapOf(
                             "supported" to AdbAuthManager.isSupported(),
                             "granted" to granted,
                             "capture_pending" to AdbAuthManager.peekCapturePending(context),
-                            "reason" to (AdbAuthManager.unsupportedReason() ?: "")
+                            "reason" to (AdbAuthManager.unsupportedReason() ?: ""),
+                            // 诊断明细：App 内"配对状态诊断"弹窗展示，供已配对却显示
+                            // 未授权时定位（名单实际内容/组件名/三重判据逐项值）
+                            "snap" to snap,
+                            "package" to context.packageName
                         )
                     )
                 }
