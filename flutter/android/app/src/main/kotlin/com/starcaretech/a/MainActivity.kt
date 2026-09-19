@@ -492,6 +492,23 @@ class MainActivity : FlutterActivity() {
                     }
                     result.success(opened)
                 }
+                "adb_env_check" -> {
+                    // 配对/保活前置环境清单：只读检查，很快，直接主线程返回
+                    if (isController) {
+                        result.success(emptyList<Map<String, String>>())
+                    } else {
+                        result.success(EnvCheckManager.checkAll(context))
+                    }
+                }
+                "adb_open_env" -> {
+                    // 打开清单中某项对应的系统设置页
+                    if (isController) {
+                        result.success(false)
+                    } else {
+                        val key = call.arguments as? String ?: ""
+                        result.success(EnvCheckManager.openSetting(context, key))
+                    }
+                }
                 "adb_repair" -> {
                     // 手动触发一次无障碍自愈
                     thread {

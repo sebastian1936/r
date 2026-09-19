@@ -678,9 +678,40 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     }
   }
 
-  /// 一键开启：直接启动通知配对，不再多一层说明对话框；
-  /// 仅在权限被拒/通知开关关闭/启动失败时才弹对话框（内含设置入口与分屏兜底）
+  /// 一键开启：先跑环境清单检查（开发者模式/无线调试/通知/自启动/电池等），
+  /// 全部就绪直接启动通知配对；有未开项先弹清单引导；
+  /// 仅在权限被拒/通知开关关闭/启动失败时才弹配对兜底对话框
   _startPairing() async {
+    var hasIssue = false;
+    try {
+      final List<dynamic> items =
+          await gFFI.invokeMethod("adb_env_check", null);
+      hasIssue = items
+          .any((e) => e is Map && e["status"] != "ok");
+    } catch (_) {
+      // 检查本身异常时不阻断配对主流程
+      hasIssue = false;
+    }
+    if (hasIssue && mounted) {
+      final go = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const _EnvCheckDialog(),
+      );
+      if (go != true) return;
+    }
+    await _launchPairing();
+  }
+
+  /// 保活设置复查（已配对状态下也可随时打开清单调整自启动/电池等）
+  _openEnvReview() {
+    showDialog<bool>(
+      context: context,
+      builder: (_) => const _EnvCheckDialog(reviewMode: true),
+    );
+  }
+
+  Future<void> _launchPairing() async {
     try {
       await gFFI.invokeMethod("adb_start_pairing", null);
       showToast("配对通知已发出，请下拉通知栏输入配对码");
@@ -749,16 +780,34 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           child: Container(
             margin: const EdgeInsets.only(left: 32, top: 8),
             child: _granted
-                ? TextButton(
-                    style: TextButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                        minimumSize: const Size(0, 32),
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap),
-                    onPressed: () async {
-                      await gFFI.invokeMethod("adb_repair", null);
-                      showToast("已执行一次恢复");
-                    },
-                    child: const Text("立即恢复", style: TextStyle(fontSize: 13)))
+                ? Wrap(
+                    spacing: 8,
+                    children: [
+                      TextButton(
+                          style: TextButton.styleFrom(
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 8),
+                              minimumSize: const Size(0, 32),
+                              tapTargetSize:
+                                  MaterialTapTargetSize.shrinkWrap),
+                          onPressed: () async {
+                            await gFFI.invokeMethod("adb_repair", null);
+                            showToast("已执行一次恢复");
+                          },
+                          child: const Text("立即恢复",
+                              style: TextStyle(fontSize: 13))),
+                      TextButton(
+                          style: TextButton.styleFrom(
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 8),
+                              minimumSize: const Size(0, 32),
+                              tapTargetSize:
+                                  MaterialTapTargetSize.shrinkWrap),
+                          onPressed: _openEnvReview,
+                          child: const Text("保活设置检查",
+                              style: TextStyle(fontSize: 13))),
+                    ],
+                  )
                 : ElevatedButton.icon(
                     icon: const Icon(Icons.bolt, size: 18),
                     style: ElevatedButton.styleFrom(
@@ -767,6 +816,275 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
                     label: const Text("一键开启", style: TextStyle(fontSize: 13))),
           ),
         )
+      ],
+    );
+  }
+}
+
+/// 配对 / 保活前置环境清单。点「去开启」跳系统设置页，返回本页自动重新检查。
+/// 必选项（开发者模式/USB 调试/无线调试/通知）未开启时不能直接开始配对；
+/// 自启动/电池/悬浮窗为保活建议项；MIUI 无法读取的状态显示「需确认」。
+class _EnvCheckDialog extends StatefulWidget {
+  const _EnvCheckDialog({Key? key, this.reviewMode = false}) : super(key: key);
+
+  /// true=已配对后的复查入口（底部只显示「完成」，不显示开始配对）
+  final bool reviewMode;
+
+  @override
+  State<_EnvCheckDialog> createState() => _EnvCheckDialogState();
+}
+
+class _EnvCheckDialogState extends State<_EnvCheckDialog>
+    with WidgetsBindingObserver {
+  List<dynamic> _items = const [];
+  bool _loading = true;
+
+  // key → (标题, 操作指引, 是否必选项)。文案只给操作步骤，不讲原理
+  static const Map<String, List<dynamic>> _meta = {
+    "developer_options": [
+      "开发者选项（已开启）",
+      "没开：设置 → 我的设备 → 全部参数，连续点「MIUI 版本」7 次",
+      true,
+    ],
+    "adb_master": [
+      "USB 调试",
+      "开发者选项里打开「USB 调试」",
+      true,
+    ],
+    "wireless_debug": [
+      "无线调试",
+      "开发者选项里打开「无线调试」总开关；配对后保持开启，输入控制可一键直开",
+      true,
+    ],
+    "notification": [
+      "通知权限",
+      "允许通知，配对码在通知栏输入",
+      true,
+    ],
+    "overlay": [
+      "显示悬浮窗",
+      "设置 → 应用管理 → 本应用 → 权限管理 → 显示悬浮窗，允许",
+      false,
+    ],
+    "battery_optimization": [
+      "电池策略：无限制",
+      "设置 → 应用管理 → 本应用 → 省电策略，选「无限制」",
+      false,
+    ],
+    "miui_autostart": [
+      "允许自启动",
+      "设置 → 应用管理 → 本应用 → 自启动，打开（锁屏被杀后能否自动恢复的关键）",
+      false,
+    ],
+    "miui_background_start": [
+      "后台弹出界面",
+      "设置 → 应用管理 → 本应用 → 权限管理 → 后台弹出界面，允许",
+      false,
+    ],
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _refresh();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 从系统设置页返回时自动复查
+    if (state == AppLifecycleState.resumed) _refresh();
+  }
+
+  _refresh() async {
+    setState(() => _loading = true);
+    try {
+      final List<dynamic> items =
+          await gFFI.invokeMethod("adb_env_check", null);
+      if (!mounted) return;
+      setState(() {
+        _items = items;
+        _loading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  _openSetting(String key) async {
+    try {
+      final ok = await gFFI.invokeMethod("adb_open_env", key);
+      if (ok != true) {
+        showToast("未找到对应设置页，请按文字指引手动开启");
+      } else {
+        showToast("设置完成后返回本页，将自动重新检查");
+      }
+    } catch (_) {
+      showToast("未找到对应设置页，请按文字指引手动开启");
+    }
+  }
+
+  String _statusOf(String key) {
+    final it = _items.firstWhere(
+      (e) => e is Map && e["key"] == key,
+      orElse: () => null,
+    );
+    if (it == null) return "unknown";
+    return (it["status"] ?? "unknown") as String;
+  }
+
+  Widget _statusIcon(String status) {
+    switch (status) {
+      case "ok":
+        return const Icon(Icons.check_circle, color: Colors.green, size: 20);
+      case "off":
+        return const Icon(Icons.cancel, color: Colors.redAccent, size: 20);
+      default:
+        return const Icon(Icons.help_outline,
+            color: Colors.orangeAccent, size: 20);
+    }
+  }
+
+  Widget _buildRow(String key) {
+    final meta = _meta[key];
+    if (meta == null) return const SizedBox.shrink();
+    final title = meta[0] as String;
+    final desc = meta[1] as String;
+    final required_ = meta[2] as bool;
+    final status = _statusOf(key);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: _statusIcon(status),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text.rich(TextSpan(children: [
+                  TextSpan(
+                    text: title,
+                    style: const TextStyle(
+                        fontSize: 14, fontWeight: FontWeight.w500),
+                  ),
+                  if (required_)
+                    const TextSpan(
+                      text: " 必选",
+                      style: TextStyle(fontSize: 11, color: Colors.redAccent),
+                    ),
+                ])),
+                const SizedBox(height: 2),
+                Text(desc,
+                    style:
+                        TextStyle(fontSize: 12, color: MyTheme.darkGray)),
+                if (status == "unknown")
+                  const Padding(
+                    padding: EdgeInsets.only(top: 2),
+                    child: Text("系统不允许读取此状态，请手动确认是否已开启",
+                        style: TextStyle(fontSize: 11, color: Colors.orangeAccent)),
+                  ),
+              ],
+            ),
+          ),
+          if (status != "ok")
+            TextButton(
+              style: TextButton.styleFrom(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+                minimumSize: const Size(0, 32),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              onPressed: () => _openSetting(key),
+              child: Text(status == "off" ? "去开启" : "去确认",
+                  style: const TextStyle(fontSize: 13)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final requiredOff = _items.any((e) =>
+        e is Map &&
+        e["status"] == "off" &&
+        (_meta[e["key"]]?[2] == true));
+    return AlertDialog(
+      title: Row(children: [
+        const Icon(Icons.fact_check_outlined, size: 22),
+        const SizedBox(width: 8),
+        Text(widget.reviewMode ? "保活设置检查" : "配对前设置检查"),
+      ]),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (widget.reviewMode)
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 6),
+                  child: Text("全部开启后，锁屏久了被系统杀掉也能自动恢复",
+                      style: TextStyle(fontSize: 12, color: Colors.black54)),
+                ),
+              if (_loading)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 24),
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else
+                ..._meta.keys.map(_buildRow).toList(),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.orangeAccent.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: const Text(
+                  "另外：最近任务列表里把本应用卡片下拉加锁，可进一步防止被清理",
+                  style: TextStyle(fontSize: 12, color: Colors.black87),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _loading ? null : _refresh,
+          child: const Text("重新检查"),
+        ),
+        if (widget.reviewMode)
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text("完成"),
+          )
+        else ...[
+          TextButton(
+            // 检测误报（尤其无线调试状态）时允许用户强行走配对
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text("跳过，直接配对"),
+          ),
+          ElevatedButton(
+            onPressed: requiredOff
+                ? null
+                : () => Navigator.of(context).pop(true),
+            child: Text(requiredOff ? "请先开启必选项" : "开始配对"),
+          ),
+        ],
       ],
     );
   }
