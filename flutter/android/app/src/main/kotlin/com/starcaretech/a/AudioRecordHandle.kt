@@ -40,31 +40,45 @@ class AudioRecordHandle(private var context: Context, private var isVideoStart: 
             return false
         }
 
-        var builder = AudioRecord.Builder()
-        .setAudioFormat(
-            AudioFormat.Builder()
-                .setEncoding(AUDIO_ENCODING)
-                .setSampleRate(AUDIO_SAMPLE_RATE)
-                .setChannelMask(AUDIO_CHANNEL_MASK).build()
-        );
-        if (inVoiceCall) {
-            builder.setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
-        } else {
-            mediaProjection?.let {
-                var apcc = AudioPlaybackCaptureConfiguration.Builder(it)
-                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                .addMatchingUsage(AudioAttributes.USAGE_ALARM)
-                .addMatchingUsage(AudioAttributes.USAGE_GAME)
-                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN).build();
-                builder.setAudioPlaybackCaptureConfig(apcc);
-            } ?: let {
-                Log.d(logTag, "createAudioRecorder failed, mediaProjection null")
-                return false
+        return try {
+            var builder = AudioRecord.Builder()
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setEncoding(AUDIO_ENCODING)
+                    .setSampleRate(AUDIO_SAMPLE_RATE)
+                    .setChannelMask(AUDIO_CHANNEL_MASK).build()
+            );
+            if (inVoiceCall) {
+                builder.setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+            } else {
+                mediaProjection?.let {
+                    // projection 已失效时 Builder 构造/build 可能抛 SecurityException/
+                    // IllegalStateException（连接建立瞬间会话被收回的场景），绝不能让它穿透杀进程
+                    val apcc = AudioPlaybackCaptureConfiguration.Builder(it)
+                    .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                    .addMatchingUsage(AudioAttributes.USAGE_ALARM)
+                    .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                    .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN).build();
+                    builder.setAudioPlaybackCaptureConfig(apcc);
+                } ?: let {
+                    Log.d(logTag, "createAudioRecorder failed, mediaProjection null")
+                    return false
+                }
             }
+            audioRecorder = builder.build()
+            Log.d(logTag, "createAudioRecorder done,minBufferSize:$minBufferSize")
+            true
+        } catch (e: SecurityException) {
+            Log.e(logTag, "createAudioRecorder SecurityException", e)
+            false
+        } catch (e: IllegalStateException) {
+            Log.e(logTag, "createAudioRecorder IllegalStateException", e)
+            false
+        } catch (e: Exception) {
+            // 个别 ROM 不支持播放捕获时 AudioRecord.Builder.build() 抛 UnsupportedOperationException
+            Log.e(logTag, "createAudioRecorder fail", e)
+            false
         }
-        audioRecorder = builder.build()
-        Log.d(logTag, "createAudioRecorder done,minBufferSize:$minBufferSize")
-        return true
     }
 
     @RequiresApi(Build.VERSION_CODES.M)

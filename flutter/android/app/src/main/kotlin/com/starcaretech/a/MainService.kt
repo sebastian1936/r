@@ -860,15 +860,28 @@ class MainService : Service() {
             Log.w(logTag, "startCapture fail,mediaProjection is null")
             return false
         }
-        
+
         updateScreenInfo(resources.configuration.orientation)
         Log.d(logTag, "Start Capture")
         surface = createSurface()
+        if (surface == null) {
+            Log.w(logTag, "startCapture fail,surface is null")
+            return false
+        }
 
-        if (useVP9) {
+        val displayReady = if (useVP9) {
             startVP9VideoRecorder(mediaProjection!!)
         } else {
             startRawVideoRecorder(mediaProjection!!)
+        }
+        if (!displayReady) {
+            // MediaProjection 已失效：onProjectionInvalid 已清理会话并弹出授权引导。
+            // 必须在这里中止——旧实现吞掉异常后继续把 _isStart 置 true 并向 Rust
+            // 声明 video 可用，但根本没有 VirtualDisplay 供帧，连接进来时会状态错乱。
+            // 标记：新授权建立后自动续采集（客户端无需重连）
+            resumeWanted = true
+            stopCapture()
+            return false
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -967,16 +980,16 @@ class MainService : Service() {
         return isReady
     }
 
-    private fun startRawVideoRecorder(mp: MediaProjection) {
+    private fun startRawVideoRecorder(mp: MediaProjection): Boolean {
         Log.d(logTag, "startRawVideoRecorder,screen info:$SCREEN_INFO")
         if (surface == null) {
             Log.d(logTag, "startRawVideoRecorder failed,surface is null")
-            return
+            return false
         }
-        createOrSetVirtualDisplay(mp, surface!!)
+        return createOrSetVirtualDisplay(mp, surface!!)
     }
 
-    private fun startVP9VideoRecorder(mp: MediaProjection) {
+    private fun startVP9VideoRecorder(mp: MediaProjection): Boolean {
         createMediaCodec()
         videoEncoder?.let {
             surface = it.createInputSurface()
@@ -985,14 +998,15 @@ class MainService : Service() {
             }
             it.setCallback(cb)
             it.start()
-            createOrSetVirtualDisplay(mp, surface!!)
+            return createOrSetVirtualDisplay(mp, surface!!)
         }
+        return false
     }
 
     // https://github.com/bk138/droidVNC-NG/blob/b79af62db5a1c08ed94e6a91464859ffed6f4e97/app/src/main/java/net/christianbeier/droidvnc_ng/MediaProjectionService.java#L250
     // Reuse virtualDisplay if it exists, to avoid media projection confirmation dialog every connection.
-    private fun createOrSetVirtualDisplay(mp: MediaProjection, s: Surface) {
-        try {
+    private fun createOrSetVirtualDisplay(mp: MediaProjection, s: Surface): Boolean {
+        return try {
             virtualDisplay?.let {
                 it.resize(SCREEN_INFO.width, SCREEN_INFO.height, SCREEN_INFO.dpi)
                 it.setSurface(s)
@@ -1003,10 +1017,17 @@ class MainService : Service() {
                     s, null, null
                 )
             }
+            true
         } catch (e: SecurityException) {
             Log.w(logTag, "createOrSetVirtualDisplay: got SecurityException, projection revoked")
             // 会话已失效：释放状态并重新拉起用户确认流程（带全屏通知兜底）
             onProjectionInvalid()
+            false
+        } catch (e: IllegalStateException) {
+            // 部分 ROM 在 projection 已停止时 createVirtualDisplay 抛 IllegalStateException
+            Log.w(logTag, "createOrSetVirtualDisplay: got IllegalStateException, projection stopped")
+            onProjectionInvalid()
+            false
         }
     }
 

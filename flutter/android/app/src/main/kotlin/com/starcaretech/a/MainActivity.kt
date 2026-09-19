@@ -105,6 +105,34 @@ class MainActivity : FlutterActivity() {
             _rdClipboardManager = RdClipboardManager(getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
             FFI.setClipboardManager(_rdClipboardManager!!)
         }
+        // 上次发生崩溃（Java/native 疑似）时弹窗，一键分享完整日志定位问题
+        window.decorView.postDelayed({ showLastCrashDialogIfAny() }, 1200)
+    }
+
+    private fun showLastCrashDialogIfAny() {
+        val crashText = CrashLogger.consumeIfNew(this) ?: return
+        try {
+            val preview = crashText.take(1500)
+            android.app.AlertDialog.Builder(this)
+                .setTitle("程序上次异常退出")
+                .setMessage("已自动记录崩溃日志，点「分享日志」可发给开发者定位。\n\n$preview")
+                .setPositiveButton("分享日志") { _, _ ->
+                    val send = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_SUBJECT, "RustDesk 崩溃日志")
+                        // Binder 事务有 1MB 上限，截断到安全范围
+                        putExtra(Intent.EXTRA_TEXT, crashText.take(90_000))
+                    }
+                    runCatching {
+                        startActivity(Intent.createChooser(send, "分享崩溃日志"))
+                    }
+                }
+                .setNegativeButton("关闭", null)
+                .setCancelable(true)
+                .show()
+        } catch (e: Exception) {
+            Log.e(logTag, "show crash dialog fail", e)
+        }
     }
 
     override fun onDestroy() {
