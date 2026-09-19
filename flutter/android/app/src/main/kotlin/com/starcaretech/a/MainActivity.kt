@@ -290,14 +290,39 @@ class MainActivity : FlutterActivity() {
                     onVoiceCallClosed()
                 }
                 "adb_auth_status" -> {
-                    // ADB 一键授权状态：系统是否支持 + 是否已授权
+                    // ADB 一键授权状态：系统是否支持 + 是否已生效（pm 授权或无障碍在名单）
+                    // + 是否有待引导的录屏授权
                     result.success(
                         mapOf(
                             "supported" to AdbAuthManager.isSupported(),
-                            "granted" to AdbAuthManager.isWriteSecureSettingsGranted(context),
+                            "granted" to AdbAuthManager.isEnabled(context),
+                            "capture_pending" to AdbAuthManager.peekCapturePending(context),
                             "reason" to (AdbAuthManager.unsupportedReason() ?: "")
                         )
                     )
+                }
+                "adb_ensure_capture" -> {
+                    // 配对完成后的录屏授权引导（必须 App 在前台调用）：
+                    // 录屏（MediaProjection）是系统级 consent，任何 ADB/root 手段都无法
+                    // 静默授予，只能拉起系统确认框让用户点一次；targetSdk33 下同一开机周期
+                    // token 可复用（MainService 会缓存）。已就绪或缓存有效则不弹窗。
+                    if (isController) {
+                        result.success(false)
+                        return@setMethodCallHandler
+                    }
+                    // 消费一次性标记：无论就绪与否，这次回前台只引导一次
+                    AdbAuthManager.consumeCapturePending(context)
+                    try {
+                        if (!MainService.isReady) {
+                            val svc = Intent(context, MainService::class.java)
+                                .setAction(ACT_TRY_RESTORE_MEDIA_PROJECTION)
+                            ContextCompat.startForegroundService(context, svc)
+                        }
+                        result.success(true)
+                    } catch (e: Exception) {
+                        Log.e("AdbAuth", "拉起录屏授权失败", e)
+                        result.success(false)
+                    }
                 }
                 "adb_pair_and_grant" -> {
                     // args: Map{addr: String(IP:端口), code: String(6位码)}，分屏模式下由 Dialog 传入

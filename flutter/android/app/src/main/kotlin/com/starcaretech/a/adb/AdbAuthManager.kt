@@ -244,7 +244,31 @@ object AdbAuthManager {
             .putString("grant_mode", mode)
             .putString("guid", guid)
             .putLong("granted_at", System.currentTimeMillis())
+            // 配对授权刚完成：App 回前台后应引导一次系统录屏授权（一次性标记，
+            // 由 consumeCapturePending 读取并清除，不重复骚扰）
+            .putBoolean("capture_pending", true)
             .apply()
+    }
+
+    /**
+     * 授权是否已生效（两种模式的统一判据）：
+     *  - pm_grant：App 持有 WRITE_SECURE_SETTINGS（持久，重启不丢）
+     *  - shell_direct：无障碍服务已在系统名单中（同样持久，服务可能被杀但名单在）
+     */
+    fun isEnabled(context: Context): Boolean =
+        isWriteSecureSettingsGranted(context) || isAccessibilityListed(context)
+
+    /** 只读查看"待引导录屏授权"标记（供状态通道使用，不清标记） */
+    fun peekCapturePending(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean("capture_pending", false)
+
+    /** 读取并清除"待引导录屏授权"标记，保证只自动引导一次 */
+    fun consumeCapturePending(context: Context): Boolean {
+        val sp = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val pending = sp.getBoolean("capture_pending", false)
+        if (pending) sp.edit().putBoolean("capture_pending", false).apply()
+        return pending
     }
 
     /** GRANT_RUNTIME_PERMISSIONS 特征错误：国产 ROM 的"USB 调试安全设置"未开。

@@ -648,7 +648,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // 用户在通知栏完成配对授权后回到 App，自动刷新授权状态
+    // 用户在通知栏完成配对授权后回到 App，自动刷新授权状态并衔接录屏授权
     if (state == AppLifecycleState.resumed) _refresh();
   }
 
@@ -656,11 +656,53 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     try {
       final dynamic status = await gFFI.invokeMethod("adb_auth_status", null);
       if (!mounted) return;
+      final capturePending = (status["capture_pending"] ?? false) as bool;
       setState(() {
         _supported = (status["supported"] ?? false) as bool;
         _granted = (status["granted"] ?? false) as bool;
       });
+      // 通知栏配对成功后用户回到 App：自动拉起一次系统录屏授权框
+      // （录屏是系统级授权，无法静默授予；已授权/缓存有效时不会弹窗）
+      if (capturePending) {
+        gFFI.invokeMethod("adb_ensure_capture", null);
+      }
     } catch (_) {}
+  }
+
+  /// 一键开启：直接启动通知配对，不再多一层说明对话框；
+  /// 仅在权限被拒/通知开关关闭/启动失败时才弹对话框（内含设置入口与分屏兜底）
+  _startPairing() async {
+    try {
+      await gFFI.invokeMethod("adb_start_pairing", null);
+      showToast("配对通知已发出，请下拉通知栏输入配对码");
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      showDialog<bool>(
+        context: context,
+        builder: (_) => _AdbPairDialog(
+          initialError: e.message,
+          initialErrorCode: e.code,
+        ),
+      ).then((ok) async {
+        if (ok == true) await _onPairingSucceeded();
+      });
+    } catch (_) {
+      if (!mounted) return;
+      showDialog<bool>(
+        context: context,
+        builder: (_) => const _AdbPairDialog(),
+      ).then((ok) async {
+        if (ok == true) await _onPairingSucceeded();
+      });
+    }
+  }
+
+  /// 分屏/对话框内配对成功后的收尾：刷状态（_refresh 内会消费 pending 并
+  /// 自动拉起录屏授权）+ 刷新服务与权限页
+  _onPairingSucceeded() async {
+    await _refresh();
+    checkService();
+    gFFI.serverModel.checkAndroidPermission();
   }
 
   @override
@@ -712,16 +754,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
                     icon: const Icon(Icons.bolt, size: 18),
                     style: ElevatedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(horizontal: 12)),
-                    onPressed: () async {
-                      final ok = await showDialog<bool>(
-                          context: context,
-                          builder: (_) => const _AdbPairDialog());
-                      if (ok == true) {
-                        await _refresh();
-                        checkService();
-                        gFFI.serverModel.checkAndroidPermission();
-                      }
-                    },
+                    onPressed: _startPairing,
                     label: const Text("一键开启", style: TextStyle(fontSize: 13))),
           ),
         )
@@ -734,7 +767,12 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
 /// 默认走通知栏配对（仿 Shizuku，无需分屏）；
 /// 收不到通知时可切到分屏手动输入配对码（端口同样自动发现）。
 class _AdbPairDialog extends StatefulWidget {
-  const _AdbPairDialog({Key? key}) : super(key: key);
+  const _AdbPairDialog({Key? key, this.initialError, this.initialErrorCode})
+      : super(key: key);
+
+  /// 一键开启直连失败时带入的错误（权限拒绝/通知开关关闭等），对话框直接展示
+  final String? initialError;
+  final String? initialErrorCode;
 
   @override
   State<_AdbPairDialog> createState() => _AdbPairDialogState();
@@ -744,8 +782,8 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
   final _codeController = TextEditingController();
   bool _busy = false;
   bool _manualMode = false;
-  String? _error;
-  String? _errorCode;
+  late String? _error = widget.initialError;
+  late String? _errorCode = widget.initialErrorCode;
 
   @override
   void dispose() {
