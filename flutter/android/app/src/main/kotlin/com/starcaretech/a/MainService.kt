@@ -28,6 +28,11 @@ import android.hardware.display.VirtualDisplay
 import android.media.*
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.net.wifi.WifiManager
 import android.os.*
 import android.util.DisplayMetrics
 import android.util.Log
@@ -52,6 +57,12 @@ const val DEFAULT_NOTIFY_TITLE = "RustDesk"
 const val DEFAULT_NOTIFY_TEXT = "Service is running"
 const val DEFAULT_NOTIFY_ID = 1
 const val NOTIFY_ID_OFFSET = 100
+
+// 锁屏保活：AlarmManager 在 Doze 下周期唤醒（exact alarm 在 Doze 下最小约 9 分钟一次）
+const val KEEPALIVE_INTERVAL_MS = 15 * 60_000L
+const val KEEPALIVE_ALARM_REQUEST_CODE = 2002
+// 信令主动重连最小间隔，避免网络抖动时频繁重启 RendezvousMediator
+const val MIN_MEDIATOR_RESTART_INTERVAL_MS = 30_000L
 
 const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_VP9
 
@@ -198,6 +209,20 @@ class MainService : Service() {
     private val powerManager: PowerManager by lazy { applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager }
     private val wakeLock: PowerManager.WakeLock by lazy { powerManager.newWakeLock(PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.SCREEN_BRIGHT_WAKE_LOCK, "rustdesk:wakelock")}
 
+    // ---- 锁屏保活（跟随 MainService 生命周期：服务在=用户期望被控在线）----
+    /** 常驻 CPU 锁：锁屏/Doze 下维持 Rust 心跳与信令线程运行 */
+    private var cpuWakeLock: PowerManager.WakeLock? = null
+    /** WiFi 高性能锁：防止锁屏后 WiFi 进入省电/断连；移动数据机型 acquire 亦无害 */
+    private var wifiLock: WifiManager.WifiLock? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private val keepAliveHandler = Handler(Looper.getMainLooper())
+    /** registerNetworkCallback 会对当前网络立即回调一次，首次无需触发重连 */
+    @Volatile
+    private var skipFirstNetworkEvent = true
+    @Volatile
+    private var lastMediatorRestartMs = 0L
+    private val networkRestartRunnable = Runnable { restartRendezvousMediator() }
+
     companion object {
         private var _isReady = false // media permission ready status
         private var _isStart = false // screen capture start status
@@ -272,6 +297,138 @@ class MainService : Service() {
             resumeWanted = false
             startCapture()
         }
+        // 锁屏期间信令长连可能已被挂起中断，亮屏网络恢复后主动重连（带 30s 去抖）
+        restartRendezvousMediator()
+    }
+
+    // ===================== 锁屏保活 =====================
+    // 现象（小米9/Android11）：锁屏一段时间后主控提示离线，进程并未死亡，亮屏（如来电）即恢复。
+    // 根因：Doze/MIUI 锁屏后挂起 CPU 与 WiFi，Rust 信令长连心跳中断被判离线。
+    // 组合手段：常驻 PARTIAL_WAKE_LOCK + WifiLock + 网络恢复主动重连 + AlarmManager 周期唤醒。
+
+    private fun initKeepAlive() {
+        // 1) CPU 常驻锁（无超时，服务销毁/进程死亡时自动释放）
+        runCatching {
+            if (cpuWakeLock == null) {
+                cpuWakeLock = powerManager.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK, "rustdesk:cpu-keepalive"
+                ).apply { setReferenceCounted(false) }
+            }
+            if (cpuWakeLock?.isHeld != true) {
+                cpuWakeLock?.acquire()
+                Log.i(logTag, "PARTIAL_WAKE_LOCK acquired")
+            }
+        }.onFailure { Log.w(logTag, "acquire PARTIAL_WAKE_LOCK fail", it) }
+
+        // 2) WiFi 高性能锁
+        runCatching {
+            if (wifiLock == null) {
+                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                wifiLock = wm.createWifiLock(
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF, "rustdesk:wifi-keepalive"
+                ).apply { setReferenceCounted(false) }
+            }
+            if (wifiLock?.isHeld != true) {
+                wifiLock?.acquire()
+                Log.i(logTag, "WifiLock acquired")
+            }
+        }.onFailure { Log.w(logTag, "acquire WifiLock fail", it) }
+
+        // 3) 网络恢复主动重连（API26+；低版本靠周期 alarm 兜底）
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && networkCallback == null) {
+            registerNetworkCallback()
+        }
+
+        // 4) Doze 周期唤醒
+        scheduleKeepAliveTick(KEEPALIVE_INTERVAL_MS)
+    }
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun registerNetworkCallback() {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                if (skipFirstNetworkEvent) {
+                    skipFirstNetworkEvent = false
+                    return
+                }
+                Log.i(logTag, "网络恢复，2s 去抖后触发信令重连")
+                keepAliveHandler.removeCallbacks(networkRestartRunnable)
+                keepAliveHandler.postDelayed(networkRestartRunnable, 2000)
+            }
+        }
+        runCatching { cm.registerNetworkCallback(request, cb) }
+            .onSuccess { networkCallback = cb }
+            .onFailure { Log.w(logTag, "registerNetworkCallback fail", it) }
+    }
+
+    /** 触发 Rust 端 RendezvousMediator 重新注册信令服务器（幂等，带间隔去抖） */
+    private fun restartRendezvousMediator() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastMediatorRestartMs < MIN_MEDIATOR_RESTART_INTERVAL_MS) {
+            Log.d(logTag, "信令重连间隔去抖，跳过")
+            return
+        }
+        lastMediatorRestartMs = now
+        Log.i(logTag, "触发 RendezvousMediator 重连")
+        runCatching { FFI.startService() }
+            .onFailure { Log.w(logTag, "FFI.startService fail", it) }
+    }
+
+    private fun keepAlivePendingIntent(): PendingIntent {
+        val intent = Intent(this, MainService::class.java).apply { action = ACT_KEEPALIVE_TICK }
+        val flags = FLAG_UPDATE_CURRENT or
+            (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) FLAG_IMMUTABLE else 0)
+        // getForegroundService 为 API26+；低版本回退 getService
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            PendingIntent.getForegroundService(this, KEEPALIVE_ALARM_REQUEST_CODE, intent, flags)
+        } else {
+            PendingIntent.getService(this, KEEPALIVE_ALARM_REQUEST_CODE, intent, flags)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun scheduleKeepAliveTick(delayMs: Long) {
+        val am = getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+        val triggerAt = SystemClock.elapsedRealtime() + delayMs
+        val pi = keepAlivePendingIntent()
+        // API22 无 Doze，普通唤醒闹钟即可
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            runCatching { am.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi) }
+            return
+        }
+        runCatching {
+            // API31+ 精确闹钟权限可能被用户撤销，无权限时退化非精确（仍可在 Doze 维护窗口送达）
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || am.canScheduleExactAlarms()) {
+                am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+            } else {
+                am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+            }
+        }.onFailure {
+            Log.w(logTag, "schedule exact keepalive alarm fail, fallback to inexact", it)
+            runCatching {
+                am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+            }
+        }
+    }
+
+    private fun releaseKeepAlive() {
+        keepAliveHandler.removeCallbacks(networkRestartRunnable)
+        runCatching { cpuWakeLock?.takeIf { it.isHeld }?.release() }
+        runCatching { wifiLock?.takeIf { it.isHeld }?.release() }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            networkCallback?.let { cb ->
+                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                runCatching { cm?.unregisterNetworkCallback(cb) }
+            }
+        }
+        networkCallback = null
+        runCatching {
+            (getSystemService(Context.ALARM_SERVICE) as? AlarmManager)?.cancel(keepAlivePendingIntent())
+        }
     }
 
     private var surface: Surface? = null
@@ -317,6 +474,9 @@ class MainService : Service() {
         } else {
             registerReceiver(screenStateReceiver, filter)
         }
+
+        // 锁屏保活：CPU/WiFi 锁 + 网络恢复重连 + Doze 周期唤醒
+        initKeepAlive()
     }
 
     override fun onDestroy() {
@@ -330,6 +490,7 @@ class MainService : Service() {
         mediaProjection = null
         checkMediaPermission()
         runCatching { unregisterReceiver(screenStateReceiver) }
+        releaseKeepAlive()
         stopService(Intent(this, FloatingWindowService::class.java))
         super.onDestroy()
     }
@@ -444,6 +605,14 @@ class MainService : Service() {
                 if (!tryRestoreMediaProjection(mediaProjectionManager)) {
                     requestMediaProjectionWithNotice()
                 }
+            }
+            ACT_KEEPALIVE_TICK -> {
+                // Doze 周期唤醒（也可能在进程/服务被回收后由 alarm 重建投递）：
+                // 先确保 FGS 合规，再补保活锁、续下一次 alarm、主动重连信令
+                Log.i(logTag, "keepalive tick")
+                runCatching { createForegroundNotification() }
+                initKeepAlive()
+                restartRendezvousMediator()
             }
         }
         return START_NOT_STICKY // don't use sticky (auto restart), the new service (from auto restart) will lose control
@@ -711,6 +880,7 @@ class MainService : Service() {
         projectionCallback = null
         mediaProjection = null
         checkMediaPermission()
+        releaseKeepAlive()
         stopForeground(true)
         stopService(Intent(this, FloatingWindowService::class.java))
         stopSelf()
