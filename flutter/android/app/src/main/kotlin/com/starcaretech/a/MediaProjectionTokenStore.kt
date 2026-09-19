@@ -30,15 +30,21 @@ object MediaProjectionTokenStore {
     private const val PREFS = "media_projection_token"
     private const val KEY_TOKEN = "result_intent_b64"
     private const val KEY_SAVED_AT = "saved_at"
+    /** 本机结果 Intent 含 Binder 无法 marshall（小米9/部分 ROM 实锤），标记后不再重试 */
+    private const val KEY_UNSUPPORTED = "cache_unsupported"
 
     fun save(context: Context, resultIntent: Intent) {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_UNSUPPORTED, false)) {
+            return
+        }
         try {
             val parcel = Parcel.obtain()
             try {
                 resultIntent.writeToParcel(parcel, 0)
                 val bytes = parcel.marshall()
                 val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                prefs.edit()
                     .putString(KEY_TOKEN, b64)
                     .putLong(KEY_SAVED_AT, System.currentTimeMillis())
                     .apply()
@@ -47,7 +53,11 @@ object MediaProjectionTokenStore {
                 parcel.recycle()
             }
         } catch (e: Exception) {
-            Log.w(TAG, "缓存授权 Intent 失败", e)
+            // 典型："Tried to marshall a Parcel that contained Binder objects."
+            // 该机型静默恢复永远不可能成功，置位后所有后续调用直接短路，
+            // 恢复流程应走"前台弹窗 / 恢复通知"而非反复尝试缓存。
+            Log.w(TAG, "缓存授权 Intent 失败（本机不支持 token 缓存，后续不再尝试）", e)
+            prefs.edit().putBoolean(KEY_UNSUPPORTED, true).remove(KEY_TOKEN).apply()
         }
     }
 
@@ -57,6 +67,9 @@ object MediaProjectionTokenStore {
      */
     fun load(context: Context): Intent? {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_UNSUPPORTED, false)) {
+            return null
+        }
         val b64 = prefs.getString(KEY_TOKEN, null) ?: return null
         return try {
             val bytes = Base64.decode(b64, Base64.NO_WRAP)
@@ -76,6 +89,12 @@ object MediaProjectionTokenStore {
     }
 
     fun clear(context: Context) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply()
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        // 清除失效 token，但保留"本机不支持缓存"事实（Binder 限制不会随重启改变）
+        val unsupported = prefs.getBoolean(KEY_UNSUPPORTED, false)
+        prefs.edit().clear().apply()
+        if (unsupported) {
+            prefs.edit().putBoolean(KEY_UNSUPPORTED, true).apply()
+        }
     }
 }

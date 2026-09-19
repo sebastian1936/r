@@ -32,6 +32,8 @@ const val ACT_REQUEST_MEDIA_PROJECTION = "REQUEST_MEDIA_PROJECTION"
 const val ACT_INIT_MEDIA_PROJECTION_AND_SERVICE = "INIT_MEDIA_PROJECTION_AND_SERVICE"
 // 先尝试用缓存的授权 Intent 静默恢复 MediaProjection，失败再弹系统确认框
 const val ACT_TRY_RESTORE_MEDIA_PROJECTION = "TRY_RESTORE_MEDIA_PROJECTION"
+// 进程外看门狗（Job/无障碍）拉起服务：只保活信令，不主动弹录屏框
+const val ACT_WATCHDOG_RESTART = "WATCHDOG_RESTART"
 const val ACT_LOGIN_REQ_NOTIFY = "LOGIN_REQ_NOTIFY"
 // 锁屏保活周期心跳：AlarmManager 在 Doze 下唤醒服务，补锁并触发信令重连
 const val ACT_KEEPALIVE_TICK = "KEEPALIVE_TICK"

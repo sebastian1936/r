@@ -72,8 +72,9 @@ object WatchdogScheduler {
 
     /**
      * 进程外锚点（Job/无障碍/开机）调用：用户期望在线且 MainService 未存活时拉起。
-     * 走 ACT_TRY_RESTORE_MEDIA_PROJECTION：服务 onCreate 完成信令初始化，
-     * onStartCommand 静默恢复录屏，失败发恢复通知（含自动点击/熔断保护）。
+     * 走 ACT_WATCHDOG_RESTART：服务 onCreate 即完成信令初始化与保活，
+     * 不主动恢复/弹录屏框（锁屏冷进程弹框会叠出多个确认页导致崩溃），
+     * 录屏等主控连接或用户点恢复通知时再处理。
      */
     fun ensureServiceRunning(context: Context, source: String) {
         if (MainService.isServiceAlive) return
@@ -89,7 +90,7 @@ object WatchdogScheduler {
         lastStartAttemptMs = now
         Log.i(TAG, "拉起 MainService（来源=$source）")
         val intent = Intent(context, MainService::class.java).apply {
-            action = ACT_TRY_RESTORE_MEDIA_PROJECTION
+            action = ACT_WATCHDOG_RESTART
         }
         runCatching {
             ContextCompat.startForegroundService(context, intent)

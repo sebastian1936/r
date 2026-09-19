@@ -253,6 +253,43 @@ class MainService : Service() {
         fun markServiceAlive(alive: Boolean) {
             isServiceAlive = alive
         }
+
+        /**
+         * 全局录屏授权请求闸门：同一时刻只允许一个系统确认框在途。
+         * 看门狗/亮屏 receiver/Activity 重建/多次 startId 等多个触发源，
+         * 若不加串行会叠出多个透明 Activity（日志实锤"点一个又一个"），
+         * 多授权实例互顶会话 + 并发 MediaCodec 最终 native 崩溃。
+         */
+        @Volatile
+        private var projectionRequestInFlight = false
+        private val projectionGateLock = Any()
+        private val projectionGateHandler = Handler(Looper.getMainLooper())
+        private const val PROJECTION_REQUEST_TIMEOUT_MS = 45_000L
+        private val projectionGateTimeout = Runnable {
+            // Activity 被系统杀死/回调丢失时兜底释放闸门，避免永久锁死
+            synchronized(projectionGateLock) { projectionRequestInFlight = false }
+        }
+
+        /** 尝试占位授权请求；已有请求在途时返回 false（调用方应放弃本次弹窗） */
+        fun beginProjectionRequest(): Boolean = synchronized(projectionGateLock) {
+            if (projectionRequestInFlight) {
+                false
+            } else {
+                projectionRequestInFlight = true
+                projectionGateHandler.removeCallbacks(projectionGateTimeout)
+                projectionGateHandler.postDelayed(
+                    projectionGateTimeout,
+                    PROJECTION_REQUEST_TIMEOUT_MS
+                )
+                true
+            }
+        }
+
+        /** 授权请求结束（成功回传/用户取消/失败），释放闸门供下一次请求使用 */
+        fun endProjectionRequest() = synchronized(projectionGateLock) {
+            projectionGateHandler.removeCallbacks(projectionGateTimeout)
+            projectionRequestInFlight = false
+        }
     }
 
     private val logTag = "LOG_SERVICE"
@@ -284,6 +321,9 @@ class MainService : Service() {
     private var shortLivedProjectionFailures = 0
     @Volatile
     private var projectionFailWindowStartMs = 0L
+    /** 上次"连接时无录屏会话"引导时间（节流） */
+    @Volatile
+    private var lastCapturePromptMs = 0L
 
     /**
      * 亮屏/解锁监听：国产 ROM 普遍在锁屏后停止 MediaProjection 会话，
@@ -306,8 +346,9 @@ class MainService : Service() {
             if (tryRestoreMediaProjection()) {
                 Log.i(logTag, "缓存授权静默恢复成功")
             } else {
-                Log.w(logTag, "缓存授权已失效，刷新录屏恢复通知等待确认（可由无障碍自动点击）")
-                // 统一走引导入口（含循环弹窗熔断保护）；后台拉起失败时有全屏通知保底
+                Log.w(logTag, "缓存授权已失效，刷新录屏恢复通知等待确认（前台时自动弹一次）")
+                // 统一走引导入口（前台门控 + 在途闸门 + 熔断保护）；
+                // App 不在前台/锁屏时只更新通知，不会连环弹确认框
                 requestMediaProjectionWithNotice()
                 return
             }
@@ -606,13 +647,21 @@ class MainService : Service() {
 
                 intent.getParcelableExtra<Intent>(EXT_MEDIA_PROJECTION_RES_INTENT)?.let { token ->
                     // 用户刚完成确认：缓存 token 供后续静默恢复
-                    if (!applyProjection(mediaProjectionManager, token)) {
+                    if (_isReady && mediaProjection != null) {
+                        // 多实例透明 Activity 曾各自回传一次结果（service starting 2~9），
+                        // 重复 applyProjection 会互顶会话并并发创建 MediaCodec（-38 崩溃链），
+                        // 已就绪时直接丢弃迟到的重复授权
+                        Log.i(logTag, "录屏已就绪，忽略重复的授权结果回传")
+                        endProjectionRequest()
+                    } else if (!applyProjection(mediaProjectionManager, token)) {
                         Log.w(logTag, "新鲜授权 token 也无法建立 MediaProjection，回退重新请求")
+                        endProjectionRequest()
                         // 同步失败同样计入熔断，避免异常 ROM 下"点允许→秒失败→再弹"的死循环
                         promptProjectionRecovery(recordProjectionFailure())
                     } else {
                         MediaProjectionTokenStore.save(this, token)
                         _isReady = true
+                        endProjectionRequest()
                         // checkMediaPermission 内部会撤下恢复通知并同步 Dart 状态
                         checkMediaPermission()
                         resumeCaptureIfWanted()
@@ -633,6 +682,14 @@ class MainService : Service() {
                 if (!tryRestoreMediaProjection(mediaProjectionManager)) {
                     requestMediaProjectionWithNotice()
                 }
+            }
+            ACT_WATCHDOG_RESTART -> {
+                // 进程外看门狗（JobScheduler/无障碍 onServiceConnected）拉起：
+                // onCreate 已完成信令初始化、前台通知与保活锁，服务活着即达成目的。
+                // 锁屏被杀恢复场景绝不在此主动弹录屏框——多触发源叠加会形成弹窗风暴；
+                // 录屏恢复只走两条路：主控连接触发 startCapture 引导，或用户点恢复通知。
+                Log.i(logTag, "watchdog restart：信令已恢复，录屏等待连接或用户确认")
+                runCatching { createForegroundNotification() }
             }
             ACT_KEEPALIVE_TICK -> {
                 // Doze 周期唤醒（也可能在进程/服务被回收后由 alarm 重建投递）：
@@ -769,24 +826,56 @@ class MainService : Service() {
 
     /**
      * 引导用户重新完成录屏授权。
+     *
+     * 关键门控（修复锁屏后弹窗风暴/native 崩溃）：
+     * - 恢复通知始终先发出（同 id 自动去重），锁屏/后台也能由用户手动点；
+     * - 仅当 App 有 Activity 在前台 + 屏幕亮 + 已解锁 + 没有别的授权请求在途时，
+     *   才主动 startActivity 弹系统确认框。
+     *   看门狗拉起的冷进程、锁屏中、开机恢复一律只发通知，不再自动叠透明 Activity。
+     *
      * @param fused true=已熔断：不自动拉起系统确认框（避免无限循环弹框），
      *              只发/更新通知，由用户主动点击重试
      */
     private fun promptProjectionRecovery(fused: Boolean) {
+        if (serviceDestroyed) {
+            return
+        }
         val intent = Intent(this, PermissionRequestTransparentActivity::class.java).apply {
             action = ACT_REQUEST_MEDIA_PROJECTION
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
         }
+        // 无论如何先发/更新通知，作为锁屏/后台场景的唯一恢复入口（notify 同 id 去重）
+        postProjectionRecoveryNotification(intent, fused)
+
         if (fused) {
             Log.w(logTag, "录屏会话连续短命失效，已熔断自动弹窗，仅保留通知供手动重试")
-        } else {
-            try {
-                startActivity(intent)
-            } catch (e: Exception) {
-                Log.w(logTag, "后台拉起授权页被系统拦截，改由全屏通知引导", e)
-            }
+            return
         }
-        postProjectionRecoveryNotification(intent, fused)
+        if (_isReady || mediaProjection != null) {
+            return
+        }
+        val keyguardManager =
+            getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
+        val screenOn = powerManager.isInteractive
+        val unlocked = keyguardManager?.isKeyguardLocked != true
+        val foreground = MainApplication.isAppForeground
+        if (!screenOn || !unlocked || !foreground) {
+            Log.i(
+                logTag,
+                "非可交互前台（亮屏=$screenOn 解锁=$unlocked 前台=$foreground），仅通知引导，不自动弹录屏框"
+            )
+            return
+        }
+        if (!beginProjectionRequest()) {
+            Log.i(logTag, "已有录屏授权请求在途，忽略本次重复弹窗请求")
+            return
+        }
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.w(logTag, "后台拉起授权页被系统拦截，改由全屏通知引导", e)
+            endProjectionRequest()
+        }
     }
 
     private fun requestMediaProjectionWithNotice() = promptProjectionRecovery(fused = false)
@@ -875,6 +964,14 @@ class MainService : Service() {
         }
         if (mediaProjection == null) {
             Log.w(logTag, "startCapture fail,mediaProjection is null")
+            // 主控连接进来但录屏会话不存在（锁屏后进程被看门狗重建、token 不可缓存机型）：
+            // 触发恢复引导——前台则弹一次确认框，锁屏/后台则刷新恢复通知等用户点。
+            // 10s 节流，避免 Rust 重试 startCapture 时反复 notify
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastCapturePromptMs > 10_000L) {
+                lastCapturePromptMs = now
+                requestMediaProjectionWithNotice()
+            }
             return false
         }
 

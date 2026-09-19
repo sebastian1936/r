@@ -803,22 +803,28 @@ class ServerModel with ChangeNotifier {
 
   void androidUpdatekeepScreenOn() async {
     if (!isAndroid) return;
-    var floatingWindowDisabled =
-        bind.mainGetLocalOption(key: kOptionDisableFloatingWindow) == "Y" ||
-            !await AndroidPermissionManager.check(kSystemAlertWindow);
-    final keepScreenOn = floatingWindowDisabled
-        ? KeepScreenOn.never
-        : optionToKeepScreenOn(
-            bind.mainGetLocalOption(key: kOptionKeepScreenOn));
-    final on = ((keepScreenOn == KeepScreenOn.serviceOn) && _isStart) ||
-        (keepScreenOn == KeepScreenOn.duringControlled &&
-            _clients.map((e) => !e.disconnected).isNotEmpty);
-    if (on != await WakelockPlus.enabled) {
-      if (on) {
-        WakelockPlus.enable();
-      } else {
-        WakelockPlus.disable();
+    try {
+      var floatingWindowDisabled =
+          bind.mainGetLocalOption(key: kOptionDisableFloatingWindow) == "Y" ||
+              !await AndroidPermissionManager.check(kSystemAlertWindow);
+      final keepScreenOn = floatingWindowDisabled
+          ? KeepScreenOn.never
+          : optionToKeepScreenOn(
+              bind.mainGetLocalOption(key: kOptionKeepScreenOn));
+      final on = ((keepScreenOn == KeepScreenOn.serviceOn) && _isStart) ||
+          (keepScreenOn == KeepScreenOn.duringControlled &&
+              _clients.map((e) => !e.disconnected).isNotEmpty);
+      if (on != await WakelockPlus.enabled) {
+        if (on) {
+          WakelockPlus.enable();
+        } else {
+          WakelockPlus.disable();
+        }
       }
+    } catch (e) {
+      // 服务冷启动早期插件通道未就绪会抛 FormatException(Message corrupted)，
+      // 属于无害竞态，后续连接/状态变化时会再调用
+      debugPrint("androidUpdatekeepScreenOn skipped: $e");
     }
   }
 }
