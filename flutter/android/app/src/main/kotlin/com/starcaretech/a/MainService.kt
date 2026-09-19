@@ -324,6 +324,9 @@ class MainService : Service() {
     /** 上次"连接时无录屏会话"引导时间（节流） */
     @Volatile
     private var lastCapturePromptMs = 0L
+    /** 上次自动拉起授权页时间（3s 去抖，多触发源只发一次） */
+    @Volatile
+    private var lastAutoPromptMs = 0L
 
     /**
      * 亮屏/解锁监听：国产 ROM 普遍在锁屏后停止 MediaProjection 会话，
@@ -866,15 +869,21 @@ class MainService : Service() {
             )
             return
         }
-        if (!beginProjectionRequest()) {
-            Log.i(logTag, "已有录屏授权请求在途，忽略本次重复弹窗请求")
+        // 注意：全局在途闸门由 PermissionRequestTransparentActivity 持有，
+        // Service 端不能先占位——否则透明页 onCreate 抢闸门必败直接 finish，
+        // 系统录屏框永远弹不出来（曾导致"服务开了但录屏打不开"）。
+        // Service 端只做短时间去抖，防多触发源连续 startActivity；
+        // 真正的单实例保证靠 manifest singleTask + 透明页 CAS 闸门。
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastAutoPromptMs < 3_000L) {
+            Log.i(logTag, "3s 内已发起过录屏授权引导，忽略重复请求")
             return
         }
+        lastAutoPromptMs = now
         try {
             startActivity(intent)
         } catch (e: Exception) {
             Log.w(logTag, "后台拉起授权页被系统拦截，改由全屏通知引导", e)
-            endProjectionRequest()
         }
     }
 

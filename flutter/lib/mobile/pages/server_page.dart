@@ -781,8 +781,8 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           child: Container(
             margin: const EdgeInsets.only(left: 32, top: 8),
             child: _granted
-                ? Wrap(
-                    spacing: 8,
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       TextButton(
                           style: TextButton.styleFrom(
@@ -797,15 +797,18 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
                           },
                           child: const Text("立即恢复",
                               style: TextStyle(fontSize: 13))),
-                      TextButton(
-                          style: TextButton.styleFrom(
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 8),
-                              minimumSize: const Size(0, 32),
+                      const SizedBox(height: 4),
+                      OutlinedButton.icon(
+                          icon: const Icon(Icons.fact_check_outlined,
+                              size: 18),
+                          style: OutlinedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12),
+                              minimumSize: const Size(0, 36),
                               tapTargetSize:
                                   MaterialTapTargetSize.shrinkWrap),
                           onPressed: _openEnvReview,
-                          child: const Text("保活设置检查",
+                          label: const Text("保活设置检查（自启动/通知/后台弹出/电池）",
                               style: TextStyle(fontSize: 13))),
                     ],
                   )
