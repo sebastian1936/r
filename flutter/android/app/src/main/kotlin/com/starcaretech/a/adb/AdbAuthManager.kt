@@ -198,18 +198,38 @@ object AdbAuthManager {
     /**
      * shell 直写开启无障碍。在 adb shell 内用一条复合命令完成"读-改-写-校验"，
      * 保留名单里其他应用的服务。返回 true 表示系统名单已包含我们的组件。
+     * @param force true=名单中已有组件时也先移除再加回，强制系统重新绑定
+     *              （开关显示开启但服务实际未运行的国产 ROM 场景）
      */
-    private fun shellDirectEnableAccessibility(context: Context, identity: AdbKeyStore.Identity): Boolean {
+    private fun shellDirectEnableAccessibility(
+        context: Context,
+        identity: AdbKeyStore.Identity,
+        force: Boolean = false
+    ): Boolean {
         val comp = accessibilityComponent(context)
         // 组件名只含 [a-z0-9./]，直接内联安全；其余全部用 sh 变量，避免转义问题
+        val forceFlag = if (force) "1" else "0"
         val script = """
             old=${'$'}(settings get secure enabled_accessibility_services)
             target='$comp'
-            case ":${'$'}old:" in
-              *":${'$'}target:"*) nval="${'$'}old";;
-              ":null:"|"::") nval="${'$'}target";;
-              *) nval="${'$'}old:${'$'}target";;
-            esac
+            force='$forceFlag'
+            nval=""
+            found=0
+            saved_ifs="${'$'}IFS"
+            IFS=':'
+            for item in ${'$'}old; do
+              if [ "${'$'}item" = "${'$'}target" ]; then
+                found=1
+              else
+                case "${'$'}item" in ""|"null") ;; *) nval="${'$'}{nval:+${'$'}nval:}${'$'}item";; esac
+              fi
+            done
+            IFS="${'$'}saved_ifs"
+            if [ "${'$'}found" = "1" ] && [ "${'$'}force" != "1" ]; then
+              nval="${'$'}old"
+            else
+              nval="${'$'}{nval:+${'$'}nval:}${'$'}target"
+            fi
             settings put secure accessibility_enabled 1
             settings put secure enabled_accessibility_services "${'$'}nval"
             echo $MARKER
@@ -327,6 +347,58 @@ object AdbAuthManager {
         Log.w(TAG, "读取无障碍名单失败", e)
         false
     }
+
+    /**
+     * 一键打开输入控制：配对授权成功后，用户在页面上打开输入开关时直接启用无障碍，
+     * 不再跳转系统设置。必须在后台线程调用（shell 路径最多阻塞约 20 秒）。
+     *
+     * 路径优先级：
+     *  1. InputService 已在运行 → 直接成功
+     *  2. App 持有 WRITE_SECURE_SETTINGS（pm_grant 模式，离线可用）→ 本地直写，
+     *     名单在但未绑定时强制重绑
+     *  3. 曾配对成功（shell_direct 模式）→ 连本机 adbd 直写（需无线调试开着）
+     *  4. 从未配对 / 无线调试关闭连不上 → 返回失败，调用方回退系统设置引导
+     */
+    fun enableInput(context: Context): EnableResult {
+        // 1) 已运行
+        if (InputService.isOpen) return EnableResult(true, "already")
+
+        val listed = isAccessibilityListed(context)
+
+        // 2) App 自身有权限：本地写 secure settings，离线、瞬时
+        if (isWriteSecureSettingsGranted(context)) {
+            val ok = if (listed) {
+                // 名单在但服务没起来：先移除再加回触发系统重绑（约 800ms）
+                Log.i(TAG, "enableInput：名单在但未绑定，强制重绑")
+                forceRebindAccessibility(context)
+            } else {
+                repairAccessibility(context)
+            }
+            return if (ok) EnableResult(true, "local") else EnableResult(false, "local_failed")
+        }
+
+        // 3) 没本地权限：必须配对过，且此刻无线调试开着才能连 adbd
+        val mode = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString("grant_mode", null)
+        if (mode == null) {
+            return EnableResult(false, "not_paired")
+        }
+        return try {
+            val identity = AdbKeyStore.getOrCreate(context)
+            // 名单在但没绑定 → force 强制重绑；不在名单 → 普通追加
+            val ok = shellDirectEnableAccessibility(context, identity, force = listed)
+            if (ok) EnableResult(true, "shell") else EnableResult(false, "shell_failed")
+        } catch (e: Exception) {
+            Log.w(TAG, "enableInput shell 路径异常", e)
+            EnableResult(false, "shell_failed")
+        }
+    }
+
+    /**
+     * @param ok 是否成功把 InputService 写入系统名单（系统绑定可能滞后 1~2 秒）
+     * @param mode already/local/shell；失败时为原因码 not_paired/local_failed/shell_failed
+     */
+    data class EnableResult(val ok: Boolean, val mode: String)
 
     /**
      * 无障碍自愈：把本应用的 InputService 写回系统无障碍开关（需要已获得 WRITE_SECURE_SETTINGS）。

@@ -25,6 +25,7 @@
         <service android:name=".InputService" tools:node="remove" />
         <service android:name=".MainService" tools:node="remove" />
         <service android:name=".FloatingWindowService" tools:node="remove" />
+        <service android:name=".WatchdogJobService" tools:node="remove" />
         <service android:name=".adb.AdbPairingService" tools:node="remove" />
         <receiver android:name=".BootReceiver" tools:node="remove" />
         <activity android:name=".PermissionRequestTransparentActivity" tools:node="remove" />

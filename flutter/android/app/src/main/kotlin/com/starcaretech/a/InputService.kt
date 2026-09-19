@@ -60,6 +60,9 @@ const val WHEEL_STEP = 120
 const val WHEEL_DURATION = 50L
 const val LONG_TAP_DELAY = 200L
 
+// 无障碍存活期间巡检 MainService 的间隔（进程被 MIUI 异常销毁后快速自愈）
+private const val SERVICE_WATCHDOG_INTERVAL_MS = 60_000L
+
 class InputService : AccessibilityService() {
 
     companion object {
@@ -899,10 +902,35 @@ class InputService : AccessibilityService() {
         val layout = fakeEditTextForTextStateCalculation?.getLayout()
         Log.d(logTag, "fakeEditTextForTextStateCalculation layout:$layout")
         Log.d(logTag, "onServiceConnected!")
+
+        // 进程外拉起锚点：进程被系统杀掉后，只要无障碍名单里还有本服务，
+        // 系统为分发事件会重建本进程并绑定 InputService。此时若用户仍期望
+        // 被控在线，立刻拉起 MainService，并每 60s 巡检一次（进程内零成本）。
+        startServiceWatchdog()
+    }
+
+    private val watchdogTick = object : Runnable {
+        override fun run() {
+            runCatching {
+                WatchdogScheduler.ensureServiceRunning(applicationContext, "accessibility")
+            }
+            watchdogHandler.postDelayed(this, SERVICE_WATCHDOG_INTERVAL_MS)
+        }
+    }
+    private val watchdogHandler by lazy { Handler(Looper.getMainLooper()) }
+
+    private fun startServiceWatchdog() {
+        runCatching {
+            WatchdogScheduler.ensureServiceRunning(applicationContext, "accessibility_connected")
+            WatchdogScheduler.scheduleJob(applicationContext)
+        }
+        watchdogHandler.removeCallbacks(watchdogTick)
+        watchdogHandler.postDelayed(watchdogTick, SERVICE_WATCHDOG_INTERVAL_MS)
     }
 
     override fun onDestroy() {
         stopConsentRescue()
+        runCatching { watchdogHandler.removeCallbacks(watchdogTick) }
         ctx = null
         super.onDestroy()
     }

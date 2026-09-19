@@ -499,6 +499,30 @@ class MainActivity : FlutterActivity() {
                         activity.runOnUiThread { result.success(ok) }
                     }
                 }
+                "adb_enable_input" -> {
+                    // 配对授权后打开输入开关：直接 shell/本地启用无障碍，无需进系统设置
+                    if (isController) {
+                        result.success(mapOf("ok" to false, "mode" to "unsupported"))
+                        return@setMethodCallHandler
+                    }
+                    thread {
+                        val r = AdbAuthManager.enableInput(context)
+                        Log.i("AdbAuth", "enableInput result=$r snap=${AdbAuthManager.statusSnapshot(context)}")
+                        // 系统绑定 InputService 有 1~2s 延迟，立即 + 2s 后各推一次状态
+                        fun pushInputState() {
+                            flutterMethodChannel?.invokeMethod(
+                                "on_state_changed",
+                                mapOf("name" to "input", "value" to InputService.isOpen.toString())
+                            )
+                        }
+                        activity.runOnUiThread {
+                            pushInputState()
+                            android.os.Handler(android.os.Looper.getMainLooper())
+                                .postDelayed({ pushInputState() }, 2500)
+                            result.success(mapOf("ok" to r.ok, "mode" to r.mode))
+                        }
+                    }
+                }
                 else -> {
                     result.error("-1", "No such method", null)
                 }

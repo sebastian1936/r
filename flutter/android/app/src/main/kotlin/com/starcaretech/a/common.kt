@@ -57,6 +57,9 @@ const val KEY_IS_SUPPORT_VOICE_CALL = "KEY_IS_SUPPORT_VOICE_CALL"
 
 const val KEY_SHARED_PREFERENCES = "KEY_SHARED_PREFERENCES"
 const val KEY_START_ON_BOOT_OPT = "KEY_START_ON_BOOT_OPT"
+// 用户期望被控服务在线（用户主动关服时清 false；被系统杀进程时保留，
+// 供 JobScheduler/无障碍/开机等进程外锚点判断是否需要重新拉起服务）
+const val KEY_SERVICE_WANTED = "KEY_SERVICE_WANTED"
 const val KEY_APP_DIR_CONFIG_PATH = "KEY_APP_DIR_CONFIG_PATH"
 
 @SuppressLint("ConstantLocale")

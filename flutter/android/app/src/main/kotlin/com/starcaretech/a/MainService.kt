@@ -242,6 +242,17 @@ class MainService : Service() {
             get() = _isStart
         val isAudioStart: Boolean
             get() = _isAudioStart
+
+        /** MainService 进程内存活事实：进程外看门狗（Job/无障碍）据此判断是否需要拉起 */
+        @JvmStatic
+        @Volatile
+        var isServiceAlive: Boolean = false
+            private set
+
+        @JvmStatic
+        fun markServiceAlive(alive: Boolean) {
+            isServiceAlive = alive
+        }
     }
 
     private val logTag = "LOG_SERVICE"
@@ -456,6 +467,9 @@ class MainService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // 服务存活事实 + 用户期望在线：进程外看门狗（Job/无障碍/开机）据此拉起
+        markServiceAlive(true)
+        WatchdogScheduler.setServiceWanted(applicationContext, true)
         Log.d(logTag,"MainService onCreate, sdk int:${Build.VERSION.SDK_INT} reuseVirtualDisplay:$reuseVirtualDisplay")
         FFI.init(this)
         HandlerThread("Service", Process.THREAD_PRIORITY_BACKGROUND).apply {
@@ -493,6 +507,9 @@ class MainService : Service() {
         // 但 isReady 仍为 true，远程连接进来时 startCapture 会静默失败
         _isReady = false
         _isStart = false
+        markServiceAlive(false)
+        // 注意：这里不清 KEY_SERVICE_WANTED/不取消看门狗——
+        // 用户主动关服走 destroy()；若是系统异常销毁，看门狗应把服务拉回来
         serviceDestroyed = true
         projectionCallback?.let { cb -> runCatching { mediaProjection?.unregisterCallback(cb) } }
         projectionCallback = null
@@ -938,6 +955,9 @@ class MainService : Service() {
 
     fun destroy() {
         Log.d(logTag, "destroy service")
+        // 用户主动关服：清除在线意愿并取消进程外看门狗，避免被 Job/无障碍重新拉起
+        WatchdogScheduler.setServiceWanted(applicationContext, false)
+        markServiceAlive(false)
         // 先注销回调并置位销毁标记，防止系统随后回调 onStop 又弹出授权请求
         serviceDestroyed = true
         _isReady = false

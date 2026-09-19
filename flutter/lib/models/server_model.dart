@@ -352,9 +352,25 @@ class ServerModel with ChangeNotifier {
       bind.mainSetOption(key: kOptionEnableKeyboard, value: 'N');
     } else {
       if (parent.target != null) {
-        /// the result of toggle-on depends on user actions in the settings page.
-        /// handle result, see [ServerModel.changeStatue]
-        showInputWarnAlert(parent.target!);
+        // 已配对授权过：优先直接启用无障碍（本地直写或经无线调试 shell），
+        // 不用跳系统设置；失败（未配对/无线调试关闭）再回退设置页引导。
+        // 启用成功后的状态由 on_state_changed(input) 驱动，键盘开关选项在
+        // changeStatue 里自动置位。
+        var directOk = false;
+        try {
+          showToast("正在开启输入控制…");
+          final dynamic res =
+              await parent.target?.invokeMethod("adb_enable_input", null);
+          directOk = res is Map && res['ok'] == true;
+        } catch (_) {
+          directOk = false;
+        }
+        if (directOk) {
+          showToast("输入控制已开启");
+        } else {
+          /// 直连启用失败，回退系统设置手动开启，结果仍由 changeStatue 处理
+          showInputWarnAlert(parent.target!);
+        }
       }
     }
   }
