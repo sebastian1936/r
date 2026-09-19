@@ -3770,7 +3770,12 @@ class FFI {
     platformFFI.setMethodCallHandler(callback);
   }
 
-  Future<bool> invokeMethod(String method, [dynamic arguments]) async {
+  // 注意：返回类型必须是 dynamic——Android 通道既有 bool 结果
+  // （init_service 等），也有 Map（adb_auth_status）/List（adb_env_check）。
+  // 曾误标为 Future<bool>，原生返回 Map/List 时 Dart 运行时在返回路径抛
+  // "_Map is not a subtype of type 'FutureOr<bool>'"，导致配对状态永远
+  // 查不到、环境检查静默失败。调用方按实际类型自行判空/判类型。
+  Future<dynamic> invokeMethod(String method, [dynamic arguments]) async {
     return await platformFFI.invokeMethod(method, arguments);
   }
 
