@@ -303,18 +303,16 @@ class MainActivity : FlutterActivity() {
                     // args: Map{addr: String(IP:端口), code: String(6位码)}，分屏模式下由 Dialog 传入
                     val args = call.arguments as? Map<*, *>
                     val code = args?.get("code") as? String
-                    val addr = args?.get("addr") as? String
+                    val addr = (args?.get("addr") as? String)?.trim().orEmpty()
                     if (code == null || code.length != 6) {
                         result.error("-1", "配对码必须为 6 位数字", null)
                         return@setMethodCallHandler
                     }
-                    if (addr.isNullOrBlank()) {
-                        result.error("-1", "请输入配对页显示的 IP:端口", null)
-                        return@setMethodCallHandler
-                    }
-                    // 解析端口（取冒号后最后一段），host 强制 127.0.0.1
-                    val port = try { addr.trim().split(':').last().toInt() } catch (_: Exception) { 0 }
-                    if (port <= 0) {
+                    // addr 可空：分屏模式下同样由 mDNS 自动发现配对端口（与通知模式/Shizuku 一致）；
+                    // 只有用户显式填写 IP:端口 时才解析
+                    val port = if (addr.isBlank()) -1 else
+                        try { addr.split(':').last().toInt() } catch (_: Exception) { 0 }
+                    if (addr.isNotBlank() && port <= 0) {
                         result.error("-1", "IP:端口格式不正确", null)
                         return@setMethodCallHandler
                     }
@@ -324,13 +322,22 @@ class MainActivity : FlutterActivity() {
                     }
                     thread {
                         try {
-                            val r = AdbAuthManager.pairAndGrant(context, code, "127.0.0.1", port)
+                            val r = if (port > 0) {
+                                AdbAuthManager.pairAndGrant(context, code, "127.0.0.1", port)
+                            } else {
+                                AdbAuthManager.pairAndGrantAuto(context, code)
+                            }
                             activity.runOnUiThread {
                                 result.success(mapOf("guid" to r.guid, "shell_direct" to r.shellDirect))
                             }
                         } catch (e: Exception) {
+                            Log.e("AdbAuth", "分屏配对授权失败", e)
                             activity.runOnUiThread {
-                                result.error("-1", e.message ?: "授权失败，请重试", null)
+                                // message 可能为空（如底层 NPE/InterruptedException），
+                                // 必须带上异常类型，否则用户只看到无信息量的"请重试"
+                                val msg = e.message?.takeIf { it.isNotBlank() }
+                                    ?: "授权失败（${e.javaClass.simpleName}），请重试"
+                                result.error("-1", msg, null)
                             }
                         }
                     }

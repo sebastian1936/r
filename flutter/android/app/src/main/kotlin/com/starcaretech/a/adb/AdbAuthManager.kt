@@ -88,7 +88,10 @@ object AdbAuthManager {
             AdbPairingClient.pair(identity, pairingHost, pairingPort, pairingCode)
         } catch (e: Exception) {
             Log.w(TAG, "配对失败", e)
-            throw AuthException("【配对阶段失败】\n${e.chainText()}", e)
+            throw AuthException(
+                "配对失败：请确认 6 位配对码正确、配对页仍在显示后重试\n${e.chainText()}",
+                e
+            )
         }
 
         // 配对刚完成，connect 服务可能还没就绪，等一下再连
@@ -101,8 +104,7 @@ object AdbAuthManager {
         }
         if (!grantRun.connected) {
             throw AuthException(
-                "【已配对，但连接本机 adbd 执行授权失败】\n" +
-                "connect 端口由 mDNS 自动发现并已校验 127.0.0.1 存活：\n\n" +
+                "配对成功，但无法连接无线调试服务。请保持「无线调试」开启后重试。\n\n" +
                 grantRun.attempts.joinToString("\n\n"),
                 null
             )
@@ -144,13 +146,13 @@ object AdbAuthManager {
             return GrantResult(guid, shellDirect = true)
         }
 
-        // 4. 两条路都失败：按特征给出对应指引
+        // 4. 两条路都失败：按特征给出对应操作提示（原始错误只进日志）
+        Log.w(TAG, "授权失败，pm grant 输出：$grantOut")
         val romHint = when {
             grantOut.contains("GRANT_RUNTIME_PERMISSIONS") -> buildRomSecurityHint(grantOut)
             grantOut.isEmpty() ->
-                "【授权未生效】\npm grant 与 shell 直写均未把无障碍/权限写入系统。\n" +
-                "请尝试：关闭无线调试后重新打开 → 重新配对；若仍失败请重启手机后再试。"
-            else -> "【pm grant 未成功】\n$grantOut"
+                "授权未生效，请关闭「无线调试」后重新打开，再重新配对；仍失败请重启手机后重试"
+            else -> "授权失败，请重试。\n$grantOut"
         }
         throw AuthException(romHint)
     }
@@ -245,28 +247,17 @@ object AdbAuthManager {
             .apply()
     }
 
-    /** GRANT_RUNTIME_PERMISSIONS 特征错误：国产 ROM 的"USB 调试安全设置"未开 */
-    private fun buildRomSecurityHint(rawError: String): String =
-        """
-        【系统限制了 ADB 授权权限，配对本身是成功的】
-        设备厂商给 ADB 加了安全开关：当前 ADB shell 没有授予权限的能力
-        （缺少 GRANT_RUNTIME_PERMISSIONS）。此状态下任何 ADB 工具（Shizuku、
-        电脑端 adb 命令）执行 pm grant 都会报同一个错，不是本 App 的问题。
-
-        请到「开发者选项」打开下面对应开关，然后回到本页重新点「开始配对」：
-        · 小米 / 红米（MIUI、HyperOS）：
-          打开「USB 调试（安全设置）」；若要求登录小米账号，登录时不要勾选同步
-        · OPPO / 一加 / realme（ColorOS）：
-          打开「USB 调试（安全设置）」，或关闭「权限监控」后重试
-        · vivo / iQOO（OriginOS）：打开「USB 模拟点击」
-        · 华为 / 荣耀：打开「仅充电模式下允许 ADB 调试」（可能需先用 USB 连一次电脑）
-        · 其他品牌：在开发者选项里搜索「安全」「权限」「模拟点击」类开关
-
-        打开开关后一般需要重新配对一次（重开系统配对码页面即可）。
-
-        系统原始错误：
-        $rawError
-        """.trimIndent()
+    /** GRANT_RUNTIME_PERMISSIONS 特征错误：国产 ROM 的"USB 调试安全设置"未开。
+     *  只给操作步骤，不讲原理；原始错误仅进日志 */
+    private fun buildRomSecurityHint(rawError: String): String {
+        Log.w(TAG, "ROM 安全开关未开，原始错误：\n$rawError")
+        return "配对成功，但系统禁止 ADB 授权。请到「开发者选项」打开对应开关后重试：\n" +
+            "· 小米 / 红米：USB 调试（安全设置）\n" +
+            "· OPPO / 一加 / realme：USB 调试（安全设置），或关闭「权限监控」\n" +
+            "· vivo / iQOO：USB 模拟点击\n" +
+            "· 华为 / 荣耀：仅充电模式下允许 ADB 调试\n" +
+            "· 其他品牌：在开发者选项中找「安全 / 权限 / 模拟点击」类开关"
+    }
 
     /** 自动扫描配对服务再走完整流程（需要用户停在配对码页面） */
     fun pairAndGrantAuto(context: Context, pairingCode: String): GrantResult {

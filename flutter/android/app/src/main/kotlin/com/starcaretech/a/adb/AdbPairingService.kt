@@ -8,6 +8,7 @@ import android.app.RemoteInput
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -98,7 +99,7 @@ class AdbPairingService : Service() {
         try {
             busy = false
             currentPort = -1
-            startForeground(NOTIFICATION_ID, searchingNotification())
+            promoteForeground(searchingNotification())
             if (discovery == null) {
                 discovery = AdbDiscovery.Continuous(
                     this,
@@ -109,9 +110,40 @@ class AdbPairingService : Service() {
             }
             discovery?.start()
         } catch (e: Exception) {
-            // 任何启动异常都不能让服务静默死掉（否则用户只看到通知栏空空如也）
+            // 任何启动异常都发失败通知，绝不能让服务静默死掉、通知栏空空如也
             Log.e(TAG, "配对服务启动失败", e)
+            postResult(
+                success = false,
+                shortText = "配对服务启动失败，点通知上的「重试」",
+                detail = e.message ?: e.javaClass.simpleName
+            )
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    stopForeground(STOP_FOREGROUND_DETACH)
+                }
+            } catch (_: Exception) {
+            }
             stopSelf()
+        }
+    }
+
+    /**
+     * 提升为前台服务：类型跟随 manifest（shortService，与 Shizuku 一致）。
+     * 系统拒绝 FGS 启动（Android 12+ 后台限制）时退化为普通通知，
+     * 至少让用户看到通知而不是毫无反馈。
+     */
+    private fun promoteForeground(n: Notification) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MANIFEST)
+            } else {
+                startForeground(NOTIFICATION_ID, n)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "startForeground 失败，退化为普通通知", e)
+            runCatching {
+                getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, n)
+            }
         }
     }
 
@@ -137,7 +169,7 @@ class AdbPairingService : Service() {
     private fun handleReply(intent: Intent) {
         // RemoteInput 的 PendingIntent 走 getForegroundService：若进程被杀后由回传 Intent
         // 单独重建服务，系统要求 5 秒内 startForeground，否则 Android 12+ 直接崩溃。
-        startForeground(NOTIFICATION_ID, workingNotification())
+        promoteForeground(workingNotification())
         val code = RemoteInput.getResultsFromIntent(intent)
             ?.getCharSequence(KEY_CODE)?.toString()?.trim().orEmpty()
         val port = intent.getIntExtra(EXTRA_PORT, currentPort).takeIf { it > 0 } ?: currentPort
@@ -161,7 +193,7 @@ class AdbPairingService : Service() {
 
         busy = true
         discovery?.stop()
-        startForeground(NOTIFICATION_ID, workingNotification())
+        promoteForeground(workingNotification())
 
         thread(name = "adb-pair-grant") {
             try {
@@ -169,21 +201,11 @@ class AdbPairingService : Service() {
                 val r = AdbAuthManager.pairAndGrant(
                     applicationContext, code, "127.0.0.1", port
                 )
-                if (r.shellDirect) {
-                    postResult(
-                        success = true,
-                        shortText = "已开启无障碍（兼容模式）",
-                        detail = "系统限制了 ADB 授权权限，已改用 shell 直接开启无障碍，功能可正常使用。\n" +
-                            "注意：此模式下 App 被系统彻底杀掉后无法自行恢复，如失效请重新运行一次配对。\n" +
-                            "设备 GUID：${r.guid}"
-                    )
-                } else {
-                    postResult(
-                        success = true,
-                        shortText = "授权成功，权限自动恢复已开启",
-                        detail = "设备 GUID：${r.guid}"
-                    )
-                }
+                postResult(
+                    success = true,
+                    shortText = if (r.shellDirect) "授权成功，无障碍服务已开启" else "授权成功，权限自动恢复已开启",
+                    detail = null
+                )
                 finishAndStop(removeNotification = false)
             } catch (e: Exception) {
                 Log.w(TAG, "配对授权失败", e)
@@ -239,8 +261,8 @@ class AdbPairingService : Service() {
             .build()
 
         return baseBuilder()
-            .setContentTitle("已发现配对服务，点这里输入配对码")
-            .setContentText("配对页保持显示，直接下拉通知栏输入即可，无需分屏")
+            .setContentTitle("请输入配对码")
+            .setContentText("保持系统配对页显示，下拉通知栏点下方按钮输入 6 位码")
             .addAction(action)
             .addAction(stopAction())
             .build()
@@ -292,14 +314,17 @@ class AdbPairingService : Service() {
     private fun finishAndStop(removeNotification: Boolean) {
         discovery?.stop()
         try {
-            stopForeground(STOP_FOREGROUND_REMOVE)
+            if (!removeNotification && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                // DETACH：结果通知脱离前台服务生命周期保留在通知栏（本服务实际只在 API30+ 运行）
+                stopForeground(STOP_FOREGROUND_DETACH)
+            } else {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "stopForeground failed", e)
         }
-        // 成功路径：结果通知已在 stopForeground 之前 post，这里需要重新补发一次
-        // （STOP_FOREGROUND_REMOVE 会连普通通知一并移除；DETACH 常量需 API 24，minSdk 22 不能用）
-        if (!removeNotification) {
-            // 重新发送最近一次结果：由调用方在 stopSelf 前通过 postResult 已构造
+        // 旧系统兜底：重新补发一次结果通知
+        if (!removeNotification && Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
             lastResultNotification?.let {
                 getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, it)
             }

@@ -731,8 +731,8 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
 }
 
 /// 无线调试配对对话框。
-/// 默认走通知栏配对（仿 Shizuku，无需分屏、无需手填端口）；
-/// 通知被 ROM 禁用等极端情况下可切到手动输入 IP:端口（仍需分屏）。
+/// 默认走通知栏配对（仿 Shizuku，无需分屏）；
+/// 收不到通知时可切到分屏手动输入配对码（端口同样自动发现）。
 class _AdbPairDialog extends StatefulWidget {
   const _AdbPairDialog({Key? key}) : super(key: key);
 
@@ -741,7 +741,6 @@ class _AdbPairDialog extends StatefulWidget {
 }
 
 class _AdbPairDialogState extends State<_AdbPairDialog> {
-  final _addrController = TextEditingController();
   final _codeController = TextEditingController();
   bool _busy = false;
   bool _manualMode = false;
@@ -750,7 +749,6 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
 
   @override
   void dispose() {
-    _addrController.dispose();
     _codeController.dispose();
     super.dispose();
   }
@@ -766,7 +764,7 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
       await gFFI.invokeMethod("adb_start_pairing", null);
       if (!mounted) return;
       Navigator.of(context).pop(true);
-      showToast("通知已就绪：打开系统配对页后，下拉通知栏输入配对码");
+      showToast("配对通知已发出，请下拉通知栏输入配对码");
     } on PlatformException catch (e) {
       setState(() {
         _busy = false;
@@ -789,14 +787,9 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
     } catch (_) {}
   }
 
-  /// 手动方式（兜底）：用户分屏后自行填写 IP:端口
+  /// 手动方式（分屏兜底）：只需 6 位配对码，端口同样自动发现
   _submitManual() async {
-    final addr = _addrController.text.trim();
     final code = _codeController.text.trim();
-    if (addr.isEmpty || !addr.contains(':')) {
-      setState(() => _error = "请填写配对页上的 IP:端口，如 192.168.1.10:43251");
-      return;
-    }
     if (code.length != 6) {
       setState(() => _error = "请输入 6 位配对码");
       return;
@@ -807,13 +800,11 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
       _errorCode = null;
     });
     try {
-      final dynamic res = await gFFI.invokeMethod("adb_pair_and_grant", {"addr": addr, "code": code});
+      final dynamic res = await gFFI.invokeMethod("adb_pair_and_grant", {"code": code});
       if (!mounted) return;
       final shellDirect = res is Map && res["shell_direct"] == true;
       Navigator.of(context).pop(true);
-      showToast(shellDirect
-          ? "已开启无障碍（兼容模式）；App 被杀后若失效请重新配对"
-          : "授权成功，权限自动恢复已开启");
+      showToast(shellDirect ? "授权成功，无障碍服务已开启" : "授权成功，权限自动恢复已开启");
     } on PlatformException catch (e) {
       setState(() {
         _busy = false;
@@ -900,29 +891,11 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
-          "不用分屏，也不用填写端口，4 步完成：\n\n"
           "1. 打开系统「开发者选项 → 无线调试」并开启\n"
           "2. 点「使用配对码配对设备」，停在显示 6 位码的页面\n"
-          "3. 从屏幕顶部下拉通知栏，点本应用通知上的\n"
-          "   「输入配对码」\n"
-          "4. 输入 6 位配对码并发送，等「授权成功」通知即可\n\n"
-          "原理：通知栏是系统浮层，下拉它不会让系统配对页\n"
-          "切到后台，配对码因此不会失效；端口由系统广播自动发现。",
-          style: TextStyle(fontSize: 12, height: 1.6),
-        ),
-        Container(
-          margin: const EdgeInsets.only(top: 10),
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            color: Colors.orange.withOpacity(0.12),
-            borderRadius: BorderRadius.circular(6),
-          ),
-          child: const Text(
-            "若通知一直停留在“正在搜索配对服务”：\n"
-            "请在系统设置中允许本应用「后台运行」并关闭\n"
-            "电池优化（部分国产 ROM 会禁止应用在设置页面时联网）。",
-            style: TextStyle(fontSize: 12, height: 1.6, color: Colors.deepOrange),
-          ),
+          "3. 下拉通知栏，点本应用通知上的「输入配对码」\n"
+          "4. 输入 6 位配对码并发送，等待授权成功",
+          style: TextStyle(fontSize: 13, height: 1.8),
         ),
         Align(
           alignment: Alignment.centerLeft,
@@ -933,7 +906,7 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
               tapTargetSize: MaterialTapTargetSize.shrinkWrap,
             ),
             onPressed: _busy ? null : _openNotificationSettings,
-            child: const Text("通知栏完全不显示通知？打开系统通知设置",
+            child: const Text("通知栏没有通知？打开系统通知设置",
                 style: TextStyle(fontSize: 12)),
           ),
         ),
@@ -958,47 +931,19 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Container(
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            color: Colors.orange.withOpacity(0.12),
-            borderRadius: BorderRadius.circular(6),
-          ),
-          child: const Text(
-            "手动方式仍需「分屏模式」：配对页面一切到后台，\n"
-            "配对码就会失效。推荐返回使用上方的通知栏方式。",
-            style: TextStyle(fontSize: 12, height: 1.6, color: Colors.deepOrange),
-          ),
-        ),
-        const SizedBox(height: 12),
         const Text(
           "1. 分屏：上屏打开系统「使用配对码配对设备」页\n"
-          "2. 把页面上的「IP:端口」抄到第一框\n"
-          "3. 把 6 位配对码填到第二框，点确定",
-          style: TextStyle(fontSize: 12, height: 1.6),
+          "2. 在下屏输入 6 位配对码，点确定",
+          style: TextStyle(fontSize: 13, height: 1.8),
         ),
         const SizedBox(height: 14),
-        TextField(
-          controller: _addrController,
-          enabled: !_busy,
-          keyboardType: TextInputType.url,
-          autocorrect: false,
-          enableSuggestions: false,
-          decoration: const InputDecoration(
-            isDense: true,
-            labelText: "IP:端口",
-            hintText: "如 192.168.1.10:43251",
-            border: OutlineInputBorder(),
-            contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-          ),
-        ),
-        const SizedBox(height: 10),
         TextField(
           controller: _codeController,
           enabled: !_busy,
           keyboardType: TextInputType.number,
           maxLength: 6,
           inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          autofocus: true,
           decoration: const InputDecoration(
             isDense: true,
             labelText: "6 位配对码",

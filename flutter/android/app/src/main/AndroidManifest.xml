@@ -96,11 +96,14 @@
             android:name=".FloatingWindowService"
             android:enabled="true" />
 
-        <!-- ADB 无线调试配对：通知栏 RemoteInput 输入配对码的前台服务（仅 host 包） -->
+        <!-- ADB 无线调试配对：通知栏 RemoteInput 输入配对码的前台服务（仅 host 包）。
+             shortService 与 Shizuku 一致：短任务交互型，无需额外 FGS 类型权限，
+             且在应用退到后台的过渡期仍允许启动，国产 ROM 上通知/存活兼容性最好 -->
         <service
             android:name=".adb.AdbPairingService"
             android:enabled="true"
-            android:exported="false" />
+            android:exported="false"
+            android:foregroundServiceType="shortService" />
 
         <!--
  Don't delete the meta-data below.
