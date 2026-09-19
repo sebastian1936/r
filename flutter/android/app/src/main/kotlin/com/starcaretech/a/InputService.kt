@@ -882,13 +882,15 @@ class InputService : AccessibilityService() {
         } else {
             info.flags = FLAG_RETRIEVE_INTERACTIVE_WINDOWS
         }
-        // 注意：setServiceInfo 会整体覆盖 xml 配置，必须显式打开事件订阅与
-        // 窗口内容读取，否则收不到窗口事件、找不到弹窗按钮
+        // 注意：setServiceInfo 会覆盖 xml 中的动态配置，事件类型/反馈类型必须
+        // 显式声明，否则收不到窗口事件、找不到系统录屏弹窗按钮
         info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
         info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
         info.notificationTimeout = 100L
-        info.canRetrieveWindowContent = true
+        // canRetrieveWindowContent 是只能从 xml 元数据静态声明的能力
+        //（accessibility_service_config.xml 已置 true，动态 setServiceInfo 不会清掉它），
+        // 不能在这里赋值：API34 桩里是只读 getter，强行反射也会被框架忽略
         setServiceInfo(info)
         fakeEditTextForTextStateCalculation = EditText(this)
         // Size here doesn't matter, we won't show this view.
