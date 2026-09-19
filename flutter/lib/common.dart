@@ -1513,11 +1513,12 @@ class AndroidPermissionManager {
     return false;
   }
 
-  static Future<bool> check(String type) {
+  static Future<bool> check(String type) async {
     if (isDesktop || isWeb) {
-      return Future.value(true);
+      return true;
     }
-    return gFFI.invokeMethod("check_permission", type);
+    // invokeMethod 返回 dynamic（通道可能返回任意类型），显式归一为 bool
+    return await gFFI.invokeMethod("check_permission", type) == true;
   }
 
   // startActivity goto Android Setting's page to request permission manually by user
