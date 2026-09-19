@@ -64,6 +64,12 @@ const val KEEPALIVE_ALARM_REQUEST_CODE = 2002
 // 信令主动重连最小间隔，避免网络抖动时频繁重启 RendezvousMediator
 const val MIN_MEDIATOR_RESTART_INTERVAL_MS = 30_000L
 
+// 录屏授权循环弹窗熔断：会话建立后存活不足 20s 即死算"短命失效"，
+// 60s 窗口内连续超过 2 次则停止自动拉起系统确认框，只保留通知供用户手动重试
+const val PROJECTION_STABLE_LIFETIME_MS = 20_000L
+const val PROJECTION_FUSE_WINDOW_MS = 60_000L
+const val PROJECTION_FUSE_MAX_FAILURES = 2
+
 const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_VP9
 
 // video const
@@ -259,6 +265,15 @@ class MainService : Service() {
     @Volatile
     private var resumeWanted = false
 
+    /** 当前 MediaProjection 会话建立时刻；区分"正常收回"与"建立即死" */
+    @Volatile
+    private var projectionEstablishedMs = 0L
+    /** 时间窗口内连续短命失效次数与窗口起点（熔断自动弹窗用） */
+    @Volatile
+    private var shortLivedProjectionFailures = 0
+    @Volatile
+    private var projectionFailWindowStartMs = 0L
+
     /**
      * 亮屏/解锁监听：国产 ROM 普遍在锁屏后停止 MediaProjection 会话，
      * 亮屏时先用缓存 token 静默恢复（targetSdk33 下同开机周期 token 可复用），
@@ -281,14 +296,8 @@ class MainService : Service() {
                 Log.i(logTag, "缓存授权静默恢复成功")
             } else {
                 Log.w(logTag, "缓存授权已失效，刷新录屏恢复通知等待确认（可由无障碍自动点击）")
-                val intent = Intent(this, PermissionRequestTransparentActivity::class.java).apply {
-                    action = ACT_REQUEST_MEDIA_PROJECTION
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                }
-                // 部分 ROM 在 USER_PRESENT 瞬间允许前台服务拉起 Activity；失败也无妨，
-                // 全屏通知（点击豁免）是保底入口
-                runCatching { startActivity(intent) }
-                postProjectionRecoveryNotification(intent)
+                // 统一走引导入口（含循环弹窗熔断保护）；后台拉起失败时有全屏通知保底
+                requestMediaProjectionWithNotice()
                 return
             }
         }
@@ -582,10 +591,12 @@ class MainService : Service() {
                     // 用户刚完成确认：缓存 token 供后续静默恢复
                     if (!applyProjection(mediaProjectionManager, token)) {
                         Log.w(logTag, "新鲜授权 token 也无法建立 MediaProjection，回退重新请求")
-                        requestMediaProjectionWithNotice()
+                        // 同步失败同样计入熔断，避免异常 ROM 下"点允许→秒失败→再弹"的死循环
+                        promptProjectionRecovery(recordProjectionFailure())
                     } else {
                         MediaProjectionTokenStore.save(this, token)
                         _isReady = true
+                        // checkMediaPermission 内部会撤下恢复通知并同步 Dart 状态
                         checkMediaPermission()
                         resumeCaptureIfWanted()
                     }
@@ -622,7 +633,16 @@ class MainService : Service() {
      * 用授权结果 Intent 建立 MediaProjection 并注册掉线回调。
      * @return false 表示 token 已失效（SecurityException/IllegalStateException）
      */
+    @Synchronized
     private fun applyProjection(manager: MediaProjectionManager, token: Intent): Boolean {
+        // 建立新会话前必须彻底摘掉旧会话：旧会话残留时，新会话建立会顶掉旧会话，
+        // 旧 callback 迟到的 onStop 又会把新会话误判为失效（崩溃恢复后无限弹框的根因）。
+        // 先 unregister 再 stop，避免主动 stop 触发自己 callback 的 onStop 重入。
+        projectionCallback?.let { cb -> runCatching { mediaProjection?.unregisterCallback(cb) } }
+        projectionCallback = null
+        runCatching { mediaProjection?.stop() }
+        mediaProjection = null
+
         return try {
             val mp = manager.getMediaProjection(Activity.RESULT_OK, token)
             if (mp == null) {
@@ -631,6 +651,11 @@ class MainService : Service() {
             } else {
                 val cb = object : MediaProjection.Callback() {
                     override fun onStop() {
+                        // 只处理当前实例的回调；旧会话迟到的 onStop 直接忽略
+                        if (mediaProjection !== mp) {
+                            Log.i(logTag, "忽略旧 MediaProjection 实例的迟到 onStop")
+                            return
+                        }
                         Log.w(logTag, "MediaProjection onStop：会话被系统收回")
                         onProjectionInvalid()
                     }
@@ -638,6 +663,7 @@ class MainService : Service() {
                 mp.registerCallback(cb, Handler(Looper.getMainLooper()))
                 projectionCallback = cb
                 mediaProjection = mp
+                projectionEstablishedMs = SystemClock.elapsedRealtime()
                 true
             }
         } catch (e: SecurityException) {
@@ -679,6 +705,8 @@ class MainService : Service() {
     /**
      * MediaProjection 会话失效（Callback.onStop 或 createVirtualDisplay 抛 SecurityException）。
      * 释放采集资源、同步状态，并重新拉起用户确认流程。
+     * 对"建立即死"的连续失败做熔断：不再自动弹系统确认框（否则崩溃恢复/token 半死后
+     * 会形成 允许→onStop→再弹 的无限循环），只保留通知由用户手动点重试。
      */
     private fun onProjectionInvalid() {
         if (serviceDestroyed) {
@@ -689,6 +717,7 @@ class MainService : Service() {
             // Callback.onStop 与 createVirtualDisplay 的 SecurityException 可能先后到达，只处理一次
             return
         }
+        val livedMs = SystemClock.elapsedRealtime() - projectionEstablishedMs
         if (isStart) {
             // 标记：录屏恢复后要自动续采集（区别于客户端主动断开的 stop_capture）
             resumeWanted = true
@@ -698,8 +727,52 @@ class MainService : Service() {
         mediaProjection = null
         _isReady = false
         checkMediaPermission()
-        requestMediaProjectionWithNotice()
+
+        val fused = if (livedMs < PROJECTION_STABLE_LIFETIME_MS) {
+            recordProjectionFailure()
+        } else {
+            // 稳定运行过的会话被收回属正常情况（锁屏/ROM 回收），重置计数继续自动引导
+            shortLivedProjectionFailures = 0
+            false
+        }
+        promptProjectionRecovery(fused)
     }
+
+    /** 记录一次"建立即死/授权失败"，返回是否已熔断（应停止自动弹窗） */
+    private fun recordProjectionFailure(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (now - projectionFailWindowStartMs > PROJECTION_FUSE_WINDOW_MS) {
+            projectionFailWindowStartMs = now
+            shortLivedProjectionFailures = 1
+        } else {
+            shortLivedProjectionFailures += 1
+        }
+        return shortLivedProjectionFailures > PROJECTION_FUSE_MAX_FAILURES
+    }
+
+    /**
+     * 引导用户重新完成录屏授权。
+     * @param fused true=已熔断：不自动拉起系统确认框（避免无限循环弹框），
+     *              只发/更新通知，由用户主动点击重试
+     */
+    private fun promptProjectionRecovery(fused: Boolean) {
+        val intent = Intent(this, PermissionRequestTransparentActivity::class.java).apply {
+            action = ACT_REQUEST_MEDIA_PROJECTION
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        if (fused) {
+            Log.w(logTag, "录屏会话连续短命失效，已熔断自动弹窗，仅保留通知供手动重试")
+        } else {
+            try {
+                startActivity(intent)
+            } catch (e: Exception) {
+                Log.w(logTag, "后台拉起授权页被系统拦截，改由全屏通知引导", e)
+            }
+        }
+        postProjectionRecoveryNotification(intent, fused)
+    }
+
+    private fun requestMediaProjectionWithNotice() = promptProjectionRecovery(fused = false)
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
@@ -707,25 +780,10 @@ class MainService : Service() {
     }
 
     /**
-     * 重新请求 MediaProjection 授权：
-     * 1. 先直接拉起透明授权页——App 有前台界面时可直接弹出系统确认框；
-     * 2. 同时发一条带 fullScreenIntent 的高优先级通知——App 在后台/锁屏时
-     *    Android 10+ 禁止后台启动 Activity，全屏通知是唯一能把用户一键带到确认框的手段
+     * 发送/更新录屏授权恢复通知（带全屏 Intent，锁屏也可一键到达确认页）。
+     * 熔断态文案明确告知用户手动点击重试，不再自动连环弹框。
      */
-    private fun requestMediaProjectionWithNotice() {
-        val intent = Intent(this, PermissionRequestTransparentActivity::class.java).apply {
-            action = ACT_REQUEST_MEDIA_PROJECTION
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
-        }
-        try {
-            startActivity(intent)
-        } catch (e: Exception) {
-            Log.w(logTag, "后台拉起授权页被系统拦截，改由全屏通知引导", e)
-        }
-        postProjectionRecoveryNotification(intent)
-    }
-
-    private fun postProjectionRecoveryNotification(fullScreenTarget: Intent) {
+    private fun postProjectionRecoveryNotification(fullScreenTarget: Intent, fused: Boolean = false) {
         try {
             val pendingIntent = PendingIntent.getActivity(
                 this, 0, fullScreenTarget,
@@ -737,8 +795,11 @@ class MainService : Service() {
                 .setPriority(NotificationCompat.PRIORITY_MAX)
                 .setCategory(NotificationCompat.CATEGORY_CALL)
                 .setAutoCancel(true)
-                .setContentTitle("录屏授权已失效")
-                .setContentText("点击恢复屏幕共享（需要重新确认一次）")
+                .setContentTitle(if (fused) "录屏权限开启失败" else "录屏授权已失效")
+                .setContentText(
+                    if (fused) "请点击重试（已停止自动弹窗）"
+                    else "点击恢复屏幕共享（需要重新确认一次）"
+                )
                 .setContentIntent(pendingIntent)
                 // 锁屏/无前台界面时由系统直接展开为全屏授权页
                 .setFullScreenIntent(pendingIntent, true)
