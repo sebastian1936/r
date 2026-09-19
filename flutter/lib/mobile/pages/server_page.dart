@@ -649,17 +649,22 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // 用户在通知栏完成配对授权后回到 App，自动刷新授权状态并衔接录屏授权
-    if (state == AppLifecycleState.resumed) _refresh();
+    if (state == AppLifecycleState.resumed) _refresh(delayedRescan: true);
   }
 
-  _refresh() async {
+  /// [delayedRescan]：首次查询若显示未授权，1.5 秒后补查一次。
+  /// 系统绑定无障碍服务是异步的，配对刚成功/刚回前台时服务可能还没 bind 完，
+  /// 会导致页面短暂（或一直）停留在「一键开启」
+  _refresh({bool delayedRescan = false}) async {
+    var grantedNow = false;
     try {
       final dynamic status = await gFFI.invokeMethod("adb_auth_status", null);
       if (!mounted) return;
       final capturePending = (status["capture_pending"] ?? false) as bool;
+      grantedNow = (status["granted"] ?? false) as bool;
       setState(() {
         _supported = (status["supported"] ?? false) as bool;
-        _granted = (status["granted"] ?? false) as bool;
+        _granted = grantedNow;
       });
       // 通知栏配对成功后用户回到 App：自动拉起一次系统录屏授权框
       // （录屏是系统级授权，无法静默授予；已授权/缓存有效时不会弹窗）
@@ -667,6 +672,10 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         gFFI.invokeMethod("adb_ensure_capture", null);
       }
     } catch (_) {}
+    if (delayedRescan && !grantedNow && mounted) {
+      await Future.delayed(const Duration(milliseconds: 1500));
+      if (mounted) _refresh();
+    }
   }
 
   /// 一键开启：直接启动通知配对，不再多一层说明对话框；
@@ -700,7 +709,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
   /// 分屏/对话框内配对成功后的收尾：刷状态（_refresh 内会消费 pending 并
   /// 自动拉起录屏授权）+ 刷新服务与权限页
   _onPairingSucceeded() async {
-    await _refresh();
+    await _refresh(delayedRescan: true);
     checkService();
     gFFI.serverModel.checkAndroidPermission();
   }

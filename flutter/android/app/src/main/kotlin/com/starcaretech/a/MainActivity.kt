@@ -290,12 +290,15 @@ class MainActivity : FlutterActivity() {
                     onVoiceCallClosed()
                 }
                 "adb_auth_status" -> {
-                    // ADB 一键授权状态：系统是否支持 + 是否已生效（pm 授权或无障碍在名单）
-                    // + 是否有待引导的录屏授权
+                    // ADB 一键授权状态：系统是否支持 + 是否已生效（pm 授权/无障碍名单/
+                    // 服务运行中，三重判据）+ 是否有待引导的录屏授权
+                    val granted = AdbAuthManager.isEnabled(context)
+                    // 明细只进日志，不进 UI；状态误报时用 logcat（tag AdbAuth）定位
+                    Log.i("AdbAuth", "auth status granted=$granted snap=${AdbAuthManager.statusSnapshot(context)}")
                     result.success(
                         mapOf(
                             "supported" to AdbAuthManager.isSupported(),
-                            "granted" to AdbAuthManager.isEnabled(context),
+                            "granted" to granted,
                             "capture_pending" to AdbAuthManager.peekCapturePending(context),
                             "reason" to (AdbAuthManager.unsupportedReason() ?: "")
                         )

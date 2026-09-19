@@ -6,6 +6,7 @@ import android.os.Build
 import android.provider.Settings
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.starcaretech.a.InputService
 
 /**
  * ADB 自授权门面：配对 → pm grant → 验证 →（可选）无障碍自愈。
@@ -251,12 +252,30 @@ object AdbAuthManager {
     }
 
     /**
-     * 授权是否已生效（两种模式的统一判据）：
-     *  - pm_grant：App 持有 WRITE_SECURE_SETTINGS（持久，重启不丢）
-     *  - shell_direct：无障碍服务已在系统名单中（同样持久，服务可能被杀但名单在）
+     * 授权是否已生效（三重判据，任一成立即可）：
+     *  - App 持有 WRITE_SECURE_SETTINGS（pm_grant 路径，持久）
+     *  - 无障碍服务在系统名单中（shell_direct 路径，持久，服务可能被杀但名单在）
+     *  - InputService 实际正在运行（同进程静态事实，兜住部分 ROM 对 secure
+     *    setting 读取延迟/隔离导致的名单误判）
      */
     fun isEnabled(context: Context): Boolean =
-        isWriteSecureSettingsGranted(context) || isAccessibilityListed(context)
+        isWriteSecureSettingsGranted(context) ||
+            isAccessibilityListed(context) ||
+            InputService.isOpen
+
+    /** 授权诊断明细（通道日志/排查用） */
+    fun statusSnapshot(context: Context): Map<String, Any?> = mapOf(
+        "wss" to isWriteSecureSettingsGranted(context),
+        "a11y_listed" to isAccessibilityListed(context),
+        "a11y_running" to InputService.isOpen,
+        "a11y_list_raw" to runCatching {
+            Settings.Secure.getString(
+                context.contentResolver,
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            )
+        }.getOrNull(),
+        "component" to accessibilityComponent(context)
+    )
 
     /** 只读查看"待引导录屏授权"标记（供状态通道使用，不清标记） */
     fun peekCapturePending(context: Context): Boolean =
@@ -294,12 +313,16 @@ object AdbAuthManager {
     fun isWriteSecureSettingsGranted(context: Context): Boolean =
         ContextCompat.checkSelfPermission(context, PERM_WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED
 
-    /** InputService 当前是否在系统无障碍名单中（只读安全设置） */
+    /** InputService 当前是否在系统无障碍名单中（只读安全设置）。
+     *  同时兼容全名（pkg/pkg.InputService）与短名（pkg/.InputService）写法，
+     *  忽略大小写与空白，适配各 ROM 二次确认后对名单的规范化改写 */
     fun isAccessibilityListed(context: Context): Boolean = try {
         val current = Settings.Secure.getString(
             context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        ) ?: ""
-        current.split(':').contains(accessibilityComponent(context))
+        )?.lowercase().orEmpty()
+        val pkg = context.packageName.lowercase()
+        val targets = setOf("$pkg/$pkg.inputservice", "$pkg/.inputservice")
+        current.split(':').any { it.trim() in targets }
     } catch (e: Exception) {
         Log.w(TAG, "读取无障碍名单失败", e)
         false
