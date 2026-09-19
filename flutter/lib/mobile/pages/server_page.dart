@@ -684,8 +684,9 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
   _startPairing() async {
     var hasIssue = false;
     try {
-      final List<dynamic> items =
-          await gFFI.invokeMethod("adb_env_check", null);
+      // gFFI.invokeMethod 声名为 Future<bool>，实际透传通道结果，需 dynamic 接
+      final dynamic raw = await gFFI.invokeMethod("adb_env_check", null);
+      final items = raw is List ? raw : const [];
       hasIssue = items
           .any((e) => e is Map && e["status"] != "ok");
     } catch (_) {
@@ -905,8 +906,8 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
   _refresh() async {
     setState(() => _loading = true);
     try {
-      final List<dynamic> items =
-          await gFFI.invokeMethod("adb_env_check", null);
+      final dynamic raw = await gFFI.invokeMethod("adb_env_check", null);
+      final items = raw is List ? raw : const [];
       if (!mounted) return;
       setState(() {
         _items = items;
