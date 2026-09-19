@@ -66,6 +66,31 @@ class InputService : AccessibilityService() {
         var ctx: InputService? = null
         val isOpen: Boolean
             get() = ctx != null
+
+        // ---- 系统录屏授权弹窗自动点击的安全闸门 ----
+        // 仅当本应用主动发起 MediaProjection 授权（透明授权页拉起系统确认框）
+        // 前后 20 秒内才允许点击，绝不触碰任何其他界面的按钮
+        @Volatile
+        private var consentPending = false
+        @Volatile
+        private var consentSince = 0L
+        private const val CONSENT_TTL_MS = 20_000L
+        private const val CONSENT_MAX_CLICKS = 4
+
+        /** 透明授权页发起系统录屏确认前调用 */
+        @JvmStatic
+        fun beginConsentWait() {
+            consentPending = true
+            consentSince = System.currentTimeMillis()
+            ctx?.startConsentRescue()
+        }
+
+        /** 授权结果返回（同意/拒绝）后调用 */
+        @JvmStatic
+        fun endConsentWait() {
+            consentPending = false
+            ctx?.stopConsentRescue()
+        }
     }
 
     private val logTag = "input service"
@@ -710,7 +735,142 @@ class InputService : AccessibilityService() {
     }
 
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent) {
+    // ---- 系统录屏授权弹窗自动点击 ----
+    private val consentHandler = Handler(Looper.getMainLooper())
+    private var consentClicks = 0
+    private var consentRescueScheduled = false
+
+    // 系统录屏确认框可能出现的窗口：AOSP 在 framework（包名 "android"），
+    // 部分国产 ROM 走 SystemUI/权限控制器
+    private val projectionDialogPkgs = setOf(
+        "android", "com.android.systemui", "com.android.permissioncontroller"
+    )
+
+    // 各 ROM/语言下"同意录屏"按钮文案（精确匹配，不做包含匹配以免误点标题）
+    private val positiveTexts = setOf(
+        "立即开始", "开始投屏", "立即投屏", "开始共享", "屏幕录制",
+        "开始", "允许", "同意", "继续", "确定",
+        "start now", "start casting", "start", "allow", "continue", "ok", "got it"
+    )
+    private val negativeTexts = setOf(
+        "取消", "拒绝", "不要再询问", "cancel", "deny", "don't", "no thanks"
+    )
+
+    private val consentRescue = object : Runnable {
+        override fun run() {
+            consentRescueScheduled = false
+            if (!isConsentActive()) {
+                endConsentWait()
+                return
+            }
+            try {
+                scanAndClickProjectionDialog()
+            } catch (e: Exception) {
+                Log.w(logTag, "录屏弹窗自动点击异常", e)
+            }
+            // 多级弹窗（部分 ROM 有"继续→开始"两步）：在 TTL 内周期重试，点击次数封顶
+            if (isConsentActive() && consentClicks < CONSENT_MAX_CLICKS) {
+                consentRescueScheduled = true
+                consentHandler.postDelayed(this, 400)
+            }
+        }
+    }
+
+    private fun isConsentActive(): Boolean {
+        if (!consentPending) return false
+        if (System.currentTimeMillis() - consentSince > CONSENT_TTL_MS) {
+            consentPending = false
+            return false
+        }
+        return true
+    }
+
+    fun startConsentRescue() {
+        consentClicks = 0
+        if (consentRescueScheduled) return
+        consentRescueScheduled = true
+        consentHandler.post(consentRescue)
+    }
+
+    fun stopConsentRescue() {
+        consentRescueScheduled = false
+        consentHandler.removeCallbacks(consentRescue)
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (!isConsentActive() || event == null) return
+        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+        ) return
+        // 窗口出现/变化即尽快扫一次（定时循环兜底，防止部分 ROM 事件稀疏）
+        if (!consentRescueScheduled) {
+            consentRescueScheduled = true
+            consentHandler.post(consentRescue)
+        }
+    }
+
+    private fun scanAndClickProjectionDialog() {
+        val root = rootInActiveWindow ?: return
+        val pkg = root.packageName?.toString() ?: return
+        val pkgOk = projectionDialogPkgs.contains(pkg) || pkg.endsWith(".systemui")
+        if (!pkgOk) return
+
+        // 1) 优先按系统 AlertDialog 标准按钮 id 定位
+        var target: AccessibilityNodeInfo? =
+            root.findAccessibilityNodeInfosByViewId("android:id/button1")
+                ?.firstOrNull { isPositiveButton(it) }
+
+        // 2) 文本遍历兜底（MIUI/HyperOS/ColorOS 各种改造）
+        if (target == null) {
+            target = findPositiveByText(root)
+        }
+
+        if (target != null) {
+            consentClicks++
+            val label = target.text ?: target.contentDescription
+            Log.i(logTag, "自动确认系统录屏授权：$label（第 $consentClicks 次）")
+            target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }
+    }
+
+    private fun nodeLabel(node: AccessibilityNodeInfo): String =
+        (node.text?.toString() ?: node.contentDescription?.toString() ?: "").trim()
+
+    private fun isPositiveButton(node: AccessibilityNodeInfo?): Boolean {
+        node ?: return false
+        val label = nodeLabel(node)
+        if (label.isEmpty()) return false
+        val low = label.lowercase(Locale.ROOT)
+        if (negativeTexts.any { low == it.lowercase(Locale.ROOT) || low.startsWith(it.lowercase(Locale.ROOT)) }) {
+            return false
+        }
+        return positiveTexts.any { low == it.lowercase(Locale.ROOT) }
+    }
+
+    private fun findPositiveByText(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        node ?: return null
+        if (isPositiveButton(node)) {
+            return clickableSelfOrParent(node)
+        }
+        for (i in 0 until node.childCount) {
+            findPositiveByText(node.getChild(i))?.let { return it }
+        }
+        return null
+    }
+
+    /** 文本命中的节点自身或最近的可点击祖先（最多 3 层，且要求是按钮类）才允许点 */
+    private fun clickableSelfOrParent(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        var n: AccessibilityNodeInfo? = node
+        var depth = 0
+        while (n != null && depth < 3) {
+            val cls = n.className?.toString() ?: ""
+            if (n.isClickable && (cls.contains("Button") || n == node)) {
+                return n
+            }
+            n = n.parent
+            depth++
+        }
+        return null
     }
 
     override fun onServiceConnected() {
@@ -722,6 +882,13 @@ class InputService : AccessibilityService() {
         } else {
             info.flags = FLAG_RETRIEVE_INTERACTIVE_WINDOWS
         }
+        // 注意：setServiceInfo 会整体覆盖 xml 配置，必须显式打开事件订阅与
+        // 窗口内容读取，否则收不到窗口事件、找不到弹窗按钮
+        info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+        info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
+        info.notificationTimeout = 100L
+        info.canRetrieveWindowContent = true
         setServiceInfo(info)
         fakeEditTextForTextStateCalculation = EditText(this)
         // Size here doesn't matter, we won't show this view.
@@ -733,6 +900,7 @@ class InputService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        stopConsentRescue()
         ctx = null
         super.onDestroy()
     }

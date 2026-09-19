@@ -14,8 +14,10 @@ import android.annotation.SuppressLint
 import android.app.*
 import android.app.PendingIntent.FLAG_IMMUTABLE
 import android.app.PendingIntent.FLAG_UPDATE_CURRENT
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.content.res.Configuration.ORIENTATION_LANDSCAPE
@@ -173,6 +175,8 @@ class MainService : Service() {
             }
             "stop_capture" -> {
                 Log.d(logTag, "from rust:stop_capture")
+                // 客户端主动断开，不要再因录屏失效标记自动续采集
+                resumeWanted = false
                 stopCapture()
             }
             "half_scale" -> {
@@ -223,6 +227,53 @@ class MainService : Service() {
     @Volatile
     private var serviceDestroyed = false
 
+    /**
+     * 采集是否因录屏会话失效被打断（而不是客户端主动断开）。
+     * 录屏重新就绪后据此自动续上采集，主控端无需重连、无需开关服务
+     */
+    @Volatile
+    private var resumeWanted = false
+
+    /**
+     * 亮屏/解锁监听：国产 ROM 普遍在锁屏后停止 MediaProjection 会话，
+     * 亮屏时先用缓存 token 静默恢复（targetSdk33 下同开机周期 token 可复用），
+     * 恢复成功则自动续采集；token 也被废时刷新全屏恢复通知，
+     * 系统确认框由本应用的无障碍服务自动点击（见 InputService）
+     */
+    private val screenStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_ON, Intent.ACTION_USER_PRESENT ->
+                    handleScreenStateChanged()
+            }
+        }
+    }
+
+    private fun handleScreenStateChanged() {
+        if (!_isReady) {
+            Log.i(logTag, "亮屏/解锁：尝试用缓存授权静默恢复录屏")
+            if (tryRestoreMediaProjection()) {
+                Log.i(logTag, "缓存授权静默恢复成功")
+            } else {
+                Log.w(logTag, "缓存授权已失效，刷新录屏恢复通知等待确认（可由无障碍自动点击）")
+                val intent = Intent(this, PermissionRequestTransparentActivity::class.java).apply {
+                    action = ACT_REQUEST_MEDIA_PROJECTION
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                // 部分 ROM 在 USER_PRESENT 瞬间允许前台服务拉起 Activity；失败也无妨，
+                // 全屏通知（点击豁免）是保底入口
+                runCatching { startActivity(intent) }
+                postProjectionRecoveryNotification(intent)
+                return
+            }
+        }
+        if (resumeWanted && !isStart && mediaProjection != null) {
+            Log.i(logTag, "录屏已恢复，自动续上屏幕采集")
+            resumeWanted = false
+            startCapture()
+        }
+    }
+
     private var surface: Surface? = null
     private val sendVP9Thread = Executors.newSingleThreadExecutor()
     private var videoEncoder: MediaCodec? = null
@@ -255,6 +306,17 @@ class MainService : Service() {
         FFI.startServer(configPath, "")
 
         createForegroundNotification()
+
+        // SCREEN_ON / USER_PRESENT 只能动态注册
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(screenStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(screenStateReceiver, filter)
+        }
     }
 
     override fun onDestroy() {
@@ -267,6 +329,7 @@ class MainService : Service() {
         projectionCallback = null
         mediaProjection = null
         checkMediaPermission()
+        runCatching { unregisterReceiver(screenStateReceiver) }
         stopService(Intent(this, FloatingWindowService::class.java))
         super.onDestroy()
     }
@@ -361,8 +424,9 @@ class MainService : Service() {
                         requestMediaProjectionWithNotice()
                     } else {
                         MediaProjectionTokenStore.save(this, token)
-                        checkMediaPermission()
                         _isReady = true
+                        checkMediaPermission()
+                        resumeCaptureIfWanted()
                     }
                 } ?: let {
                     Log.d(logTag, "getParcelableExtra intent null, try restore then request")
@@ -430,7 +494,17 @@ class MainService : Service() {
         Log.i(logTag, "MediaProjection 已用缓存授权静默恢复")
         _isReady = true
         checkMediaPermission()
+        resumeCaptureIfWanted()
         return true
+    }
+
+    /** 录屏重新就绪后，若采集是被系统打断的则自动续上（主控无需重连） */
+    private fun resumeCaptureIfWanted() {
+        if (resumeWanted && !isStart && mediaProjection != null) {
+            Log.i(logTag, "自动续上屏幕采集")
+            resumeWanted = false
+            startCapture()
+        }
     }
 
     /**
@@ -447,6 +521,8 @@ class MainService : Service() {
             return
         }
         if (isStart) {
+            // 标记：录屏恢复后要自动续采集（区别于客户端主动断开的 stop_capture）
+            resumeWanted = true
             stopCapture()
         }
         projectionCallback = null
