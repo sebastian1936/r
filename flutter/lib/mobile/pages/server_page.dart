@@ -586,7 +586,8 @@ class _PermissionCheckerState extends State<PermissionChecker> {
     // Android 10 及以下、以及阉割了无线调试的鸿蒙 2/3/4 保留传统手动两行
     final unifiedControl = androidVersion >= 30 && !isHarmonyOs;
     return PaddingCard(
-        title: translate("Permissions"),
+        // 安卓 11+ 卡片里只有"接受控制"总开关，不再显示"权限"标题
+        title: unifiedControl ? null : translate("Permissions"),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           if (!unifiedControl && serverModel.mediaOk)
             ElevatedButton.icon(
@@ -657,6 +658,10 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
   /// 定时器到期或真实状态一致后清除（用户取消录屏框会弹回关）
   bool? _controlPending;
   bool _controlBusy = false;
+
+  /// 防诈骗警告是否已勾选确认。未勾选不能进行权限检查/开启接受控制；
+  /// 关闭控制永远允许，不受此状态限制
+  bool _scamAcknowledged = false;
 
   /// "接受控制"总开关。
   /// 开：只做三件必要的事——确认配对记录、恢复无障碍、启动服务（系统
@@ -749,7 +754,13 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         } catch (_) {}
         await Future.delayed(const Duration(milliseconds: 1500));
         await _refresh();
-        if (mounted) setState(() => _controlPending = null);
+        if (mounted) {
+          setState(() {
+            _controlPending = null;
+            // 关闭后防诈骗确认重置：下次开启必须重新勾选
+            _scamAcknowledged = false;
+          });
+        }
       }
     } finally {
       _controlBusy = false;
@@ -1005,7 +1016,16 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           Switch(
             value: switchOn,
             activeColor: Colors.green,
-            onChanged: _controlBusy ? null : _toggleControl,
+            // 开启必须先勾选防诈骗确认；关闭永远允许（随时能停止受控）
+            onChanged: _controlBusy
+                ? null
+                : (v) {
+                    if (v == true && !_scamAcknowledged) {
+                      showToast("请先确认下方的警告");
+                      return;
+                    }
+                    _toggleControl(v == true);
+                  },
           ),
         ]),
         Padding(
@@ -1014,7 +1034,54 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
               style:
                   const TextStyle(fontSize: 12, color: MyTheme.darkGray)),
         ),
-        // 保活检查始终可进入
+        // 防诈骗红色警告
+        Container(
+          width: double.maxFinite,
+          margin: const EdgeInsets.only(top: 10),
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: Colors.red.withOpacity(0.06),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: Colors.red.withOpacity(0.35)),
+          ),
+          child: const Text(
+            "公检法办案、投资理财、客户退款，要求您共享屏幕的，都是电信诈骗。",
+            style: TextStyle(
+              fontSize: 13,
+              height: 1.6,
+              color: Colors.red,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+        // 知晓确认：勾选后才允许权限检查和开启总开关；
+        // 已在接受控制时勾选框保持勾选且不可取消
+        InkWell(
+          onTap: switchOn
+              ? null
+              : () => setState(
+                  () => _scamAcknowledged = !_scamAcknowledged),
+          child: Padding(
+            padding: const EdgeInsets.only(top: 8, bottom: 2),
+            child: Row(children: [
+              SizedBox(
+                width: 22,
+                height: 22,
+                child: Checkbox(
+                  value: _scamAcknowledged,
+                  onChanged: switchOn
+                      ? null
+                      : (v) => setState(
+                          () => _scamAcknowledged = v ?? false),
+                ),
+              ),
+              const SizedBox(width: 6),
+              const Text("我已知晓",
+                  style: TextStyle(fontSize: 13, color: Colors.black87)),
+            ]),
+          ),
+        ),
+        // 保活检查始终可进入（未勾选警告时先提示）
         Container(
           margin: const EdgeInsets.only(left: 22, top: 6),
           child: OutlinedButton.icon(
@@ -1023,8 +1090,10 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
                   padding: const EdgeInsets.symmetric(horizontal: 12),
                   minimumSize: const Size(0, 34),
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap),
-              onPressed: _openEnvReview,
-              label: const Text("保活设置检查（自启动/通知/后台弹出/电池）",
+              onPressed: _scamAcknowledged
+                  ? _openEnvReview
+                  : () => showToast("请先确认下方的警告"),
+              label: const Text("权限检查（自启动/通知/后台弹出/电池）",
                   style: TextStyle(fontSize: 13))),
         ),
         // 未在接受控制且没配对成功过时，提供配对异常诊断入口
@@ -1307,7 +1376,7 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
         (_meta[e["key"]]?[2] == true));
     final titleText = widget.retryMode
         ? "开启前检查"
-        : (widget.reviewMode ? "保活设置检查" : "配对前设置检查");
+        : (widget.reviewMode ? "权限检查" : "配对前设置检查");
     return AlertDialog(
       title: Row(children: [
         const Icon(Icons.fact_check_outlined, size: 22),
