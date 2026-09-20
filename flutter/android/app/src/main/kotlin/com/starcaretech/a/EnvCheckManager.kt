@@ -62,6 +62,10 @@ object EnvCheckManager {
                 "miui_background_start",
                 miuiBackgroundStartStatus(context)
             )
+            // 配对码通过通知 RemoteInput 输入（与 Shizuku 同款），MIUI 默认
+            // 通知栏样式会吞掉通知上的输入控件。该样式设置无任何 API 可读，
+            // 恒为 unknown，强制用户按指引手动确认（小米/红米配对硬前提）。
+            items += Item("miui_notif_style", STATUS_UNKNOWN)
         }
         return items.map { mapOf("key" to it.key, "status" to it.status) }
     }
@@ -204,6 +208,11 @@ object EnvCheckManager {
             "miui_autostart" -> openMiuiAutoStart(appContext)
 
             "miui_background_start" -> openMiuiPermissionEditor(appContext)
+
+            // MIUI「通知栏样式」页无稳定公开 intent，先打开系统设置主页，
+            // 用户按文案路径进入（通知与控制中心 → 通知通知栏 → 通知栏样式）
+            "miui_notif_style" ->
+                launch(appContext, Intent(Settings.ACTION_SETTINGS))
 
             else -> openAppDetails(appContext)
         }

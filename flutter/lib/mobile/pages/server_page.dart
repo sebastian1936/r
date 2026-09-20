@@ -1064,6 +1064,13 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
       "设置 → 应用管理 → 本应用 → 权限管理 → 后台弹出界面，允许",
       false,
     ],
+    "miui_notif_style": [
+      "通知栏样式：经典（小米/红米必设）",
+      "设置 → 通知与控制中心 → 通知通知栏 → 通知栏样式，选「经典」"
+          "（部分版本入口在该页右上角齿轮里）。默认样式会吞掉通知上的"
+          "配对码输入框，不设置将无法在通知栏输入配对码",
+      true,
+    ],
   };
 
   @override
