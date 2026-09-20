@@ -203,9 +203,13 @@ class _ServerPageState extends State<ServerPage> {
                       mainAxisAlignment: MainAxisAlignment.start,
                       children: [
                         buildPresetPasswordWarningMobile(),
-                        gFFI.serverModel.isStart
-                            ? ServerInfo()
-                            : ServiceNotRunningNotification(),
+                        // Android 11+ 服务启停统一由"接受控制（谨防诈骗）"
+                        // 总开关控制，不再显示"服务未运行/启动服务"卡片；
+                        // Android 10 及以下保留传统手动启动入口
+                        if (gFFI.serverModel.isStart)
+                          ServerInfo()
+                        else if (androidVersion < 30)
+                          ServiceNotRunningNotification(),
                         const ConnectionManager(),
                         const PermissionChecker(),
                         SizedBox.fromSize(size: const Size(0, 15.0)),
