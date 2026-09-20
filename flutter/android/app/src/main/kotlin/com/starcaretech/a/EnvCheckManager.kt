@@ -99,20 +99,37 @@ object EnvCheckManager {
     }
 
     /**
-     * MIUI AppOps 反射探测。模式值：0=ALLOWED 1=IGNORED 3=FOREGROUND 4=ERRORED 等。
+     * MIUI AppOps 反射探测。模式值：0=ALLOWED 1=IGNORED 2=ERRORED 3=DEFAULT 等。
      * 只有明确允许/拒绝才下结论，其余（含 ROM 无此 op、默认值）返回 unknown。
+     *
+     * 关键坑（HyperOS/Android 13+ 实测）：10008/10022 是非公开 op，普通应用
+     * 调 checkOpNoThrow 会被框架直接回 MODE_IGNORED（与开关实际状态无关），
+     * 表现为"后台弹出界面已开却报关闭"。Android 10 起必须用
+     * unsafeCheckOpNoThrow（不校验调用方是否有权查该 op），低版本回退旧方法。
      */
     private fun appOpStatus(context: Context, op: Int): String = try {
         val aom = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
-        val m = AppOpsManager::class.java.getMethod(
-            "checkOpNoThrow",
-            Int::class.javaPrimitiveType,
-            Int::class.javaPrimitiveType,
-            String::class.java
-        )
-        when (m.invoke(aom, op, Process.myUid(), context.packageName) as Int) {
+        val mode = try {
+            val m = AppOpsManager::class.java.getMethod(
+                "unsafeCheckOpNoThrow",
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                String::class.java
+            )
+            m.invoke(aom, op, Process.myUid(), context.packageName) as Int
+        } catch (e: NoSuchMethodException) {
+            val m = AppOpsManager::class.java.getMethod(
+                "checkOpNoThrow",
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                String::class.java
+            )
+            m.invoke(aom, op, Process.myUid(), context.packageName) as Int
+        }
+        Log.i(TAG, "miui appop op=$op mode=$mode")
+        when (mode) {
             AppOpsManager.MODE_ALLOWED -> STATUS_OK
-            AppOpsManager.MODE_IGNORED -> STATUS_OFF
+            AppOpsManager.MODE_IGNORED, AppOpsManager.MODE_ERRORED -> STATUS_OFF
             else -> STATUS_UNKNOWN
         }
     } catch (e: Throwable) {

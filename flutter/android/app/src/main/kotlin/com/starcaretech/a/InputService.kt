@@ -83,6 +83,14 @@ class InputService : AccessibilityService() {
         /** 透明授权页发起系统录屏确认前调用 */
         @JvmStatic
         fun beginConsentWait() {
+            // Android 14+ 录屏授权框改为"整个屏幕 / 单个应用"选择式（即使
+            // targetSdk 33，HyperOS 等 ROM 也会给新样式）。自动点击会误进
+            // "单个应用"选择页导致授权流程报废——该版本起一律由用户手动选择
+            // "整个屏幕"并点开始，绝不自动点击。
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                Log.i("input service", "Android 14+ 选择式录屏授权框，不启用自动点击")
+                return
+            }
             consentPending = true
             consentSince = System.currentTimeMillis()
             ctx?.startConsentRescue()
@@ -759,6 +767,16 @@ class InputService : AccessibilityService() {
         "取消", "拒绝", "不要再询问", "cancel", "deny", "don't", "no thanks"
     )
 
+    // Android 14+ 选择式录屏授权框特征文案（HyperOS 等可能在低 API 级别
+    // 设备上也启用新样式）。窗口里一旦出现这些节点，说明需要用户自己选
+    // "整个屏幕"，自动点击一律放弃
+    private val projectionChoiceTexts = setOf(
+        "整个屏幕", "全部屏幕", "共享整个屏幕", "单个应用", "指定应用",
+        "单个应用程序", "仅单个应用",
+        "entire screen", "share entire screen", "single app",
+        "a single app", "share a single app"
+    )
+
     private val consentRescue = object : Runnable {
         override fun run() {
             consentRescueScheduled = false
@@ -818,6 +836,13 @@ class InputService : AccessibilityService() {
         val pkgOk = projectionDialogPkgs.contains(pkg) || pkg.endsWith(".systemui")
         if (!pkgOk) return
 
+        // 选择式授权框（整个屏幕/单个应用）：必须用户自己选，绝不自动点击，
+        // 否则会误进"单个应用"选择页（小米13pro/Android15 实测）
+        if (hasProjectionChoice(root)) {
+            Log.i(logTag, "检测到选择式录屏授权框（整个屏幕/单个应用），放弃自动点击")
+            return
+        }
+
         // 1) 优先按系统 AlertDialog 标准按钮 id 定位
         var target: AccessibilityNodeInfo? =
             root.findAccessibilityNodeInfosByViewId("android:id/button1")
@@ -834,6 +859,21 @@ class InputService : AccessibilityService() {
             Log.i(logTag, "自动确认系统录屏授权：$label（第 $consentClicks 次）")
             target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         }
+    }
+
+    /** 窗口中是否存在"整个屏幕/单个应用"选择式授权框的特征文案 */
+    private fun hasProjectionChoice(node: AccessibilityNodeInfo?): Boolean {
+        node ?: return false
+        val label = nodeLabel(node).lowercase(Locale.ROOT)
+        if (label.isNotEmpty() &&
+            projectionChoiceTexts.any { label == it.lowercase(Locale.ROOT) }
+        ) {
+            return true
+        }
+        for (i in 0 until node.childCount) {
+            if (hasProjectionChoice(node.getChild(i))) return true
+        }
+        return false
     }
 
     private fun nodeLabel(node: AccessibilityNodeInfo): String =
