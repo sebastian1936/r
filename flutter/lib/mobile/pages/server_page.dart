@@ -205,10 +205,11 @@ class _ServerPageState extends State<ServerPage> {
                         buildPresetPasswordWarningMobile(),
                         // Android 11+ 服务启停统一由"接受控制（谨防诈骗）"
                         // 总开关控制，不再显示"服务未运行/启动服务"卡片；
-                        // Android 10 及以下保留传统手动启动入口
+                        // 鸿蒙 2/3/4 虽报 API30+ 但无无线调试，与 Android 10
+                        // 及以下一样保留传统手动启动入口
                         if (gFFI.serverModel.isStart)
                           ServerInfo()
-                        else if (androidVersion < 30)
+                        else if (androidVersion < 30 || isHarmonyOs)
                           ServiceNotRunningNotification(),
                         const ConnectionManager(),
                         const PermissionChecker(),
@@ -582,8 +583,8 @@ class _PermissionCheckerState extends State<PermissionChecker> {
     final hasAudioPermission = androidVersion >= 30;
     // Android 11+ 有无线调试：屏幕共享/输入控制/服务三者统一收进
     // "接受控制（谨防诈骗）"总开关（见 AdbAuthSection），不再单列；
-    // Android 10 及以下无无线调试，保留传统手动两行
-    final unifiedControl = androidVersion >= 30;
+    // Android 10 及以下、以及阉割了无线调试的鸿蒙 2/3/4 保留传统手动两行
+    final unifiedControl = androidVersion >= 30 && !isHarmonyOs;
     return PaddingCard(
         title: translate("Permissions"),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [

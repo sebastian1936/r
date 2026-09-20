@@ -38,6 +38,7 @@ import kotlin.concurrent.thread
 import androidx.core.content.ContextCompat
 import com.starcaretech.a.adb.AdbAuthManager
 import com.starcaretech.a.adb.AdbPairingService
+import com.starcaretech.a.adb.HarmonyOsDetector
 
 
 class MainActivity : FlutterActivity() {
@@ -322,6 +323,11 @@ class MainActivity : FlutterActivity() {
                 }
                 "on_voice_call_closed" -> {
                     onVoiceCallClosed()
+                }
+                "is_harmony_os" -> {
+                    // 鸿蒙 2/3/4（兼容 APK）检测：命中后 Dart 侧 UI 降级为
+                    // 传统手动授权（无线调试被华为阉割，配对流程不可用）
+                    result.success(HarmonyOsDetector.isHarmonyOs)
                 }
                 "adb_auth_status" -> {
                     // ADB 一键授权状态：系统是否支持 + 是否已生效（pm 授权/无障碍名单/

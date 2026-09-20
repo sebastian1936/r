@@ -100,6 +100,9 @@ final isWebOnMacOs = isWebOnMacOS_;
 var isMobile = isAndroid || isIOS;
 var version = '';
 int androidVersion = 0;
+// 兼容 APK 的 HarmonyOS 2/3/4（华为阉割了无线调试）：
+// 命中后一键授权/接受控制总开关降级为传统手动授权
+bool isHarmonyOs = false;
 
 // Only used on Linux.
 // `windowManager.setResizable(false)` will reset the window size to the default size on Linux.

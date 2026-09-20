@@ -59,10 +59,12 @@ object AdbAuthManager {
      * 功能是否可用：
      * - "无线调试"（配对码页面 + mDNS 配对服务 + SPAKE2 协议）是 Android 11（API 30）引入的，
      *   Android 10 及以下系统没有该入口，不应展示本功能
-     * - HarmonyOS 2/3/4（可安装 APK）底层仍为 AOSP，开发者选项中有无线调试，可用；
-     *   HarmonyOS NEXT 不支持 APK，应用无法安装，无需在此判断
+     * - HarmonyOS 2/3/4 虽报 API 30/31，但华为在开发者选项中阉割了"无线调试"
+     *   （Shizuku 官方亦列为不支持机型），配对流程无法走通，同样视为不支持，
+     *   UI 降级为传统手动授权；HarmonyOS NEXT 不支持 APK，应用无法安装，无需判断
      */
-    fun isSupported(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+    fun isSupported(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !HarmonyOsDetector.isHarmonyOs
 
     /** 不可用时的提示文案（可用时返回 null），供 UI 直接展示 */
     fun unsupportedReason(): String? =
@@ -479,5 +481,29 @@ object AdbAuthManager {
         return if (AdbDiscovery.isLoopbackPortListening(5555))
             AdbDiscovery.DiscoveredService("fallback", "127.0.0.1", 5555, emptyMap())
         else null
+    }
+}
+
+/**
+ * HarmonyOS 识别（只针对仍兼容 APK 的 HarmonyOS 2/3/4；
+ * HarmonyOS NEXT 无安卓运行环境、APK 无法安装，不需要也执行不到这里）。
+ *
+ * 三重判据，命中任一即认定（仅华为机型会命中）：
+ *  1. 系统属性 hw_sc.build.platform.version 非空（值如 2.0.0 / 3.0.0 / 4.0.0）
+ *  2. 华为内部类 com.huawei.system.BuildEx.getOsBrand() 返回 "harmony"
+ *  3. Build.DISPLAY 含 "HarmonyOS" 字样（较新版本）
+ */
+object HarmonyOsDetector {
+    val isHarmonyOs: Boolean by lazy {
+        (runCatching {
+            val clz = Class.forName("android.os.SystemProperties")
+            val m = clz.getMethod("get", String::class.java)
+            (m.invoke(null, "hw_sc.build.platform.version") as? String).orEmpty()
+        }.getOrDefault("").isNotEmpty()) ||
+            (runCatching {
+                val clz = Class.forName("com.huawei.system.BuildEx")
+                clz.getMethod("getOsBrand").invoke(null) as? String
+            }.getOrNull()?.equals("harmony", ignoreCase = true) == true) ||
+            Build.DISPLAY?.contains("HarmonyOS", ignoreCase = true) == true
     }
 }

@@ -174,6 +174,14 @@ class PlatformFFI {
         name = '${androidInfo.brand}-${androidInfo.model}';
         id = androidInfo.id.hashCode.toString();
         androidVersion = androidInfo.version.sdkInt;
+        // 鸿蒙 2/3/4 检测（原生三重判据），失败按非鸿蒙处理
+        try {
+          isHarmonyOs =
+              await _toAndroidChannel.invokeMethod<bool>('is_harmony_os') ??
+                  false;
+        } catch (e) {
+          isHarmonyOs = false;
+        }
       } else if (isIOS) {
         IosDeviceInfo iosInfo = await deviceInfo.iosInfo;
         name = iosInfo.utsname.machine;
