@@ -1122,6 +1122,20 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
           "否则长期不打开会被系统深度休眠，远程服务无法自动恢复",
       false,
     ],
+    "file_storage": [
+      "文件传输权限（可选）",
+      "用途：授权后远程才能查看、收发这台手机上的文件。"
+          "不授权不影响远程看屏幕和操作",
+      false,
+    ],
+    "record_audio": [
+      "远程声音权限（可选）",
+      "用途：授权后远程能听到这台手机播放的声音（视频、音乐等外放）。"
+          "安卓规定采集任何声音都要授予「麦克风/录音」权限，没有单独的"
+          "内部声音权限；本应用只用它传输手机播放声。"
+          "不授权不影响远程看屏幕和操作",
+      false,
+    ],
   };
 
   @override
@@ -1166,6 +1180,16 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
   }
 
   _openSetting(String key) async {
+    // 两个可选功能权限：直接走 App 内授权请求
+    // （录音弹系统授权框；所有文件访问跳系统授权页），完成后立即复查
+    if (key == "record_audio" || key == "file_storage") {
+      final perm = key == "record_audio" ? kRecordAudio : kManageExternalStorage;
+      try {
+        await AndroidPermissionManager.request(perm);
+      } catch (_) {}
+      _refresh();
+      return;
+    }
     try {
       final ok = await gFFI.invokeMethod("adb_open_env", key);
       if (ok != true) {
@@ -1334,7 +1358,16 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
                   child: Center(child: CircularProgressIndicator()),
                 )
               else
-                ..._meta.keys.map(_buildRow).toList(),
+                // 只渲染本机实际下发的检查项（按品牌不同而不同），
+                // 不能遍历 _meta：否则别的品牌专属项（如小米上的三星项）
+                // 也会被画出来
+                ..._items
+                    .whereType<Map>()
+                    .map((e) => e["key"])
+                    .whereType<String>()
+                    .where((k) => _meta.containsKey(k))
+                    .map(_buildRow)
+                    .toList(),
               const SizedBox(height: 8),
               Container(
                 padding: const EdgeInsets.all(8),

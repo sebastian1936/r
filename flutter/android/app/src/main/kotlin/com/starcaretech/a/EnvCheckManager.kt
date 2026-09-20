@@ -82,6 +82,10 @@ object EnvCheckManager {
         items += Item("notification", checkNotification(context))
         items += Item("overlay", checkOverlay(context))
         items += Item("battery_optimization", checkBattery(context))
+        // 以下两项是功能可选项：不授权不影响远程看屏与操作，
+        // 只影响对应能力（传文件 / 传被控端播放的声音）
+        items += Item("file_storage", checkFileStorage(context))
+        items += Item("record_audio", checkRecordAudio(context))
         if (isMiui) {
             items += Item("miui_autostart", appOpStatus(context, MIUI_OP_AUTO_START))
             items += Item(
@@ -139,6 +143,27 @@ object EnvCheckManager {
         val pm = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
         return if (pm.isIgnoringBatteryOptimizations(context.packageName)) STATUS_OK else STATUS_OFF
     }
+
+    /** 传文件权限：Android11+ 为"所有文件访问"，低版本为运行时存储权限 */
+    private fun checkFileStorage(context: Context): String {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return if (android.os.Environment.isExternalStorageManager()) STATUS_OK else STATUS_OFF
+        }
+        return if (androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.READ_EXTERNAL_STORAGE
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) STATUS_OK else STATUS_OFF
+    }
+
+    /**
+     * 远程声音权限：即 RECORD_AUDIO。安卓规定任何音频采集（含系统内部
+     * 播放声）都必须有该权限，没有单独的"内部声音"授权
+     */
+    private fun checkRecordAudio(context: Context): String =
+        if (androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.RECORD_AUDIO
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) STATUS_OK else STATUS_OFF
 
     /**
      * 「后台弹出界面」跨 MIUI 版本探测：同时查 10021/10022，
