@@ -215,6 +215,11 @@ class MainService : Service() {
     private val powerManager: PowerManager by lazy { applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager }
     private val wakeLock: PowerManager.WakeLock by lazy { powerManager.newWakeLock(PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.SCREEN_BRIGHT_WAKE_LOCK, "rustdesk:wakelock")}
 
+    // "保持屏幕开启"：服务运行期间的常驻亮屏锁（不带 ACQUIRE_CAUSES_WAKEUP：
+    // 只阻止屏幕超时熄灭，不主动点亮已关的屏；远程输入时由上面的 wakeLock
+    // 临时点亮 5 秒）。释放时机与服务一致
+    private var keepAwakeLock: PowerManager.WakeLock? = null
+
     // ---- 锁屏保活（跟随 MainService 生命周期：服务在=用户期望被控在线）----
     /** 常驻 CPU 锁：锁屏/Doze 下维持 Rust 心跳与信令线程运行 */
     private var cpuWakeLock: PowerManager.WakeLock? = null
@@ -289,6 +294,20 @@ class MainService : Service() {
         fun endProjectionRequest() = synchronized(projectionGateLock) {
             projectionGateHandler.removeCallbacks(projectionGateTimeout)
             projectionRequestInFlight = false
+        }
+
+        // ---- 保持屏幕开启（由 Dart 设置项驱动，无需 Activity/悬浮窗，后台也生效）----
+        @JvmStatic
+        @Volatile
+        private var pendingKeepScreenOn: Boolean = false
+
+        private var keepAwakeInstance: MainService? = null
+
+        /** Dart 侧设置变化/服务状态变化时调用；服务未启动时记录意愿，启动即生效 */
+        @JvmStatic
+        fun setKeepScreenOn(on: Boolean) {
+            pendingKeepScreenOn = on
+            keepAwakeInstance?.applyKeepScreenOn(on)
         }
     }
 
@@ -544,6 +563,10 @@ class MainService : Service() {
 
         // 锁屏保活：CPU/WiFi 锁 + 网络恢复重连 + Doze 周期唤醒
         initKeepAlive()
+
+        // 保持屏幕开启：服务启动时按设置项恢复常亮状态
+        keepAwakeInstance = this
+        applyKeepScreenOn(pendingKeepScreenOn)
     }
 
     override fun onDestroy() {
@@ -561,8 +584,33 @@ class MainService : Service() {
         checkMediaPermission()
         runCatching { unregisterReceiver(screenStateReceiver) }
         releaseKeepAlive()
+        applyKeepScreenOn(false)
+        keepAwakeInstance = null
         stopService(Intent(this, FloatingWindowService::class.java))
         super.onDestroy()
+    }
+
+    @Suppress("DEPRECATION")
+    fun applyKeepScreenOn(on: Boolean) {
+        runCatching {
+            if (on) {
+                if (keepAwakeLock == null) {
+                    keepAwakeLock = powerManager.newWakeLock(
+                        PowerManager.SCREEN_BRIGHT_WAKE_LOCK,
+                        "rustdesk:keep-screen-on"
+                    )
+                }
+                if (keepAwakeLock?.isHeld != true) {
+                    keepAwakeLock?.acquire()
+                    Log.i(logTag, "保持屏幕开启：亮屏锁已持有")
+                }
+            } else {
+                if (keepAwakeLock?.isHeld == true) {
+                    keepAwakeLock?.release()
+                    Log.i(logTag, "保持屏幕开启：亮屏锁已释放")
+                }
+            }
+        }.onFailure { Log.w(logTag, "切换保持屏幕开启失败 on=$on", it) }
     }
 
     private var isHalfScale: Boolean? = null;

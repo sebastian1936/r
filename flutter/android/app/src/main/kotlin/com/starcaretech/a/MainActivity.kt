@@ -200,6 +200,12 @@ class MainActivity : FlutterActivity() {
                         result.success(false)
                     }
                 }
+                "set_keep_screen_on" -> {
+                    // 保持屏幕开启（服务期间/被控期间）：由 MainService 持系统
+                    // 亮屏锁，App 退后台/无悬浮窗也生效
+                    MainService.setKeepScreenOn(call.arguments == true)
+                    result.success(true)
+                }
                 "check_permission" -> {
                     if (call.arguments is String) {
                         result.success(XXPermissions.isGranted(context, call.arguments as String))

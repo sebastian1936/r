@@ -482,7 +482,12 @@ class ServerModel with ChangeNotifier {
     await parent.target?.invokeMethod("stop_service");
     await bind.mainStopService();
     notifyListeners();
-    if (!isLinux) {
+    if (isAndroid) {
+      // 释放 MainService 的系统亮屏锁
+      try {
+        await gFFI.invokeMethod("set_keep_screen_on", false);
+      } catch (_) {}
+    } else if (!isLinux) {
       // current linux is not supported
       WakelockPlus.disable();
     }
@@ -804,23 +809,14 @@ class ServerModel with ChangeNotifier {
   void androidUpdatekeepScreenOn() async {
     if (!isAndroid) return;
     try {
-      var floatingWindowDisabled =
-          bind.mainGetLocalOption(key: kOptionDisableFloatingWindow) == "Y" ||
-              !await AndroidPermissionManager.check(kSystemAlertWindow);
-      final keepScreenOn = floatingWindowDisabled
-          ? KeepScreenOn.never
-          : optionToKeepScreenOn(
-              bind.mainGetLocalOption(key: kOptionKeepScreenOn));
+      // 不再依赖悬浮窗/前台 Activity：原生 MainService 持系统亮屏锁，
+      // App 退到后台、无浮窗时也能保持常亮
+      final keepScreenOn = optionToKeepScreenOn(
+          bind.mainGetLocalOption(key: kOptionKeepScreenOn));
       final on = ((keepScreenOn == KeepScreenOn.serviceOn) && _isStart) ||
           (keepScreenOn == KeepScreenOn.duringControlled &&
               _clients.map((e) => !e.disconnected).isNotEmpty);
-      if (on != await WakelockPlus.enabled) {
-        if (on) {
-          WakelockPlus.enable();
-        } else {
-          WakelockPlus.disable();
-        }
-      }
+      await gFFI.invokeMethod("set_keep_screen_on", on);
     } catch (e) {
       // 服务冷启动早期插件通道未就绪会抛 FormatException(Message corrupted)，
       // 属于无害竞态，后续连接/状态变化时会再调用

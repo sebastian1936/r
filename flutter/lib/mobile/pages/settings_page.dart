@@ -60,10 +60,13 @@ KeepScreenOn optionToKeepScreenOn(String value) {
   switch (value) {
     case 'never':
       return KeepScreenOn.never;
+    case 'during-controlled':
+      return KeepScreenOn.duringControlled;
     case 'service-on':
       return KeepScreenOn.serviceOn;
     default:
-      return KeepScreenOn.duringControlled;
+      // 默认"服务开启期间"：被控手机服务常开，屏幕需保持常亮便于随时远程操作
+      return KeepScreenOn.serviceOn;
   }
 }
 
@@ -74,7 +77,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   var _enableStartOnBoot = false;
   var _checkUpdateOnStartup = false;
   var _floatingWindowDisabled = false;
-  var _keepScreenOn = KeepScreenOn.duringControlled; // relay on floating window
+  var _keepScreenOn = KeepScreenOn.serviceOn; // 默认服务开启期间常亮
   var _enableAbr = false;
   var _denyLANDiscovery = false;
   var _onlyWhiteList = false;
@@ -191,10 +194,8 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         _floatingWindowDisabled = floatingWindowDisabled;
       }
 
-      final keepScreenOn = _floatingWindowDisabled
-          ? KeepScreenOn.never
-          : optionToKeepScreenOn(
-              bind.mainGetLocalOption(key: kOptionKeepScreenOn));
+      final keepScreenOn = optionToKeepScreenOn(
+          bind.mainGetLocalOption(key: kOptionKeepScreenOn));
       if (keepScreenOn != _keepScreenOn) {
         update = true;
         _keepScreenOn = keepScreenOn;
@@ -673,19 +674,17 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             : onFloatingWindowChanged));
 
     enhancementsTiles.add(_getPopupDialogRadioEntry(
-      title: 'Keep screen on',
+      title: '保持屏幕开启',
       list: [
-        _RadioEntry('Never', _keepScreenOnToOption(KeepScreenOn.never)),
-        _RadioEntry('During controlled',
+        _RadioEntry('永不', _keepScreenOnToOption(KeepScreenOn.never)),
+        _RadioEntry('被控期间',
             _keepScreenOnToOption(KeepScreenOn.duringControlled)),
-        _RadioEntry('During service is on',
+        _RadioEntry('服务开启期间',
             _keepScreenOnToOption(KeepScreenOn.serviceOn)),
       ],
-      getter: () => _keepScreenOnToOption(_floatingWindowDisabled
-          ? KeepScreenOn.never
-          : optionToKeepScreenOn(
-              bind.mainGetLocalOption(key: kOptionKeepScreenOn))),
-      asyncSetter: isOptionFixed(kOptionKeepScreenOn) || _floatingWindowDisabled
+      getter: () => _keepScreenOnToOption(optionToKeepScreenOn(
+          bind.mainGetLocalOption(key: kOptionKeepScreenOn))),
+      asyncSetter: isOptionFixed(kOptionKeepScreenOn)
           ? null
           : (value) async {
               await bind.mainSetLocalOption(

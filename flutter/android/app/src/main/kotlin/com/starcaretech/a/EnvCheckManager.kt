@@ -31,7 +31,12 @@ object EnvCheckManager {
 
     // MIUI AppOps 操作码（非 SDK，反射调用；不存在/异常一律 unknown）
     private const val MIUI_OP_AUTO_START = 10008
-    private const val MIUI_OP_BACKGROUND_START_ACTIVITY = 10022
+    // 「后台弹出界面」实测：MIUI11~HyperOS 主流版本 op=10021
+    // （OP_BACKGROUND_START_ACTIVITY，小米框架字段实锤）；早期部分代码
+    // 流传 10022。两个码都探，任一 ALLOWED 即判定已开，避免错码导致
+    // "开关已开却报关闭"（10022 在部分机型是另一个 op，默认 IGNORED）
+    private const val MIUI_OP_BACKGROUND_START_ACTIVITY_V1 = 10021
+    private const val MIUI_OP_BACKGROUND_START_ACTIVITY_V2 = 10022
 
     data class Item(val key: String, val status: String)
 
@@ -55,7 +60,7 @@ object EnvCheckManager {
             items += Item("miui_autostart", appOpStatus(context, MIUI_OP_AUTO_START))
             items += Item(
                 "miui_background_start",
-                appOpStatus(context, MIUI_OP_BACKGROUND_START_ACTIVITY)
+                miuiBackgroundStartStatus(context)
             )
         }
         return items.map { mapOf("key" to it.key, "status" to it.status) }
@@ -99,17 +104,47 @@ object EnvCheckManager {
     }
 
     /**
+     * 「后台弹出界面」跨 MIUI 版本探测：同时查 10021/10022，
+     * 任一 ALLOWED→已开；都不是允许但有明确拒绝→关闭；否则 unknown
+     */
+    private fun miuiBackgroundStartStatus(context: Context): String {
+        val modes = listOf(
+            MIUI_OP_BACKGROUND_START_ACTIVITY_V1,
+            MIUI_OP_BACKGROUND_START_ACTIVITY_V2
+        ).map { probeAppOpMode(context, it) }
+        Log.i(TAG, "miui background-start modes=$modes")
+        if (modes.any { it != null && it == AppOpsManager.MODE_ALLOWED }) {
+            return STATUS_OK
+        }
+        val known = modes.filterNotNull()
+        return if (known.isNotEmpty() &&
+            known.all { it == AppOpsManager.MODE_IGNORED || it == AppOpsManager.MODE_ERRORED }
+        ) {
+            STATUS_OFF
+        } else {
+            STATUS_UNKNOWN
+        }
+    }
+
+    /**
      * MIUI AppOps 反射探测。模式值：0=ALLOWED 1=IGNORED 2=ERRORED 3=DEFAULT 等。
      * 只有明确允许/拒绝才下结论，其余（含 ROM 无此 op、默认值）返回 unknown。
      *
-     * 关键坑（HyperOS/Android 13+ 实测）：10008/10022 是非公开 op，普通应用
-     * 调 checkOpNoThrow 会被框架直接回 MODE_IGNORED（与开关实际状态无关），
-     * 表现为"后台弹出界面已开却报关闭"。Android 10 起必须用
-     * unsafeCheckOpNoThrow（不校验调用方是否有权查该 op），低版本回退旧方法。
+     * 关键坑（HyperOS/Android 13+ 实测）：非公开 op 普通应用调
+     * checkOpNoThrow 会被框架直接回 MODE_IGNORED（与开关实际状态无关）。
+     * Android 10 起优先用 unsafeCheckOpNoThrow（不校验调用方查询权限），
+     * 低版本回退旧方法。查不到（方法/ROM 异常）返回 null。
      */
-    private fun appOpStatus(context: Context, op: Int): String = try {
+    private fun appOpStatus(context: Context, op: Int): String =
+        when (probeAppOpMode(context, op)) {
+            AppOpsManager.MODE_ALLOWED -> STATUS_OK
+            AppOpsManager.MODE_IGNORED, AppOpsManager.MODE_ERRORED -> STATUS_OFF
+            else -> STATUS_UNKNOWN
+        }
+
+    private fun probeAppOpMode(context: Context, op: Int): Int? = try {
         val aom = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
-        val mode = try {
+        try {
             val m = AppOpsManager::class.java.getMethod(
                 "unsafeCheckOpNoThrow",
                 Int::class.javaPrimitiveType,
@@ -126,15 +161,9 @@ object EnvCheckManager {
             )
             m.invoke(aom, op, Process.myUid(), context.packageName) as Int
         }
-        Log.i(TAG, "miui appop op=$op mode=$mode")
-        when (mode) {
-            AppOpsManager.MODE_ALLOWED -> STATUS_OK
-            AppOpsManager.MODE_IGNORED, AppOpsManager.MODE_ERRORED -> STATUS_OFF
-            else -> STATUS_UNKNOWN
-        }
     } catch (e: Throwable) {
         Log.w(TAG, "appop probe fail op=$op", e)
-        STATUS_UNKNOWN
+        null
     }
 
     val isMiui: Boolean by lazy {
