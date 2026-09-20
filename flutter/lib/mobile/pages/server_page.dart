@@ -576,6 +576,12 @@ class _PermissionCheckerState extends State<PermissionChecker> {
   Widget build(BuildContext context) {
     final serverModel = Provider.of<ServerModel>(context);
     final hasAudioPermission = androidVersion >= 30;
+    // 支持无线调试且未完成一键授权、服务也没开时：只露出一键授权入口，
+    // 屏幕录制/输入控制两个按钮藏掉，避免用户不知道先点哪个。
+    // Android 10 以下（!adbSupported）无无线调试，仍走传统手动两行。
+    final hidePrimaryPermissions = serverModel.adbSupported &&
+        !serverModel.adbGranted &&
+        !serverModel.mediaOk;
     return PaddingCard(
         title: translate("Permissions"),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -589,16 +595,21 @@ class _PermissionCheckerState extends State<PermissionChecker> {
                       label: Text(translate("Stop service")))
                   .marginOnly(bottom: 8)
               : SizedBox.shrink(),
-          PermissionRow(
-              translate("Screen Capture"),
-              serverModel.mediaOk,
-              !serverModel.mediaOk &&
-                      gFFI.userModel.userName.value.isEmpty &&
-                      bind.mainGetLocalOption(key: "show-scam-warning") != "N"
-                  ? () => showScamWarning(context, serverModel)
-                  : serverModel.toggleService),
-          PermissionRow(translate("Input Control"), serverModel.inputOk,
-              serverModel.toggleInput),
+          hidePrimaryPermissions
+              ? const SizedBox.shrink()
+              : PermissionRow(
+                  translate("Screen Capture"),
+                  serverModel.mediaOk,
+                  !serverModel.mediaOk &&
+                          gFFI.userModel.userName.value.isEmpty &&
+                          bind.mainGetLocalOption(key: "show-scam-warning") !=
+                              "N"
+                      ? () => showScamWarning(context, serverModel)
+                      : serverModel.toggleService),
+          hidePrimaryPermissions
+              ? const SizedBox.shrink()
+              : PermissionRow(translate("Input Control"), serverModel.inputOk,
+                  serverModel.toggleInput),
           PermissionRow(translate("Transfer file"), serverModel.fileOk,
               serverModel.toggleFile),
           hasAudioPermission
@@ -675,6 +686,10 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           _lastPackage = (status["package"] ?? "") as String;
           _lastError = "";
         });
+        // 回写共享状态：权限页据此在"未授权只显一键入口"与
+        // "已授权显示运行时开关"两种布局间切换
+        gFFI.serverModel.setAdbAuthState(
+            supported: _supported, granted: grantedNow);
         // 通知栏配对成功后用户回到 App：自动拉起一次系统录屏授权框
         // （录屏是系统级授权，无法静默授予；已授权/缓存有效时不会弹窗）
         if (capturePending) {
@@ -806,7 +821,9 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Divider(height: 20),
+        // 未授权时本区域就是权限页主入口（屏幕录制/输入控制两行已隐藏），
+        // 不再需要顶部分割线；授权后作为"自动恢复"附加区，保留分割线
+        if (_granted) const Divider(height: 20),
         Row(children: [
           Icon(
             _granted ? Icons.verified_user_outlined : Icons.shield_outlined,
@@ -815,7 +832,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           ).marginOnly(right: 10),
           Expanded(
             child: Text(
-              _granted ? "权限自动恢复已开启" : "权限自动恢复（推荐）",
+              _granted ? "权限自动恢复已开启" : "一键授权（屏幕共享 + 输入控制）",
               style: const TextStyle(fontSize: 14),
             ),
           ),
@@ -825,7 +842,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           child: Text(
             _granted
                 ? "无障碍服务被系统关闭时将自动重新开启"
-                : "通过系统「无线调试」配对一次即可，重启/升级不失效",
+                : "按引导操作一次即可，重启/升级不失效",
             style: const TextStyle(fontSize: 12, color: MyTheme.darkGray),
           ),
         ),
@@ -874,7 +891,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
                               padding:
                                   const EdgeInsets.symmetric(horizontal: 12)),
                           onPressed: _startPairing,
-                          label: const Text("一键开启",
+                          label: const Text("一键授权开启",
                               style: TextStyle(fontSize: 13))),
                       Padding(
                         padding: const EdgeInsets.only(top: 6),

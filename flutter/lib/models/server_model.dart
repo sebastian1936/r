@@ -33,6 +33,22 @@ class ServerModel with ChangeNotifier {
   bool _clipboardOk = false;
   bool _showElevation = false;
   bool hideCm = false;
+
+  // ADB 一键授权状态（由 AdbAuthSection 查询通道后回写）：
+  // 支持无线调试且尚未完成授权、服务也没开时，权限页只展示一键授权入口，
+  // 隐藏屏幕录制/输入控制两个分散按钮，避免用户不知道该点哪个
+  bool _adbSupported = true;
+  bool _adbGranted = false;
+
+  bool get adbSupported => _adbSupported;
+  bool get adbGranted => _adbGranted;
+
+  void setAdbAuthState({required bool supported, required bool granted}) {
+    if (_adbSupported == supported && _adbGranted == granted) return;
+    _adbSupported = supported;
+    _adbGranted = granted;
+    notifyListeners();
+  }
   int _connectStatus = 0; // Rendezvous Server status
   String _verificationMethod = "";
   String _temporaryPasswordLength = "";
