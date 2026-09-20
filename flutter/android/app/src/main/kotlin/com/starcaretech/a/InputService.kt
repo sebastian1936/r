@@ -83,9 +83,14 @@ class InputService : AccessibilityService() {
         /** 透明授权页发起系统录屏确认前调用 */
         @JvmStatic
         fun beginConsentWait() {
-            // Android 14+ 为"整个屏幕/单个应用"选择式授权框：扫描逻辑会
-            // 先选中"整个屏幕"再点开始（见 scanAndClickProjectionDialog），
-            // 识别不到选项时安全放弃、绝不误点"单个应用"
+            // Android 14+ 录屏授权框是"整个屏幕/单个应用"选择式：实测自动
+            // 点选标签在 HyperOS 上不可靠（标签命中/选中态识别都可能失败），
+            // 误点风险高。该版本起一律由用户手动选择"整个屏幕"并点开始，
+            // 不做任何自动点击；Android 13 及以下老样式仍自动点"立即开始"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                Log.i("input service", "Android 14+ 选择式录屏授权框，不启用自动点击")
+                return
+            }
             consentPending = true
             consentSince = System.currentTimeMillis()
             ctx?.startConsentRescue()
@@ -96,6 +101,20 @@ class InputService : AccessibilityService() {
         fun endConsentWait() {
             consentPending = false
             ctx?.stopConsentRescue()
+        }
+
+        /**
+         * 关闭"接受控制"总开关时调用：停用无障碍服务本身。
+         * API 24+ 走 disableSelf()（Android 11+ 一键授权场景必然满足）；
+         * 低版本无无线调试，不会走到这里。
+         */
+        @JvmStatic
+        fun requestDisable() {
+            val c = ctx ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                Log.i("input service", "按总开关要求停用无障碍服务")
+                c.disableSelf()
+            }
         }
     }
 
@@ -744,9 +763,6 @@ class InputService : AccessibilityService() {
     // ---- 系统录屏授权弹窗自动点击 ----
     private val consentHandler = Handler(Looper.getMainLooper())
     private var consentClicks = 0
-    // 在"整个屏幕/单个应用"标签上点选的次数（独立封顶，防止 ROM 结构
-    // 识别异常时把点击次数全耗在标签上、永远点不到开始按钮）
-    private var choiceSelectClicks = 0
     private var consentRescueScheduled = false
 
     // 系统录屏确认框可能出现的窗口：AOSP 在 framework（包名 "android"），
@@ -766,17 +782,14 @@ class InputService : AccessibilityService() {
     )
 
     // Android 14+ 选择式录屏授权框特征文案（HyperOS 等可能在低 API 级别
-    // 设备上也启用新样式）。两组分别匹配"整个屏幕"与"单个应用"标签
-    private val wholeScreenChoiceTexts = setOf(
-        "整个屏幕", "全部屏幕", "共享整个屏幕", "录制整个屏幕",
-        "entire screen", "share entire screen", "record entire screen"
-    )
-    private val singleAppChoiceTexts = setOf(
-        "单个应用", "指定应用", "单个应用程序", "仅单个应用",
+    // 设备上也启用新样式）。窗口中一旦出现这些节点，说明需要用户自己选
+    // "整个屏幕"，自动点击一律放弃（新样式不做任何自动操作）
+    private val projectionChoiceTexts = setOf(
+        "整个屏幕", "全部屏幕", "共享整个屏幕", "录制整个屏幕", "单个应用",
+        "指定应用", "单个应用程序", "仅单个应用",
+        "entire screen", "share entire screen", "record entire screen",
         "single app", "a single app", "share a single app"
     )
-    private val projectionChoiceTexts: Set<String>
-        get() = wholeScreenChoiceTexts + singleAppChoiceTexts
 
     private val consentRescue = object : Runnable {
         override fun run() {
@@ -809,7 +822,6 @@ class InputService : AccessibilityService() {
 
     fun startConsentRescue() {
         consentClicks = 0
-        choiceSelectClicks = 0
         if (consentRescueScheduled) return
         consentRescueScheduled = true
         consentHandler.post(consentRescue)
@@ -839,13 +851,11 @@ class InputService : AccessibilityService() {
         if (!pkgOk) return
 
         // 选择式授权框（Android 14+/HyperOS，整个屏幕/单个应用）：
-        // 必须先选中"整个屏幕"且确认选中后才点开始；识别不到选项或
-        // 两次点选仍未切到整个屏幕时安全放弃，绝不在"单个应用"页点开始
+        // 不做任何自动点击，由用户自己选"整个屏幕"并点开始，避免误进
+        // "单个应用"选择页（小米13pro/Android15 实测自动点选不可靠）
         if (hasProjectionChoice(root)) {
-            if (!ensureWholeScreenSelected(root)) {
-                // 本轮先不点开始：要么刚点了标签等界面切换，要么识别失败
-                return
-            }
+            Log.i(logTag, "检测到选择式录屏授权框（整个屏幕/单个应用），放弃自动点击")
+            return
         }
 
         // 1) 优先按系统 AlertDialog 标准按钮 id 定位
@@ -864,77 +874,6 @@ class InputService : AccessibilityService() {
             Log.i(logTag, "自动确认系统录屏授权：$label（第 $consentClicks 次）")
             target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         }
-    }
-
-    /**
-     * 选择式授权框：确保"整个屏幕"标签处于选中态。
-     * @return true=已选中整个屏幕，可以继续点开始；
-     *         false=尚未选中（本轮已尝试点选或识别失败），本轮不应点开始
-     */
-    private fun ensureWholeScreenSelected(root: AccessibilityNodeInfo): Boolean {
-        val wholeNode = findNodeByTexts(root, wholeScreenChoiceTexts)
-        if (wholeNode == null) {
-            Log.i(logTag, "选择式录屏框：未找到「整个屏幕」标签，放弃自动操作")
-            return false
-        }
-        if (isNodeOrAncestorSelected(wholeNode)) {
-            return true
-        }
-        if (choiceSelectClicks >= 2) {
-            Log.w(logTag, "选择式录屏框：点选「整个屏幕」2 次仍未选中，放弃自动操作")
-            return false
-        }
-        val clickTarget = clickableAncestor(wholeNode)
-        if (clickTarget == null) {
-            Log.w(logTag, "选择式录屏框：「整个屏幕」标签无可点击节点，放弃自动操作")
-            return false
-        }
-        choiceSelectClicks++
-        consentClicks++
-        Log.i(logTag, "自动选择录屏范围：整个屏幕（第 $choiceSelectClicks 次）")
-        clickTarget.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        // 等下一轮（400ms 后）界面切到整个屏幕，再点开始，避免抢点
-        return false
-    }
-
-    /** 节点自身或向上最多 4 层祖先是否处于选中/勾选态（RadioButton/Tab 样式各异） */
-    private fun isNodeOrAncestorSelected(node: AccessibilityNodeInfo?): Boolean {
-        var n: AccessibilityNodeInfo? = node
-        var depth = 0
-        while (n != null && depth < 4) {
-            if (n.isChecked || n.isSelected) return true
-            n = n.parent
-            depth++
-        }
-        return false
-    }
-
-    /** 文案节点自身或向上最多 4 层内第一个可点击节点（tab 容器常承接点击） */
-    private fun clickableAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        var n: AccessibilityNodeInfo? = node
-        var depth = 0
-        while (n != null && depth < 4) {
-            if (n.isClickable) return n
-            n = n.parent
-            depth++
-        }
-        return null
-    }
-
-    /** 按精确文案（text/contentDescription）在节点树中查找 */
-    private fun findNodeByTexts(
-        node: AccessibilityNodeInfo?,
-        texts: Set<String>
-    ): AccessibilityNodeInfo? {
-        node ?: return null
-        val label = nodeLabel(node).lowercase(Locale.ROOT)
-        if (label.isNotEmpty() && texts.any { label == it.lowercase(Locale.ROOT) }) {
-            return node
-        }
-        for (i in 0 until node.childCount) {
-            findNodeByTexts(node.getChild(i), texts)?.let { return it }
-        }
-        return null
     }
 
     /** 窗口中是否存在"整个屏幕/单个应用"选择式授权框的特征文案 */

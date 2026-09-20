@@ -419,6 +419,18 @@ class ServerModel with ChangeNotifier {
     return res;
   }
 
+  /// 开启服务前的运行时权限准备（通知/悬浮窗/所有文件访问），
+  /// 供"接受控制"总开关复用（跳过 toggleService 的二次确认对话框）
+  Future<void> prepareServicePrerequisites() async {
+    await checkRequestNotificationPermission();
+    if (bind.mainGetLocalOption(key: kOptionDisableFloatingWindow) != 'Y') {
+      await checkFloatingWindowPermission();
+    }
+    if (!await AndroidPermissionManager.check(kManageExternalStorage)) {
+      await AndroidPermissionManager.request(kManageExternalStorage);
+    }
+  }
+
   /// Toggle the screen sharing service.
   toggleService() async {
     if (_isStart) {
@@ -445,13 +457,7 @@ class ServerModel with ChangeNotifier {
         stopService();
       }
     } else {
-      await checkRequestNotificationPermission();
-      if (bind.mainGetLocalOption(key: kOptionDisableFloatingWindow) != 'Y') {
-        await checkFloatingWindowPermission();
-      }
-      if (!await AndroidPermissionManager.check(kManageExternalStorage)) {
-        await AndroidPermissionManager.request(kManageExternalStorage);
-      }
+      await prepareServicePrerequisites();
       final res = await parent.target?.dialogManager
           .show<bool>((setState, close, context) {
         submit() => close(true);

@@ -576,40 +576,35 @@ class _PermissionCheckerState extends State<PermissionChecker> {
   Widget build(BuildContext context) {
     final serverModel = Provider.of<ServerModel>(context);
     final hasAudioPermission = androidVersion >= 30;
-    // 支持无线调试且未完成一键授权、服务也没开时：只露出一键授权入口，
-    // 屏幕录制/输入控制两个按钮藏掉，避免用户不知道先点哪个。
-    // Android 10 以下（!adbSupported）无无线调试，仍走传统手动两行。
-    final hidePrimaryPermissions = serverModel.adbSupported &&
-        !serverModel.adbGranted &&
-        !serverModel.mediaOk;
+    // Android 11+ 有无线调试：屏幕共享/输入控制/服务三者统一收进
+    // "接受控制（谨防诈骗）"总开关（见 AdbAuthSection），不再单列；
+    // Android 10 及以下无无线调试，保留传统手动两行
+    final unifiedControl = androidVersion >= 30;
     return PaddingCard(
         title: translate("Permissions"),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          serverModel.mediaOk
-              ? ElevatedButton.icon(
-                      style: ButtonStyle(
-                          backgroundColor:
-                              MaterialStateProperty.all(Colors.red)),
-                      icon: const Icon(Icons.stop),
-                      onPressed: serverModel.toggleService,
-                      label: Text(translate("Stop service")))
-                  .marginOnly(bottom: 8)
-              : SizedBox.shrink(),
-          hidePrimaryPermissions
-              ? const SizedBox.shrink()
-              : PermissionRow(
-                  translate("Screen Capture"),
-                  serverModel.mediaOk,
-                  !serverModel.mediaOk &&
-                          gFFI.userModel.userName.value.isEmpty &&
-                          bind.mainGetLocalOption(key: "show-scam-warning") !=
-                              "N"
-                      ? () => showScamWarning(context, serverModel)
-                      : serverModel.toggleService),
-          hidePrimaryPermissions
-              ? const SizedBox.shrink()
-              : PermissionRow(translate("Input Control"), serverModel.inputOk,
-                  serverModel.toggleInput),
+          if (!unifiedControl && serverModel.mediaOk)
+            ElevatedButton.icon(
+                    style: ButtonStyle(
+                        backgroundColor:
+                            MaterialStateProperty.all(Colors.red)),
+                    icon: const Icon(Icons.stop),
+                    onPressed: serverModel.toggleService,
+                    label: Text(translate("Stop service")))
+                .marginOnly(bottom: 8),
+          if (!unifiedControl)
+            PermissionRow(
+                translate("Screen Capture"),
+                serverModel.mediaOk,
+                !serverModel.mediaOk &&
+                        gFFI.userModel.userName.value.isEmpty &&
+                        bind.mainGetLocalOption(key: "show-scam-warning") !=
+                            "N"
+                    ? () => showScamWarning(context, serverModel)
+                    : serverModel.toggleService),
+          if (!unifiedControl)
+            PermissionRow(translate("Input Control"), serverModel.inputOk,
+                serverModel.toggleInput),
           PermissionRow(translate("Transfer file"), serverModel.fileOk,
               serverModel.toggleFile),
           hasAudioPermission
@@ -647,6 +642,59 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
   Map<dynamic, dynamic> _lastSnap = const {};
   String _lastPackage = "";
   String _lastError = "";
+
+  /// 总开关操作中的乐观状态：真实 mediaOk 未跟上时先显示用户所选值，
+  /// 定时器到期或真实状态一致后清除（用户取消录屏框会弹回关）
+  bool? _controlPending;
+  bool _controlBusy = false;
+
+  /// "接受控制"总开关。
+  /// 开：已配对→自愈无障碍→启动服务（系统录屏框由用户确认，
+  ///    Android13 及以下无障碍自动点"立即开始"）；未配对→先走配对引导，
+  ///    配对成功后 capturePending 自动拉起服务与录屏框。
+  /// 关：停服务 + disableSelf 关无障碍（保留 ADB 配对，下次免配对）。
+  void _toggleControl(bool on) async {
+    if (_controlBusy) return;
+    _controlBusy = true;
+    setState(() => _controlPending = on);
+    try {
+      if (on) {
+        // 注意：关总开关会 disableSelf 停用无障碍，此后 _granted（三重判据）
+        // 为 false，但 WRITE_SECURE_SETTINGS 配对授权仍在（snap.wss=true）。
+        // 这种"配对过、仅无障碍被关"的情况直接 repair 自愈，绝不重新配对
+        final pairedBefore = _granted || _lastSnap["wss"] == true;
+        if (!pairedBefore) {
+          // 未完成授权：先恢复乐观态，交给配对流程（成功后自动拉服务）
+          setState(() => _controlPending = null);
+          await _startPairing();
+          return;
+        }
+        await gFFI.serverModel.prepareServicePrerequisites();
+        // 无障碍可能已被总开关 disableSelf 或被系统收回，先 shell 自愈
+        try {
+          await gFFI.invokeMethod("adb_repair", null);
+        } catch (_) {}
+        // 系统绑定 InputService 有 1~2s 延迟，等它就绪后再拉录屏框，
+        // Android 11~13 才能赶上自动点"立即开始"
+        await Future.delayed(const Duration(milliseconds: 1800));
+        await gFFI.serverModel.startService();
+        // 12s 后以真实录屏状态为准（用户在系统框点取消则开关弹回关）
+        Future.delayed(const Duration(seconds: 12), () {
+          if (mounted) setState(() => _controlPending = null);
+        });
+      } else {
+        await gFFI.serverModel.stopService();
+        try {
+          await gFFI.invokeMethod("adb_disable_input", null);
+        } catch (_) {}
+        await Future.delayed(const Duration(milliseconds: 1500));
+        await _refresh();
+        if (mounted) setState(() => _controlPending = null);
+      }
+    } finally {
+      _controlBusy = false;
+    }
+  }
 
   @override
   void initState() {
@@ -816,98 +864,108 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
 
   @override
   Widget build(BuildContext context) {
-    // Android 11 以下系统没有无线调试，不展示
-    if (!_supported) return const SizedBox.shrink();
+    final serverModel = Provider.of<ServerModel>(context);
+    // Android 10 及以下无无线调试，无法一键授权：只提供保活设置检查，
+    // 屏幕录制/输入控制仍走上面对话框里的传统手动按钮
+    if (!_supported) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Divider(height: 20),
+          Row(children: [
+            const Icon(Icons.fact_check_outlined, size: 22, color: Colors.grey)
+                .marginOnly(right: 10),
+            const Expanded(
+                child: Text("保活设置", style: TextStyle(fontSize: 14))),
+          ]),
+          const Padding(
+            padding: EdgeInsets.only(left: 32, top: 4),
+            child: Text("检查自启动/通知/后台弹出/电池等设置，保证远程服务稳定运行",
+                style: TextStyle(fontSize: 12, color: MyTheme.darkGray)),
+          ),
+          Container(
+            margin: const EdgeInsets.only(left: 32, top: 8),
+            child: OutlinedButton.icon(
+                icon: const Icon(Icons.fact_check_outlined, size: 18),
+                style: OutlinedButton.styleFrom(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12),
+                    minimumSize: const Size(0, 36),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                onPressed: _openEnvReview,
+                label: const Text("保活设置检查（自启动/通知/后台弹出/电池）",
+                    style: TextStyle(fontSize: 13))),
+          ),
+        ],
+      );
+    }
+
+    // Android 11+：接受控制总开关（统一无障碍 + 录屏授权 + 启动服务）
+    final mediaOk = serverModel.mediaOk;
+    if (_controlPending != null && _controlPending == mediaOk) {
+      _controlPending = null;
+    }
+    final switchOn = _controlPending ?? mediaOk;
+    final pairedBefore = _granted || _lastSnap["wss"] == true;
+    final String subtitle = switchOn
+        ? "正在接受远程控制，关闭后他人无法查看和操作本机"
+        : (pairedBefore
+            ? "授权已就绪，开启即可接受远程控制"
+            : "首次开启按引导完成一次无线调试配对，重启/升级不失效");
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // 未授权时本区域就是权限页主入口（屏幕录制/输入控制两行已隐藏），
-        // 不再需要顶部分割线；授权后作为"自动恢复"附加区，保留分割线
-        if (_granted) const Divider(height: 20),
+        // 总开关行
         Row(children: [
           Icon(
-            _granted ? Icons.verified_user_outlined : Icons.shield_outlined,
+            Icons.shield_outlined,
             size: 22,
-            color: _granted ? Colors.green : Colors.grey,
+            color: switchOn ? Colors.green : Colors.grey,
           ).marginOnly(right: 10),
           Expanded(
             child: Text(
-              _granted ? "权限自动恢复已开启" : "一键授权（屏幕共享 + 输入控制）",
+              switchOn ? "接受控制中（谨防诈骗）" : "接受控制（谨防诈骗）",
               style: const TextStyle(fontSize: 14),
             ),
           ),
+          Switch(
+            value: switchOn,
+            activeColor: Colors.green,
+            onChanged: _controlBusy ? null : _toggleControl,
+          ),
         ]),
         Padding(
-          padding: const EdgeInsets.only(left: 32, top: 4),
-          child: Text(
-            _granted
-                ? "无障碍服务被系统关闭时将自动重新开启"
-                : "按引导操作一次即可，重启/升级不失效",
-            style: const TextStyle(fontSize: 12, color: MyTheme.darkGray),
-          ),
+          padding: const EdgeInsets.only(left: 32, top: 2),
+          child: Text(subtitle,
+              style:
+                  const TextStyle(fontSize: 12, color: MyTheme.darkGray)),
         ),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: Container(
-            margin: const EdgeInsets.only(left: 32, top: 8),
-            child: _granted
-                ? Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      TextButton(
-                          style: TextButton.styleFrom(
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 8),
-                              minimumSize: const Size(0, 32),
-                              tapTargetSize:
-                                  MaterialTapTargetSize.shrinkWrap),
-                          onPressed: () async {
-                            await gFFI.invokeMethod("adb_repair", null);
-                            showToast("已执行一次恢复");
-                          },
-                          child: const Text("立即恢复",
-                              style: TextStyle(fontSize: 13))),
-                      const SizedBox(height: 4),
-                      OutlinedButton.icon(
-                          icon: const Icon(Icons.fact_check_outlined,
-                              size: 18),
-                          style: OutlinedButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 12),
-                              minimumSize: const Size(0, 36),
-                              tapTargetSize:
-                                  MaterialTapTargetSize.shrinkWrap),
-                          onPressed: _openEnvReview,
-                          label: const Text("保活设置检查（自启动/通知/后台弹出/电池）",
-                              style: TextStyle(fontSize: 13))),
-                    ],
-                  )
-                : Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      ElevatedButton.icon(
-                          icon: const Icon(Icons.bolt, size: 18),
-                          style: ElevatedButton.styleFrom(
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 12)),
-                          onPressed: _startPairing,
-                          label: const Text("一键授权开启",
-                              style: TextStyle(fontSize: 13))),
-                      Padding(
-                        padding: const EdgeInsets.only(top: 6),
-                        child: GestureDetector(
-                          onTap: _showDiag,
-                          child: const Text(
-                            "已配对但仍显示此页？点此诊断",
-                            style: TextStyle(
-                                fontSize: 12, color: MyTheme.darkGray),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
+        // 保活检查始终可进入
+        Container(
+          margin: const EdgeInsets.only(left: 22, top: 6),
+          child: OutlinedButton.icon(
+              icon: const Icon(Icons.fact_check_outlined, size: 18),
+              style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  minimumSize: const Size(0, 34),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+              onPressed: _openEnvReview,
+              label: const Text("保活设置检查（自启动/通知/后台弹出/电池）",
+                  style: TextStyle(fontSize: 13))),
+        ),
+        // 未在接受控制且没配对成功过时，提供配对异常诊断入口
+        if (!switchOn && !pairedBefore)
+          Padding(
+            padding: const EdgeInsets.only(left: 32, top: 6),
+            child: GestureDetector(
+              onTap: _showDiag,
+              child: const Text(
+                "配对后开关没自动打开？点此诊断",
+                style: TextStyle(fontSize: 12, color: MyTheme.darkGray),
+              ),
+            ),
           ),
-        )
       ],
     );
   }

@@ -551,6 +551,16 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                 }
+                "adb_disable_input" -> {
+                    // 关闭"接受控制"总开关：停用无障碍服务（disableSelf）。
+                    // 不解除 ADB 配对授权，下次开启仍可自动恢复，无需重新配对
+                    if (isController) {
+                        result.success(false)
+                        return@setMethodCallHandler
+                    }
+                    InputService.requestDisable()
+                    result.success(true)
+                }
                 else -> {
                     result.error("-1", "No such method", null)
                 }

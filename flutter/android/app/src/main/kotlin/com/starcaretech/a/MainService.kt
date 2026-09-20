@@ -685,6 +685,20 @@ class MainService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d("whichService", "this service: ${Thread.currentThread()}")
         super.onStartCommand(intent, flags, startId)
+        // 关键修复：MainActivity 长期 bindService，stopSelf() 后服务实例可能
+        // 因绑定仍存活，destroy() 里置的 serviceDestroyed=true 会残留——
+        // 用户再次开启服务时走同一实例，promptProjectionRecovery 等恢复
+        // 路径全部被 serviceDestroyed 短路，表现为"服务开了但录屏打不开"。
+        // 只要收到新的启动类 action，就视为服务被重新启用，复位销毁态。
+        if (intent?.action == ACT_INIT_MEDIA_PROJECTION_AND_SERVICE ||
+            intent?.action == ACT_TRY_RESTORE_MEDIA_PROJECTION
+        ) {
+            if (serviceDestroyed) {
+                Log.i(logTag, "服务在绑定保活中被重新启用，复位销毁标记")
+            }
+            serviceDestroyed = false
+            WatchdogScheduler.setServiceWanted(applicationContext, true)
+        }
         when (intent?.action) {
             ACT_INIT_MEDIA_PROJECTION_AND_SERVICE -> {
                 createForegroundNotification()
