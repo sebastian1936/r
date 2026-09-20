@@ -511,7 +511,11 @@ class MainActivity : FlutterActivity() {
                 }
                 "adb_env_check" -> {
                     // 配对/保活前置环境清单：只读检查，很快，直接主线程返回。
-                    // 返回品牌信息 + 按品牌下发的检查项
+                    // 返回品牌信息 + 按品牌/场景下发的检查项。
+                    // arguments 为 Map 时取 mode：mode=="review" 是纯保活
+                    // 复查（不含开发者模式/USB调试/无线调试/通知样式等配对项）
+                    val reviewMode = call.arguments() is Map<*, *> &&
+                        (call.arguments() as Map<*, *>)["mode"] == "review"
                     if (isController) {
                         result.success(
                             mapOf(
@@ -521,7 +525,12 @@ class MainActivity : FlutterActivity() {
                             )
                         )
                     } else {
-                        result.success(EnvCheckManager.envInfo(context))
+                        result.success(
+                            EnvCheckManager.envInfo(
+                                context,
+                                includePairing = !reviewMode
+                            )
+                        )
                     }
                 }
                 "adb_open_env" -> {

@@ -1157,7 +1157,7 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
     ],
     "notification": [
       "通知权限",
-      "允许通知，配对码在通知栏输入",
+      "允许通知：用于服务常驻运行提示；配对时配对码也在通知栏输入",
       true,
     ],
     "overlay": [
@@ -1233,7 +1233,11 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
   _refresh() async {
     setState(() => _loading = true);
     try {
-      final dynamic raw = await gFFI.invokeMethod("adb_env_check", null);
+      // reviewMode=纯保活复查：通道不下发开发者模式/USB调试/无线调试/
+      // 通知栏样式等"只为配对"的项（Android10以下/鸿蒙也是这个模式）
+      final dynamic raw = await gFFI.invokeMethod(
+          "adb_env_check",
+          widget.reviewMode ? const {"mode": "review"} : null);
       // 新格式 {brand, brand_label, items:[...]}；兼容旧 List 格式
       final items = raw is Map && raw["items"] is List
           ? raw["items"] as List

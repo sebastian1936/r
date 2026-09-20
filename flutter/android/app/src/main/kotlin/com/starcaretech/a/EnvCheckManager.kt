@@ -59,33 +59,47 @@ object EnvCheckManager {
         }
     }
 
-    /** 环境检查完整返回：品牌信息 + 检查项（清单按品牌只下发相关项） */
-    fun envInfo(context: Context): Map<String, Any?> = mapOf(
+    /** 环境检查完整返回：品牌信息 + 检查项（清单按品牌/场景只下发相关项） */
+    fun envInfo(context: Context, includePairing: Boolean): Map<String, Any?> = mapOf(
         "brand" to brandKey,
         "brand_label" to brandLabel,
-        "items" to checkAll(context)
+        "items" to checkAll(context, includePairing)
     )
 
-    fun checkAll(context: Context): List<Map<String, String>> {
+    /**
+     * @param includePairing true=配对前/开启前检查：下发全部项；
+     *   false=纯保活复查（已配对后、或 Android10 以下/鸿蒙无配对机型）：
+     *   只下发保活/功能项，不显示开发者模式、USB 调试、无线调试、
+     *   MIUI 通知栏样式这些"只为配对才需要"的项
+     */
+    fun checkAll(context: Context, includePairing: Boolean = true): List<Map<String, String>> {
         val items = ArrayList<Item>()
-        items += Item("developer_options", globalStatus(context, "development_settings_enabled"))
-        items += Item("adb_master", globalStatus(context, Settings.Global.ADB_ENABLED))
-        // ADB_WIFI_ENABLED（隐藏常量，值 "adb_wifi"，API30+）
+        if (includePairing) {
+            items += Item("developer_options", globalStatus(context, "development_settings_enabled"))
+            items += Item("adb_master", globalStatus(context, Settings.Global.ADB_ENABLED))
+            // ADB_WIFI_ENABLED（隐藏常量，值 "adb_wifi"，API30+）
+            items += Item(
+                "wireless_debug",
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    globalStatus(context, "adb_wifi")
+                } else {
+                    STATUS_UNKNOWN
+                }
+            )
+        }
         items += Item(
-            "wireless_debug",
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                globalStatus(context, "adb_wifi")
-            } else {
-                STATUS_UNKNOWN
-            }
+            "notification",
+            checkNotification(context, checkPairingChannel = includePairing)
         )
-        items += Item("notification", checkNotification(context))
         items += Item("overlay", checkOverlay(context))
         items += Item("battery_optimization", checkBattery(context))
         // 以下两项是功能可选项：不授权不影响远程看屏与操作，
         // 只影响对应能力（传文件 / 传被控端播放的声音）
         items += Item("file_storage", checkFileStorage(context))
-        items += Item("record_audio", checkRecordAudio(context))
+        // 被控端系统音频仅 Android 11+ 支持，低版本无此项
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            items += Item("record_audio", checkRecordAudio(context))
+        }
         if (isMiui) {
             items += Item("miui_autostart", appOpStatus(context, MIUI_OP_AUTO_START))
             items += Item(
@@ -93,9 +107,10 @@ object EnvCheckManager {
                 miuiBackgroundStartStatus(context)
             )
             // 配对码通过通知 RemoteInput 输入（与 Shizuku 同款），MIUI 默认
-            // 通知栏样式会吞掉通知上的输入控件。该样式设置无任何 API 可读，
-            // 恒为 unknown，强制用户按指引手动确认（小米/红米配对硬前提）。
-            items += Item("miui_notif_style", STATUS_UNKNOWN)
+            // 通知栏样式会吞掉通知上的输入控件。纯配对前提，保活复查不显示。
+            if (includePairing) {
+                items += Item("miui_notif_style", STATUS_UNKNOWN)
+            }
         }
         if (isSamsung) {
             // One UI 无线调试/通知输入/无障碍均为标准实现，无配对相关特殊项；
@@ -118,11 +133,17 @@ object EnvCheckManager {
         STATUS_UNKNOWN
     }
 
-    private fun checkNotification(context: Context): String {
+    private fun checkNotification(
+        context: Context,
+        checkPairingChannel: Boolean
+    ): String {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
         if (!nm.areNotificationsEnabled()) return STATUS_OFF
         // 配对渠道若被手动关到 IMPORTANCE_NONE，配对通知同样不显示
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        // （纯配对前提，保活复查不查这个渠道）
+        if (checkPairingChannel &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+        ) {
             nm.getNotificationChannel(AdbPairingService.CHANNEL_ID)?.let { ch ->
                 if (ch.importance == android.app.NotificationManager.IMPORTANCE_NONE) {
                     return STATUS_OFF
