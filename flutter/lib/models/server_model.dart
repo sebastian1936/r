@@ -419,14 +419,12 @@ class ServerModel with ChangeNotifier {
     return res;
   }
 
-  /// 开启服务前的运行时权限准备（通知/悬浮窗/所有文件访问），
-  /// 供"接受控制"总开关复用（跳过 toggleService 的二次确认对话框）。
+  /// 传统手动路径（Android10 以下/鸿蒙降级界面）开启服务前的运行时权限
+  /// 准备（通知/悬浮窗/所有文件访问）。
   ///
-  /// [enableSharedCapabilities] = true 时（总开关模式），文件传输/音频采集/
-  /// 剪贴板三项随开关一并授权并启用，权限页不再单列这三行；
-  /// 传统手动路径（Android10 以下/鸿蒙）保持各自独立按钮，不传此参数。
-  Future<void> prepareServicePrerequisites(
-      {bool enableSharedCapabilities = false}) async {
+  /// 安卓 11+ 的"接受控制"总开关不走这里——总开关不弹任何授权框，
+  /// 改为 [applySharedCapabilitiesSilently] 按检查清单已授权状态静默启用。
+  Future<void> prepareServicePrerequisites() async {
     await checkRequestNotificationPermission();
     if (bind.mainGetLocalOption(key: kOptionDisableFloatingWindow) != 'Y') {
       await checkFloatingWindowPermission();
@@ -434,26 +432,29 @@ class ServerModel with ChangeNotifier {
     if (!await AndroidPermissionManager.check(kManageExternalStorage)) {
       await AndroidPermissionManager.request(kManageExternalStorage);
     }
-    if (!enableSharedCapabilities) return;
+  }
 
-    // 文件传输：所有文件访问权限已在上面请求，授权后随开关启用
+  /// 总开关开启时：不弹任何系统授权框，只按"检查清单"里已授予的权限
+  /// 静默启用对应能力。清单没开麦克风→视为不需要传音频；没开所有文件
+  /// 访问→视为不需要传文件；剪贴板无运行时权限要求，始终随服务启用。
+  Future<void> applySharedCapabilitiesSilently() async {
     if (await AndroidPermissionManager.check(kManageExternalStorage)) {
       _fileOk = true;
       bind.mainSetOption(
           key: kOptionEnableFileTransfer, value: defaultOptionYes);
-    }
-    // 音频采集：Android 11+ 才支持被控端音频，先请求录音运行时权限
-    if (androidVersion >= 30 &&
-        !await AndroidPermissionManager.check(kRecordAudio)) {
-      await AndroidPermissionManager.request(kRecordAudio);
+    } else {
+      _fileOk = false;
+      bind.mainSetOption(key: kOptionEnableFileTransfer, value: 'N');
     }
     if (androidVersion >= 30 &&
         await AndroidPermissionManager.check(kRecordAudio)) {
       _audioOk = true;
       bind.mainSetOption(
           key: kOptionEnableAudio, value: defaultOptionYes);
+    } else {
+      _audioOk = false;
+      bind.mainSetOption(key: kOptionEnableAudio, value: 'N');
     }
-    // 剪贴板同步无运行时权限，直接随开关启用
     _clipboardOk = true;
     bind.mainSetOption(
         key: kOptionEnableClipboard, value: defaultOptionYes);

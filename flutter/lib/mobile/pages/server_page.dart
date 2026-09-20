@@ -659,10 +659,10 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
   bool _controlBusy = false;
 
   /// "接受控制"总开关。
-  /// 开：先查持久配对记录——未配对→开关保持关闭并进入配对引导（全程不申请
-  ///    存储/录音等权限、不弹权限框；配对成功后由系统通知返回自动衔接）；
-  ///    已配对→先恢复无障碍（需无线调试开着；重连用已保存授权，不用重新
-  ///    配对），恢复成功后才申请权限并启动服务。
+  /// 开：只做三件必要的事——确认配对记录、恢复无障碍、启动服务（系统
+  ///    录屏确认框是录屏授权唯一无法绕过的手动确认）。全程不弹任何其他
+  ///    授权框：通知/存储/麦克风等全部由配对前检查清单交代，可选能力按
+  ///    清单已授权状态静默启用（没开麦克风=不传音频，没开存储=不传文件）。
   /// 关：停服务 + disableSelf 关无障碍（保留 ADB 配对，下次免配对）。
   void _toggleControl(bool on) async {
     if (_controlBusy) return;
@@ -725,11 +725,12 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         }
         if (!mounted) return;
 
-        // 4) 恢复成功：此时才乐观置开 → 申请权限 → 启动服务（系统录屏框
-        //    由用户确认，Android11~13 无障碍自动点"立即开始"）
+        // 4) 恢复成功：此时才乐观置开 → 按检查清单已授权状态静默启用
+        //    文件/音频/剪贴板（不弹任何权限框：清单没开麦克风就不传音频，
+        //    没开存储就不传文件）→ 启动服务。唯一会出现的系统框是录屏
+        //    授权确认——那是录屏权限技术上必需的手动确认，无法绕过。
         setState(() => _controlPending = true);
-        await gFFI.serverModel.prepareServicePrerequisites(
-            enableSharedCapabilities: true);
+        await gFFI.serverModel.applySharedCapabilitiesSilently();
         // 系统绑定 InputService 有 1~2s 延迟，等它就绪后再拉录屏框，
         // Android 11~13 才能赶上自动点"立即开始"
         await Future.delayed(const Duration(milliseconds: 1800));
@@ -797,13 +798,11 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         // "已授权显示运行时开关"两种布局间切换
         gFFI.serverModel.setAdbAuthState(
             supported: _supported, granted: grantedNow);
-        // 通知栏配对成功后用户回到 App：先把随总开关集成的运行时权限
-        // （通知/悬浮窗/所有文件访问/录音）和文件/音频/剪贴板选项准备好，
-        // 再自动拉起一次系统录屏授权框
+        // 通知栏配对成功后用户回到 App：按检查清单已授权状态静默启用
+        // 文件/音频/剪贴板（不弹权限框），再自动拉起一次系统录屏授权框
         // （录屏是系统级授权，无法静默授予；已授权/缓存有效时不会弹窗）
         if (capturePending) {
-          gFFI.serverModel
-              .prepareServicePrerequisites(enableSharedCapabilities: true);
+          gFFI.serverModel.applySharedCapabilitiesSilently();
           gFFI.invokeMethod("adb_ensure_capture", null);
         }
       } else {
@@ -887,12 +886,17 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     await _launchPairing();
   }
 
-  /// 保活设置复查（已配对状态下也可随时打开清单调整自启动/电池等）
-  _openEnvReview() {
-    showDialog<bool>(
+  /// 保活设置复查（已配对状态下也可随时打开清单调整自启动/电池等）。
+  /// 关闭后若服务正在运行，按清单里新补开的文件/麦克风授权立即生效，
+  /// 不用关了再开总开关
+  _openEnvReview() async {
+    await showDialog<bool>(
       context: context,
       builder: (_) => const _EnvCheckDialog(reviewMode: true),
     );
+    if (mounted && gFFI.serverModel.mediaOk) {
+      gFFI.serverModel.applySharedCapabilitiesSilently();
+    }
   }
 
   Future<void> _launchPairing() async {
@@ -921,11 +925,11 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     }
   }
 
-  /// 分屏/对话框内配对成功后的收尾：随总开关启用文件/音频/剪贴板并补齐
-  /// 运行时权限，再刷状态（_refresh 内会消费 pending 并自动拉起录屏授权）
+  /// 分屏/对话框内配对成功后的收尾：按检查清单已授权状态静默启用
+  /// 文件/音频/剪贴板（不弹权限框），再刷状态
+  /// （_refresh 内会消费 pending 并自动拉起录屏授权）
   _onPairingSucceeded() async {
-    await gFFI.serverModel.prepareServicePrerequisites(
-        enableSharedCapabilities: true);
+    await gFFI.serverModel.applySharedCapabilitiesSilently();
     await _refresh(delayedRescan: true);
     checkService();
     gFFI.serverModel.checkAndroidPermission();
