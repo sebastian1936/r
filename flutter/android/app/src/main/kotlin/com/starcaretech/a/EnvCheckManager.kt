@@ -67,6 +67,13 @@ object EnvCheckManager {
             // 恒为 unknown，强制用户按指引手动确认（小米/红米配对硬前提）。
             items += Item("miui_notif_style", STATUS_UNKNOWN)
         }
+        if (isSamsung) {
+            // One UI 无线调试/通知输入/无障碍均为标准实现，无配对相关特殊项；
+            // 唯一实际差异是电池策略：长期不打开的应用会被自动放入深度休眠，
+            // 服务与看门狗全部失效。该状态无公开 API 可读，恒 unknown，
+            // 作为保活建议项由用户手动确认。
+            items += Item("samsung_sleep_apps", STATUS_UNKNOWN)
+        }
         return items.map { mapOf("key" to it.key, "status" to it.status) }
     }
 
@@ -182,6 +189,10 @@ object EnvCheckManager {
             }.getOrDefault(false)
     }
 
+    val isSamsung: Boolean by lazy {
+        Build.MANUFACTURER?.equals("samsung", ignoreCase = true) == true
+    }
+
     /**
      * 打开各检查项对应的设置页。返回 true 表示成功拉起了某个页面。
      * 尽量直达；ROM 页面缺失时逐级回退，最终回退应用详情页。
@@ -213,6 +224,10 @@ object EnvCheckManager {
             // 用户按文案路径进入（通知与控制中心 → 通知通知栏 → 通知栏样式）
             "miui_notif_style" ->
                 launch(appContext, Intent(Settings.ACTION_SETTINGS))
+
+            // One UI「后台使用限制/休眠应用」页无公开 intent，
+            // 打开电池优化设置页（含本应用电池"不受限制"开关），再按文案操作
+            "samsung_sleep_apps" -> openBatterySettings(appContext)
 
             else -> openAppDetails(appContext)
         }
