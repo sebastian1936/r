@@ -659,49 +659,77 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
   bool _controlBusy = false;
 
   /// "接受控制"总开关。
-  /// 开：已配对→自愈无障碍→启动服务（系统录屏框由用户确认，
-  ///    Android13 及以下无障碍自动点"立即开始"）；未配对→先走配对引导，
-  ///    配对成功后 capturePending 自动拉起服务与录屏框。
+  /// 开：先查持久配对记录——未配对→开关保持关闭并进入配对引导（全程不申请
+  ///    存储/录音等权限、不弹权限框；配对成功后由系统通知返回自动衔接）；
+  ///    已配对→先恢复无障碍（需无线调试开着；重连用已保存授权，不用重新
+  ///    配对），恢复成功后才申请权限并启动服务。
   /// 关：停服务 + disableSelf 关无障碍（保留 ADB 配对，下次免配对）。
   void _toggleControl(bool on) async {
     if (_controlBusy) return;
     _controlBusy = true;
-    setState(() => _controlPending = on);
     try {
       if (on) {
-        // 是否"配对过"只看持久配对记录（snap.paired，grant_mode 有值），
-        // 不能看无障碍运行态/wss：关总开关会 disableSelf，shell_direct
-        // 模式（ROM 禁止 pm grant）下这些全变 false，但配对记录仍在，
-        // 再开只需经无线调试重连自愈，绝不能重新弹配对页。
-        final pairedBefore = _lastSnap["paired"] == true;
-        if (!pairedBefore) {
-          // 从未完成配对：先恢复乐观态，交给配对流程（成功后自动拉服务）
-          setState(() => _controlPending = null);
-          await _startPairing();
+        // 1) 拉最新授权状态，消除进页面首次 _refresh 尚未返回的竞态
+        var paired = false;
+        try {
+          final dynamic st =
+              await gFFI.invokeMethod("adb_auth_status", null);
+          if (st is Map) {
+            final dynamic snap = st["snap"];
+            paired = snap is Map && snap["paired"] == true;
+            if (mounted) {
+              setState(() {
+                _supported = (st["supported"] ?? false) as bool;
+                _granted = (st["granted"] ?? false) as bool;
+                _lastSnap = snap is Map ? snap : const {};
+                _lastPackage = (st["package"] ?? "") as String;
+              });
+            }
+          }
+        } catch (_) {
+          paired = _lastSnap["paired"] == true;
+        }
+
+        // 2) 从未配对：开关保持"关"，直接进配对引导。
+        //    立刻释放忙碌锁（配对对话框是独立流程，不能卡住开关），
+        //    也绝不能先弹存储/录音权限。
+        if (!paired) {
+          _controlBusy = false;
+          _startPairing();
           return;
         }
+
+        // 3) 已配对：先恢复无障碍。无线调试没开时 shell 重连会失败，
+        //    弹"开启前检查"让用户打开无线调试后重试（重试仍是重连，
+        //    不是重新配对）。恢复成功前不申请任何权限。
+        showToast("正在恢复控制权限…");
+        var inputOk = false;
+        while (mounted) {
+          try {
+            final dynamic r =
+                await gFFI.invokeMethod("adb_enable_input", null);
+            inputOk = r is Map && r["ok"] == true;
+          } catch (_) {
+            inputOk = false;
+          }
+          if (inputOk) break;
+          final again = await showDialog<bool>(
+            context: context,
+            barrierDismissible: false,
+            builder: (_) => const _EnvCheckDialog(retryMode: true),
+          );
+          if (again != true) {
+            // 用户放弃：开关保持关闭
+            return;
+          }
+        }
+        if (!mounted) return;
+
+        // 4) 恢复成功：此时才乐观置开 → 申请权限 → 启动服务（系统录屏框
+        //    由用户确认，Android11~13 无障碍自动点"立即开始"）
+        setState(() => _controlPending = true);
         await gFFI.serverModel.prepareServicePrerequisites(
             enableSharedCapabilities: true);
-        // 自愈无障碍：adb_enable_input 同时覆盖两种配对模式——
-        // pm_grant（App 本地直写）和 shell_direct（重连本机无线调试后
-        // shell 写名单，ADB key 已保存，用户无需重新配对/输配对码）。
-        // 失败几乎只可能是"无线调试"总开关被关了。
-        var inputOk = false;
-        try {
-          final dynamic r =
-              await gFFI.invokeMethod("adb_enable_input", null);
-          inputOk = r is Map && r["ok"] == true;
-        } catch (_) {
-          inputOk = false;
-        }
-        if (!inputOk) {
-          // 无线调试可能被关：开关弹回关，引导用户去环境清单重新打开
-          // （打开后再拨开关即可，仍不需要重新配对）
-          if (mounted) setState(() => _controlPending = null);
-          showToast("请先在开发者选项中打开「无线调试」，再开启本开关");
-          await _openEnvReview();
-          return;
-        }
         // 系统绑定 InputService 有 1~2s 延迟，等它就绪后再拉录屏框，
         // Android 11~13 才能赶上自动点"立即开始"
         await Future.delayed(const Duration(milliseconds: 1800));
@@ -711,6 +739,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           if (mounted) setState(() => _controlPending = null);
         });
       } else {
+        setState(() => _controlPending = false);
         await gFFI.serverModel.stopService();
         // 随总开关一并关闭文件传输/音频/剪贴板
         gFFI.serverModel.disableSharedCapabilities();
@@ -768,9 +797,13 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         // "已授权显示运行时开关"两种布局间切换
         gFFI.serverModel.setAdbAuthState(
             supported: _supported, granted: grantedNow);
-        // 通知栏配对成功后用户回到 App：自动拉起一次系统录屏授权框
+        // 通知栏配对成功后用户回到 App：先把随总开关集成的运行时权限
+        // （通知/悬浮窗/所有文件访问/录音）和文件/音频/剪贴板选项准备好，
+        // 再自动拉起一次系统录屏授权框
         // （录屏是系统级授权，无法静默授予；已授权/缓存有效时不会弹窗）
         if (capturePending) {
+          gFFI.serverModel
+              .prepareServicePrerequisites(enableSharedCapabilities: true);
           gFFI.invokeMethod("adb_ensure_capture", null);
         }
       } else {
@@ -831,9 +864,12 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
   _startPairing() async {
     var hasIssue = false;
     try {
-      // gFFI.invokeMethod 声名为 Future<bool>，实际透传通道结果，需 dynamic 接
+      // gFFI.invokeMethod 声名为 Future<bool>，实际透传通道结果，需 dynamic 接。
+      // 返回 {brand, brand_label, items:[{key,status}...]}
       final dynamic raw = await gFFI.invokeMethod("adb_env_check", null);
-      final items = raw is List ? raw : const [];
+      final items = raw is Map && raw["items"] is List
+          ? raw["items"] as List
+          : (raw is List ? raw : const []);
       hasIssue = items
           .any((e) => e is Map && e["status"] != "ok");
     } catch (_) {
@@ -1008,10 +1044,15 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
 /// 必选项（开发者模式/USB 调试/无线调试/通知）未开启时不能直接开始配对；
 /// 自启动/电池/悬浮窗为保活建议项；MIUI 无法读取的状态显示「需确认」。
 class _EnvCheckDialog extends StatefulWidget {
-  const _EnvCheckDialog({Key? key, this.reviewMode = false}) : super(key: key);
+  const _EnvCheckDialog(
+      {Key? key, this.reviewMode = false, this.retryMode = false})
+      : super(key: key);
 
   /// true=已配对后的复查入口（底部只显示「完成」，不显示开始配对）
   final bool reviewMode;
+
+  /// true=已配对但无线调试没开、恢复失败后的引导（底部：取消 / 我已打开重试）
+  final bool retryMode;
 
   @override
   State<_EnvCheckDialog> createState() => _EnvCheckDialogState();
@@ -1021,12 +1062,14 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
     with WidgetsBindingObserver {
   List<dynamic> _items = const [];
   bool _loading = true;
+  String _brand = "other";
+  String _brandLabel = "";
 
   // key → (标题, 操作指引, 是否必选项)。文案只给操作步骤，不讲原理
   static const Map<String, List<dynamic>> _meta = {
     "developer_options": [
       "开发者选项（已开启）",
-      "没开：设置 → 我的设备 → 全部参数，连续点「MIUI 版本」7 次",
+      "没开：到 设置 → 关于手机，连续点「版本号」7 次",
       true,
     ],
     "adb_master": [
@@ -1104,10 +1147,17 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
     setState(() => _loading = true);
     try {
       final dynamic raw = await gFFI.invokeMethod("adb_env_check", null);
-      final items = raw is List ? raw : const [];
+      // 新格式 {brand, brand_label, items:[...]}；兼容旧 List 格式
+      final items = raw is Map && raw["items"] is List
+          ? raw["items"] as List
+          : (raw is List ? raw : const []);
       if (!mounted) return;
       setState(() {
         _items = items;
+        if (raw is Map) {
+          _brand = (raw["brand"] ?? "other") as String;
+          _brandLabel = (raw["brand_label"] ?? "") as String;
+        }
         _loading = false;
       });
     } catch (_) {
@@ -1153,7 +1203,16 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
     final meta = _meta[key];
     if (meta == null) return const SizedBox.shrink();
     final title = meta[0] as String;
-    final desc = meta[1] as String;
+    var desc = meta[1] as String;
+    // 开发者选项入口各品牌路径不同，按识别到的品牌给准确路径
+    if (key == "developer_options") {
+      desc = const {
+            "xiaomi": "没开：设置 → 我的设备 → 全部参数，连续点「MIUI 版本」7 次",
+            "samsung": "没开：设置 → 关于手机 → 软件信息，连续点「编译编号」7 次",
+            "huawei": "没开：设置 → 关于手机，连续点「版本号」7 次",
+          }[_brand] ??
+          "没开：设置 → 关于手机，连续点「版本号」7 次";
+    }
     final required_ = meta[2] as bool;
     final status = _statusOf(key);
     return Padding(
@@ -1218,11 +1277,14 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
         e is Map &&
         e["status"] == "off" &&
         (_meta[e["key"]]?[2] == true));
+    final titleText = widget.retryMode
+        ? "开启前检查"
+        : (widget.reviewMode ? "保活设置检查" : "配对前设置检查");
     return AlertDialog(
       title: Row(children: [
         const Icon(Icons.fact_check_outlined, size: 22),
         const SizedBox(width: 8),
-        Text(widget.reviewMode ? "保活设置检查" : "配对前设置检查"),
+        Text(titleText),
       ]),
       content: SizedBox(
         width: double.maxFinite,
@@ -1231,6 +1293,35 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              if (_brandLabel.isNotEmpty)
+                Container(
+                  width: double.maxFinite,
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.primaryContainer,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    "当前机型：$_brandLabel\n以下只显示与你这台手机相关的设置项",
+                    style: const TextStyle(fontSize: 12, height: 1.5),
+                  ),
+                ),
+              if (widget.retryMode)
+                Container(
+                  width: double.maxFinite,
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.orangeAccent.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: const Text(
+                    "没连上：请确认开发者选项里「无线调试」是开着的"
+                    "（配对只做第一次，这里不需要重新配对）。打开后点下方重试。",
+                    style: TextStyle(fontSize: 12, height: 1.5),
+                  ),
+                ),
               if (widget.reviewMode)
                 const Padding(
                   padding: EdgeInsets.only(bottom: 6),
@@ -1265,7 +1356,16 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
           onPressed: _loading ? null : _refresh,
           child: const Text("重新检查"),
         ),
-        if (widget.reviewMode)
+        if (widget.retryMode) ...[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text("取消"),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text("我已打开，重试"),
+          ),
+        ] else if (widget.reviewMode)
           ElevatedButton(
             onPressed: () => Navigator.of(context).pop(),
             child: const Text("完成"),

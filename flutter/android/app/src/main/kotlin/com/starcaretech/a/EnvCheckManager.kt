@@ -40,6 +40,32 @@ object EnvCheckManager {
 
     data class Item(val key: String, val status: String)
 
+    /** 品牌识别结果：key 供逻辑判断，label 直接展示给用户 */
+    val brandKey: String by lazy {
+        when {
+            isMiui -> "xiaomi"
+            isSamsung -> "samsung"
+            com.starcaretech.a.adb.HarmonyOsDetector.isHarmonyOs -> "huawei"
+            else -> "other"
+        }
+    }
+
+    val brandLabel: String by lazy {
+        when (brandKey) {
+            "xiaomi" -> "小米 / 红米（MIUI / HyperOS）"
+            "samsung" -> "三星（One UI）"
+            "huawei" -> "华为 / 荣耀（鸿蒙）"
+            else -> (Build.MANUFACTURER ?: "其他") + "（标准安卓）"
+        }
+    }
+
+    /** 环境检查完整返回：品牌信息 + 检查项（清单按品牌只下发相关项） */
+    fun envInfo(context: Context): Map<String, Any?> = mapOf(
+        "brand" to brandKey,
+        "brand_label" to brandLabel,
+        "items" to checkAll(context)
+    )
+
     fun checkAll(context: Context): List<Map<String, String>> {
         val items = ArrayList<Item>()
         items += Item("developer_options", globalStatus(context, "development_settings_enabled"))

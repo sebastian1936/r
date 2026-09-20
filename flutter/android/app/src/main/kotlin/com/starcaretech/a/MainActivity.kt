@@ -510,11 +510,18 @@ class MainActivity : FlutterActivity() {
                     result.success(opened)
                 }
                 "adb_env_check" -> {
-                    // 配对/保活前置环境清单：只读检查，很快，直接主线程返回
+                    // 配对/保活前置环境清单：只读检查，很快，直接主线程返回。
+                    // 返回品牌信息 + 按品牌下发的检查项
                     if (isController) {
-                        result.success(emptyList<Map<String, String>>())
+                        result.success(
+                            mapOf(
+                                "brand" to "other",
+                                "brand_label" to "",
+                                "items" to emptyList<Map<String, String>>()
+                            )
+                        )
                     } else {
-                        result.success(EnvCheckManager.checkAll(context))
+                        result.success(EnvCheckManager.envInfo(context))
                     }
                 }
                 "adb_open_env" -> {
