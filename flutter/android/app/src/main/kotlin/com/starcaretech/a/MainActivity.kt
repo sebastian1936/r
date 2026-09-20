@@ -514,7 +514,7 @@ class MainActivity : FlutterActivity() {
                     // 返回品牌信息 + 按品牌/场景下发的检查项。
                     // arguments 为 Map 时取 mode：mode=="review" 是纯保活
                     // 复查（不含开发者模式/USB调试/无线调试/通知样式等配对项）
-                    val envArgs = call.arguments()
+                    val envArgs = call.arguments
                     val reviewMode = envArgs is Map<*, *> &&
                         envArgs["mode"] == "review"
                     if (isController) {
