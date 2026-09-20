@@ -285,11 +285,19 @@ object AdbAuthManager {
             isAccessibilityListed(context) ||
             InputService.isOpen
 
+    /** 曾经成功完成过一次配对授权（grant_mode 有值即配对过，持久事实，
+     *  与无障碍当前是否运行、是否被 disableSelf 无关）。
+     *  注意 pm_grant / shell_direct 两种模式都会写入 grant_mode。 */
+    fun isPaired(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString("grant_mode", null) != null
+
     /** 授权诊断明细（通道日志/排查用） */
     fun statusSnapshot(context: Context): Map<String, Any?> = mapOf(
         "wss" to isWriteSecureSettingsGranted(context),
         "a11y_listed" to isAccessibilityListed(context),
         "a11y_running" to InputService.isOpen,
+        "paired" to isPaired(context),
         "a11y_list_raw" to runCatching {
             Settings.Secure.getString(
                 context.contentResolver,

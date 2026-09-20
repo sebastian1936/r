@@ -669,22 +669,39 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     setState(() => _controlPending = on);
     try {
       if (on) {
-        // 注意：关总开关会 disableSelf 停用无障碍，此后 _granted（三重判据）
-        // 为 false，但 WRITE_SECURE_SETTINGS 配对授权仍在（snap.wss=true）。
-        // 这种"配对过、仅无障碍被关"的情况直接 repair 自愈，绝不重新配对
-        final pairedBefore = _granted || _lastSnap["wss"] == true;
+        // 是否"配对过"只看持久配对记录（snap.paired，grant_mode 有值），
+        // 不能看无障碍运行态/wss：关总开关会 disableSelf，shell_direct
+        // 模式（ROM 禁止 pm grant）下这些全变 false，但配对记录仍在，
+        // 再开只需经无线调试重连自愈，绝不能重新弹配对页。
+        final pairedBefore = _lastSnap["paired"] == true;
         if (!pairedBefore) {
-          // 未完成授权：先恢复乐观态，交给配对流程（成功后自动拉服务）
+          // 从未完成配对：先恢复乐观态，交给配对流程（成功后自动拉服务）
           setState(() => _controlPending = null);
           await _startPairing();
           return;
         }
         await gFFI.serverModel.prepareServicePrerequisites(
             enableSharedCapabilities: true);
-        // 无障碍可能已被总开关 disableSelf 或被系统收回，先 shell 自愈
+        // 自愈无障碍：adb_enable_input 同时覆盖两种配对模式——
+        // pm_grant（App 本地直写）和 shell_direct（重连本机无线调试后
+        // shell 写名单，ADB key 已保存，用户无需重新配对/输配对码）。
+        // 失败几乎只可能是"无线调试"总开关被关了。
+        var inputOk = false;
         try {
-          await gFFI.invokeMethod("adb_repair", null);
-        } catch (_) {}
+          final dynamic r =
+              await gFFI.invokeMethod("adb_enable_input", null);
+          inputOk = r is Map && r["ok"] == true;
+        } catch (_) {
+          inputOk = false;
+        }
+        if (!inputOk) {
+          // 无线调试可能被关：开关弹回关，引导用户去环境清单重新打开
+          // （打开后再拨开关即可，仍不需要重新配对）
+          if (mounted) setState(() => _controlPending = null);
+          showToast("请先在开发者选项中打开「无线调试」，再开启本开关");
+          await _openEnvReview();
+          return;
+        }
         // 系统绑定 InputService 有 1~2s 延迟，等它就绪后再拉录屏框，
         // Android 11~13 才能赶上自动点"立即开始"
         await Future.delayed(const Duration(milliseconds: 1800));
@@ -783,6 +800,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         content: SingleChildScrollView(
           child: SelectableText(
             "包名: $_lastPackage\n"
+            "已完成过配对（持久记录）: ${_lastSnap["paired"]}\n"
             "WRITE_SECURE_SETTINGS 已授权: ${_lastSnap["wss"]}\n"
             "系统无障碍名单含本应用: ${_lastSnap["a11y_listed"]}\n"
             "无障碍服务运行中: ${_lastSnap["a11y_running"]}\n"
@@ -921,7 +939,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
       _controlPending = null;
     }
     final switchOn = _controlPending ?? mediaOk;
-    final pairedBefore = _granted || _lastSnap["wss"] == true;
+    final pairedBefore = _lastSnap["paired"] == true;
     final String subtitle = switchOn
         ? "正在接受远程控制，关闭后他人无法查看和操作本机"
         : (pairedBefore
