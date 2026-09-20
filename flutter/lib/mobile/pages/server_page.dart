@@ -610,21 +610,26 @@ class _PermissionCheckerState extends State<PermissionChecker> {
           if (!unifiedControl)
             PermissionRow(translate("Input Control"), serverModel.inputOk,
                 serverModel.toggleInput),
-          PermissionRow(translate("Transfer file"), serverModel.fileOk,
-              serverModel.toggleFile),
-          hasAudioPermission
-              ? PermissionRow(translate("Audio Capture"), serverModel.audioOk,
-                  serverModel.toggleAudio)
-              : Row(children: [
-                  Icon(Icons.info_outline).marginOnly(right: 15),
-                  Expanded(
-                      child: Text(
-                    translate("android_version_audio_tip"),
-                    style: const TextStyle(color: MyTheme.darkGray),
-                  ))
-                ]),
-          PermissionRow(translate("Enable clipboard"), serverModel.clipboardOk,
-              serverModel.toggleClipboard),
+          // 文件传输/音频采集/剪贴板在总开关模式下随"接受控制"开关
+          // 一起授权和启停，不再单列；传统模式（Android10 以下/鸿蒙）保留
+          if (!unifiedControl)
+            PermissionRow(translate("Transfer file"), serverModel.fileOk,
+                serverModel.toggleFile),
+          if (!unifiedControl && hasAudioPermission)
+            PermissionRow(translate("Audio Capture"), serverModel.audioOk,
+                serverModel.toggleAudio),
+          if (!unifiedControl && !hasAudioPermission)
+            Row(children: [
+              Icon(Icons.info_outline).marginOnly(right: 15),
+              Expanded(
+                  child: Text(
+                translate("android_version_audio_tip"),
+                style: const TextStyle(color: MyTheme.darkGray),
+              ))
+            ]),
+          if (!unifiedControl)
+            PermissionRow(translate("Enable clipboard"),
+                serverModel.clipboardOk, serverModel.toggleClipboard),
           const AdbAuthSection(),
         ]));
   }
@@ -674,7 +679,8 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           await _startPairing();
           return;
         }
-        await gFFI.serverModel.prepareServicePrerequisites();
+        await gFFI.serverModel.prepareServicePrerequisites(
+            enableSharedCapabilities: true);
         // 无障碍可能已被总开关 disableSelf 或被系统收回，先 shell 自愈
         try {
           await gFFI.invokeMethod("adb_repair", null);
@@ -689,6 +695,8 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         });
       } else {
         await gFFI.serverModel.stopService();
+        // 随总开关一并关闭文件传输/音频/剪贴板
+        gFFI.serverModel.disableSharedCapabilities();
         try {
           await gFFI.invokeMethod("adb_disable_input", null);
         } catch (_) {}
@@ -859,9 +867,11 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     }
   }
 
-  /// 分屏/对话框内配对成功后的收尾：刷状态（_refresh 内会消费 pending 并
-  /// 自动拉起录屏授权）+ 刷新服务与权限页
+  /// 分屏/对话框内配对成功后的收尾：随总开关启用文件/音频/剪贴板并补齐
+  /// 运行时权限，再刷状态（_refresh 内会消费 pending 并自动拉起录屏授权）
   _onPairingSucceeded() async {
+    await gFFI.serverModel.prepareServicePrerequisites(
+        enableSharedCapabilities: true);
     await _refresh(delayedRescan: true);
     checkService();
     gFFI.serverModel.checkAndroidPermission();

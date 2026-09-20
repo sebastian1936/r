@@ -420,8 +420,13 @@ class ServerModel with ChangeNotifier {
   }
 
   /// 开启服务前的运行时权限准备（通知/悬浮窗/所有文件访问），
-  /// 供"接受控制"总开关复用（跳过 toggleService 的二次确认对话框）
-  Future<void> prepareServicePrerequisites() async {
+  /// 供"接受控制"总开关复用（跳过 toggleService 的二次确认对话框）。
+  ///
+  /// [enableSharedCapabilities] = true 时（总开关模式），文件传输/音频采集/
+  /// 剪贴板三项随开关一并授权并启用，权限页不再单列这三行；
+  /// 传统手动路径（Android10 以下/鸿蒙）保持各自独立按钮，不传此参数。
+  Future<void> prepareServicePrerequisites(
+      {bool enableSharedCapabilities = false}) async {
     await checkRequestNotificationPermission();
     if (bind.mainGetLocalOption(key: kOptionDisableFloatingWindow) != 'Y') {
       await checkFloatingWindowPermission();
@@ -429,6 +434,41 @@ class ServerModel with ChangeNotifier {
     if (!await AndroidPermissionManager.check(kManageExternalStorage)) {
       await AndroidPermissionManager.request(kManageExternalStorage);
     }
+    if (!enableSharedCapabilities) return;
+
+    // 文件传输：所有文件访问权限已在上面请求，授权后随开关启用
+    if (await AndroidPermissionManager.check(kManageExternalStorage)) {
+      _fileOk = true;
+      bind.mainSetOption(
+          key: kOptionEnableFileTransfer, value: defaultOptionYes);
+    }
+    // 音频采集：Android 11+ 才支持被控端音频，先请求录音运行时权限
+    if (androidVersion >= 30 &&
+        !await AndroidPermissionManager.check(kRecordAudio)) {
+      await AndroidPermissionManager.request(kRecordAudio);
+    }
+    if (androidVersion >= 30 &&
+        await AndroidPermissionManager.check(kRecordAudio)) {
+      _audioOk = true;
+      bind.mainSetOption(
+          key: kOptionEnableAudio, value: defaultOptionYes);
+    }
+    // 剪贴板同步无运行时权限，直接随开关启用
+    _clipboardOk = true;
+    bind.mainSetOption(
+        key: kOptionEnableClipboard, value: defaultOptionYes);
+    notifyListeners();
+  }
+
+  /// 总开关关闭时：同步关闭随开关集成的文件传输/音频/剪贴板
+  void disableSharedCapabilities() {
+    _fileOk = false;
+    _audioOk = false;
+    _clipboardOk = false;
+    bind.mainSetOption(key: kOptionEnableFileTransfer, value: 'N');
+    bind.mainSetOption(key: kOptionEnableAudio, value: 'N');
+    bind.mainSetOption(key: kOptionEnableClipboard, value: 'N');
+    notifyListeners();
   }
 
   /// Toggle the screen sharing service.
