@@ -135,10 +135,6 @@ object EnvCheckManager {
             if (pairingCapable) {
                 items += Item("miui_notif_style", STATUS_UNKNOWN)
             }
-            // MIUI/HyperOS 开发者选项里的「直接进入系统」：无锁屏密码时打开它，
-            // 远程唤醒后不用在锁屏页上滑即可直接进桌面。状态无 API 可读，
-            // 恒 unknown；属于可选项（设了锁屏密码时该开关灰显，无法开启）。
-            items += Item("miui_direct_boot", STATUS_UNKNOWN)
             // MIUI 私有省电策略与 AOSP Doze 白名单在用户侧是同一个操作
             // （应用信息→省电策略→无限制），合并为一个条目；状态复用
             // checkBattery：手动设置或 adb 豁免下发后都能变绿。
@@ -360,10 +356,6 @@ object EnvCheckManager {
             // 用户按文案路径进入（通知与控制中心 → 通知通知栏 → 通知栏样式）
             "miui_notif_style" ->
                 launch(appContext, Intent(Settings.ACTION_SETTINGS))
-
-            // MIUI「直接进入系统」在开发者选项页内，无独立 intent
-            "miui_direct_boot" ->
-                launch(appContext, Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
 
             "miui_battery_unrestricted" -> openMiuiBatterySettings(appContext)
 

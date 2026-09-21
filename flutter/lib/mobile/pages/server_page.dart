@@ -1280,13 +1280,6 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
           "配对码输入框，不设置将无法在通知栏输入配对码",
       true,
     ],
-    "miui_direct_boot": [
-      "直接进入系统（可选）",
-      "开发者选项里打开「直接进入系统」。需要先取消锁屏密码"
-          "（设了密码时该开关是灰的，无法开启）；打开后远程唤醒手机"
-          "可直接进桌面，不用先在锁屏页上滑",
-      false,
-    ],
     "miui_battery_unrestricted": [
       "省电策略：无限制（小米/红米必设）",
       "设置 → 应用设置 → 应用管理 → 本应用 → 省电策略，选「无限制」"
