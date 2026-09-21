@@ -726,6 +726,9 @@ class MainService : Service() {
                     } else {
                         MediaProjectionTokenStore.save(this, token)
                         _isReady = true
+                        // 用户完成了一次有效授权：历史短命失败计数全部清零，
+                        // 否则熔断后手动成功一次，下次单次抖动又会立即熔断
+                        shortLivedProjectionFailures = 0
                         endProjectionRequest()
                         // checkMediaPermission 内部会撤下恢复通知并同步 Dart 状态
                         checkMediaPermission()
@@ -903,6 +906,16 @@ class MainService : Service() {
      */
     private fun promptProjectionRecovery(fused: Boolean) {
         if (serviceDestroyed) {
+            return
+        }
+        // 系统录屏确认框已在屏幕上等待操作时（含 Android14+「整个屏幕/
+        // 指定应用」选择式弹窗用户阅读选择的几秒）：弹窗本身就是引导，
+        // 此时发"授权失效/开启失败"通知是自相矛盾的噪音（实测小米13
+        // 安卓15：用户还没选，通知栏先报"录屏权限开启失败"），重复
+        // startActivity 也会被在途闸门挡回。等用户选择完成后再处理：
+        // 成功会撤通知，取消会释放闸门，后续触发才会重新引导。
+        if (projectionRequestInFlight) {
+            Log.i(logTag, "录屏授权请求在途（系统确认框显示中），跳过恢复通知与重复弹窗")
             return
         }
         val intent = Intent(this, PermissionRequestTransparentActivity::class.java).apply {
