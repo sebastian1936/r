@@ -913,32 +913,16 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     );
   }
 
-  /// 一键开启：先跑环境清单检查（开发者模式/无线调试/通知/自启动/电池等），
-  /// 全部就绪直接启动通知配对；有未开项先弹清单引导；
-  /// 仅在权限被拒/通知开关关闭/启动失败时才弹配对兜底对话框
+  /// 一键开启：立即弹出环境清单窗（窗内转圈执行检查，点开关零等待）；
+  /// 检查全部就绪时窗口自动关闭并直接启动通知配对；有未开项则停留
+  /// 在清单引导页；仅在权限被拒/通知开关关闭/启动失败时才弹配对兜底对话框
   _startPairing() async {
-    var hasIssue = false;
-    try {
-      // gFFI.invokeMethod 声名为 Future<bool>，实际透传通道结果，需 dynamic 接。
-      // 返回 {brand, brand_label, items:[{key,status}...]}
-      final dynamic raw = await gFFI.invokeMethod("adb_env_check", null);
-      final items = raw is Map && raw["items"] is List
-          ? raw["items"] as List
-          : (raw is List ? raw : const []);
-      hasIssue = items
-          .any((e) => e is Map && e["status"] != "ok");
-    } catch (_) {
-      // 检查本身异常时不阻断配对主流程
-      hasIssue = false;
-    }
-    if (hasIssue && mounted) {
-      final go = await showDialog<bool>(
-        context: context,
-        barrierDismissible: false,
-        builder: (_) => const _EnvCheckDialog(),
-      );
-      if (go != true) return;
-    }
+    final go = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const _EnvCheckDialog(autoContinue: true),
+    );
+    if (go != true) return;
     await _launchPairing();
   }
 
@@ -1166,7 +1150,8 @@ class _EnvCheckDialog extends StatefulWidget {
       {Key? key,
       this.reviewMode = false,
       this.retryMode = false,
-      this.failMode})
+      this.failMode,
+      this.autoContinue = false})
       : super(key: key);
 
   /// true=已配对后的复查入口（底部只显示「完成」，不显示开始配对）
@@ -1179,6 +1164,10 @@ class _EnvCheckDialog extends StatefulWidget {
   /// wireless_debug_off / shell_no_service / shell_rejected /
   /// shell_put_denied / shell_verify_failed / shell_connect_error
   final String? failMode;
+
+  /// true=配对前入口：检查在窗内执行（避免点开关后无反馈等待数秒），
+  /// 首刷完成后若所有项目均已开启，窗口自动关闭并返回 true 直接配对
+  final bool autoContinue;
 
   @override
   State<_EnvCheckDialog> createState() => _EnvCheckDialogState();
@@ -1313,8 +1302,25 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
         }
         _loading = false;
       });
+      _maybeAutoContinue(items, allChecked: true);
     } catch (_) {
       if (mounted) setState(() => _loading = false);
+      // 检查通道异常不阻断配对（与旧版预检查 catch 后直接配对一致）
+      _maybeAutoContinue(const [], allChecked: false);
+    }
+  }
+
+  /// 配对前入口（autoContinue）：首刷/复查结束后，全部项目已开启就
+  /// 自动关窗继续配对，用户无感知等待；有任何未开/需确认项则停留展示。
+  void _maybeAutoContinue(List<dynamic> items, {required bool allChecked}) {
+    if (!widget.autoContinue || !mounted) return;
+    final ready = !allChecked ||
+        items.isNotEmpty &&
+            items.every((e) => e is Map && e["status"] == "ok");
+    if (ready) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) Navigator.of(context).pop(true);
+      });
     }
   }
 
@@ -1527,9 +1533,17 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
                       style: TextStyle(fontSize: 12, color: Colors.black54)),
                 ),
               if (_loading)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 24),
-                  child: Center(child: CircularProgressIndicator()),
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 24),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const CircularProgressIndicator(),
+                      const SizedBox(width: 16),
+                      Text(widget.autoContinue ? "正在检查手机设置…" : "加载中…",
+                          style: const TextStyle(fontSize: 14)),
+                    ],
+                  ),
                 )
               else
                 // 只渲染本机实际下发的检查项（按品牌不同而不同），
