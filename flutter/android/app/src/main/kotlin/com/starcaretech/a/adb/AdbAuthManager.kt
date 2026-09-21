@@ -393,6 +393,14 @@ object AdbAuthManager {
         if (mode == null) {
             return EnableResult(false, "not_paired")
         }
+        // 3.1) 快速预检：无线调试总开关明确关闭时 shell 必连不上。
+        //   直接秒回失败（否则要等 mDNS 扫满 15 秒，用户体感"一直打不开"），
+        //   UI 收到后立刻弹清单引导用户去开发者选项重新打开无线调试。
+        //   读状态异常（个别 ROM 键不可读）时不短路，走完整扫描兜底。
+        if (!isWirelessDebugEnabled(context)) {
+            Log.i(TAG, "enableInput：无线调试未开启，跳过 shell 重连")
+            return EnableResult(false, "wireless_debug_off")
+        }
         return try {
             val identity = AdbKeyStore.getOrCreate(context)
             // 名单在但没绑定 → force 强制重绑；不在名单 → 普通追加
@@ -472,6 +480,20 @@ object AdbAuthManager {
     private fun writeAccessibilityList(cr: android.content.ContentResolver, services: List<String>) {
         Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, services.joinToString(":"))
         Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+    }
+
+    /**
+     * 无线调试总开关是否开启（隐藏 Global 键 "adb_wifi"，Android 11+）。
+     * 仅用于快速失败短路；读状态异常时返回 true（不拦截，走完整流程兜底）。
+     */
+    private fun isWirelessDebugEnabled(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+        return try {
+            Settings.Global.getInt(context.contentResolver, "adb_wifi", 0) == 1
+        } catch (e: Exception) {
+            Log.w(TAG, "读取 adb_wifi 状态失败，放行走完整探测", e)
+            true
+        }
     }
 
     private fun discoverConnect(context: Context): AdbDiscovery.DiscoveredService? {

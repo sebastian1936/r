@@ -511,12 +511,18 @@ class MainActivity : FlutterActivity() {
                 }
                 "adb_env_check" -> {
                     // 配对/保活前置环境清单：只读检查，很快，直接主线程返回。
-                    // 返回品牌信息 + 按品牌/场景下发的检查项。
-                    // arguments 为 Map 时取 mode：mode=="review" 是纯保活
-                    // 复查（不含开发者模式/USB调试/无线调试/通知样式等配对项）
+                    // 返回品牌信息 + 按品牌/机型下发的检查项。
+                    // arguments 为 Map 且 mode=="review" 时是保活复查：
+                    // 配对通知渠道不检查；但配对三项（开发者模式/USB调试/
+                    // 无线调试/MIUI通知样式）在支持配对的机型上仍下发——
+                    // 已配对手机的无线调试也会被系统关掉，复查必须可见。
                     val envArgs = call.arguments
                     val reviewMode = envArgs is Map<*, *> &&
                         envArgs["mode"] == "review"
+                    // Android11+ 且非鸿蒙才具备无线调试配对能力
+                    val pairingCapable =
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                            !com.starcaretech.a.adb.HarmonyOsDetector.isHarmonyOs
                     if (isController) {
                         result.success(
                             mapOf(
@@ -529,7 +535,8 @@ class MainActivity : FlutterActivity() {
                         result.success(
                             EnvCheckManager.envInfo(
                                 context,
-                                includePairing = !reviewMode
+                                pairingCapable = pairingCapable,
+                                checkPairingChannel = !reviewMode
                             )
                         )
                     }

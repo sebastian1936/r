@@ -1233,8 +1233,10 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
   _refresh() async {
     setState(() => _loading = true);
     try {
-      // reviewMode=纯保活复查：通道不下发开发者模式/USB调试/无线调试/
-      // 通知栏样式等"只为配对"的项（Android10以下/鸿蒙也是这个模式）
+      // 是否显示开发者模式/USB调试/无线调试/通知样式由原生侧按机型决定
+      // （Android11+ 非鸿蒙：任何场景都显示——已配对后无线调试也可能被
+      // 系统关掉；Android10以下/鸿蒙：永不显示）。mode=review 只影响
+      // 配对专用通知渠道是否检查，不影响这些项目的显示。
       final dynamic raw = await gFFI.invokeMethod(
           "adb_env_check",
           widget.reviewMode ? const {"mode": "review"} : null);

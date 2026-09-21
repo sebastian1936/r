@@ -59,22 +59,35 @@ object EnvCheckManager {
         }
     }
 
-    /** 环境检查完整返回：品牌信息 + 检查项（清单按品牌/场景只下发相关项） */
-    fun envInfo(context: Context, includePairing: Boolean): Map<String, Any?> = mapOf(
+    /**
+     * 环境检查完整返回：品牌信息 + 检查项（清单按品牌/机型只下发相关项）
+     *
+     * @param pairingCapable 机型是否支持无线调试配对（Android11+ 且非鸿蒙）。
+     *   支持的机型——即使是已配对后的保活复查——也下发开发者模式/USB调试/
+     *   无线调试/MIUI通知样式：因为无线调试会在关 WiFi 等场景被系统关闭，
+     *   复查时必须让用户看到并重新打开；不支持的机型（Android10以下/鸿蒙）
+     *   任何场景都不下发这些项。
+     * @param checkPairingChannel 是否检查"配对专用通知渠道"。
+     *   仅配对前/开启前重试需要；保活复查只查通知总开关，避免已配对用户
+     *   被无关的渠道状态干扰。
+     */
+    fun envInfo(
+        context: Context,
+        pairingCapable: Boolean,
+        checkPairingChannel: Boolean
+    ): Map<String, Any?> = mapOf(
         "brand" to brandKey,
         "brand_label" to brandLabel,
-        "items" to checkAll(context, includePairing)
+        "items" to checkAll(context, pairingCapable, checkPairingChannel)
     )
 
-    /**
-     * @param includePairing true=配对前/开启前检查：下发全部项；
-     *   false=纯保活复查（已配对后、或 Android10 以下/鸿蒙无配对机型）：
-     *   只下发保活/功能项，不显示开发者模式、USB 调试、无线调试、
-     *   MIUI 通知栏样式这些"只为配对才需要"的项
-     */
-    fun checkAll(context: Context, includePairing: Boolean = true): List<Map<String, String>> {
+    fun checkAll(
+        context: Context,
+        pairingCapable: Boolean = true,
+        checkPairingChannel: Boolean = true
+    ): List<Map<String, String>> {
         val items = ArrayList<Item>()
-        if (includePairing) {
+        if (pairingCapable) {
             items += Item("developer_options", globalStatus(context, "development_settings_enabled"))
             items += Item("adb_master", globalStatus(context, Settings.Global.ADB_ENABLED))
             // ADB_WIFI_ENABLED（隐藏常量，值 "adb_wifi"，API30+）
@@ -89,7 +102,7 @@ object EnvCheckManager {
         }
         items += Item(
             "notification",
-            checkNotification(context, checkPairingChannel = includePairing)
+            checkNotification(context, checkPairingChannel = checkPairingChannel)
         )
         items += Item("overlay", checkOverlay(context))
         items += Item("battery_optimization", checkBattery(context))
@@ -107,8 +120,9 @@ object EnvCheckManager {
                 miuiBackgroundStartStatus(context)
             )
             // 配对码通过通知 RemoteInput 输入（与 Shizuku 同款），MIUI 默认
-            // 通知栏样式会吞掉通知上的输入控件。纯配对前提，保活复查不显示。
-            if (includePairing) {
+            // 通知栏样式会吞掉通知上的输入控件。仅配对机型下发（配对前提，
+            // 但配对后若被改回默认样式，重新配对/恢复时同样需要它）。
+            if (pairingCapable) {
                 items += Item("miui_notif_style", STATUS_UNKNOWN)
             }
         }
