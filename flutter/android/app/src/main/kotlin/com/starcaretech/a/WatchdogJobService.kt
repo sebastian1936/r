@@ -20,7 +20,9 @@ class WatchdogJobService : JobService() {
         Log.i(TAG, "onStartJob")
         thread {
             runCatching {
-                WatchdogScheduler.ensureServiceRunning(applicationContext, "job")
+                // 服务存活也补一次保活心跳（救被 MIUI 挂起的信令长连），
+                // 不存活才拉起
+                WatchdogScheduler.onPeriodicAnchor(applicationContext, "job")
             }
             // 周期性任务无需重试调度；即使本次启动被系统拒绝，下个周期还会来
             jobFinished(params, false)

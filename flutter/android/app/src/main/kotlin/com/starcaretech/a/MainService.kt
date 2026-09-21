@@ -59,7 +59,9 @@ const val DEFAULT_NOTIFY_ID = 1
 const val NOTIFY_ID_OFFSET = 100
 
 // 锁屏保活：AlarmManager 在 Doze 下周期唤醒（exact alarm 在 Doze 下最小约 9 分钟一次）
-const val KEEPALIVE_INTERVAL_MS = 15 * 60_000L
+// 实测小米9锁屏约1小时离线：MIUI 深度待机后 15 分钟唤醒常被推迟，取 Doze 允许的
+// 最高频率 9 分钟，缩短离线空窗（每次唤醒仅做一次 UDP 重新注册，耗电可忽略）
+const val KEEPALIVE_INTERVAL_MS = 9 * 60_000L
 const val KEEPALIVE_ALARM_REQUEST_CODE = 2002
 // 信令主动重连最小间隔，避免网络抖动时频繁重启 RendezvousMediator
 const val MIN_MEDIATOR_RESTART_INTERVAL_MS = 30_000L
@@ -257,6 +259,24 @@ class MainService : Service() {
         @JvmStatic
         fun markServiceAlive(alive: Boolean) {
             isServiceAlive = alive
+            if (!alive) aliveInstance = null
+        }
+
+        /** 当前进程内的服务实例（onCreate 置位，onDestroy 清空），供进程外
+         *  周期锚点（JobScheduler 看门狗）在不经过 onStartCommand、不受
+         *  Android12+ 后台启动 FGS 限制的情况下直接补一次保活心跳 */
+        @Volatile
+        private var aliveInstance: MainService? = null
+
+        /**
+         * 进程外锚点调用：服务存活则在实例上补保活心跳（续命 alarm +
+         * 重连信令），返回 true；不存活返回 false，调用方应转而拉起服务。
+         */
+        @JvmStatic
+        fun pokeKeepAliveIfAlive(): Boolean {
+            val s = aliveInstance ?: return false
+            s.handleKeepAliveTick("external-anchor")
+            return true
         }
 
         /**
@@ -498,6 +518,20 @@ class MainService : Service() {
         }
     }
 
+    /**
+     * 一次保活心跳（alarm 触发 / Job 看门狗锚点直接调用）：
+     * 补前台通知与保活锁、续下一次 alarm（alarm 链若曾因后台 FGS 启动被拒
+     * 而断链，只要任一锚点到达就能自愈）、主动重连信令服务器。
+     * 可在任意线程调用（Job 在工作线程）。
+     */
+    fun handleKeepAliveTick(from: String) {
+        if (serviceDestroyed) return
+        Log.i(logTag, "keepalive tick from=$from")
+        runCatching { createForegroundNotification() }
+        initKeepAlive()
+        restartRendezvousMediator()
+    }
+
     private fun releaseKeepAlive() {
         keepAliveHandler.removeCallbacks(networkRestartRunnable)
         runCatching { cpuWakeLock?.takeIf { it.isHeld }?.release() }
@@ -532,6 +566,7 @@ class MainService : Service() {
         super.onCreate()
         // 服务存活事实 + 用户期望在线：进程外看门狗（Job/无障碍/开机）据此拉起
         markServiceAlive(true)
+        aliveInstance = this
         WatchdogScheduler.setServiceWanted(applicationContext, true)
         Log.d(logTag,"MainService onCreate, sdk int:${Build.VERSION.SDK_INT} reuseVirtualDisplay:$reuseVirtualDisplay")
         FFI.init(this)
@@ -760,12 +795,8 @@ class MainService : Service() {
                 runCatching { createForegroundNotification() }
             }
             ACT_KEEPALIVE_TICK -> {
-                // Doze 周期唤醒（也可能在进程/服务被回收后由 alarm 重建投递）：
-                // 先确保 FGS 合规，再补保活锁、续下一次 alarm、主动重连信令
-                Log.i(logTag, "keepalive tick")
-                runCatching { createForegroundNotification() }
-                initKeepAlive()
-                restartRendezvousMediator()
+                // Doze 周期唤醒（也可能在进程/服务被回收后由 alarm 重建投递）
+                handleKeepAliveTick("alarm")
             }
         }
         return START_NOT_STICKY // don't use sticky (auto restart), the new service (from auto restart) will lose control

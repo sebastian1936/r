@@ -71,6 +71,22 @@ object WatchdogScheduler {
     }
 
     /**
+     * 进程外周期锚点（JobScheduler 看门狗，由 system_server 持有）：
+     *  - MainService 存活：不经过 onStartCommand、不受 Android12+ 后台启动
+     *    FGS 限制，直接在实例上补一次保活心跳（续命 alarm 链 + 重连信令）。
+     *    修锁屏约1小时离线：进程没死、只是信令长连被 MIUI 挂起的场景，
+     *    旧逻辑只看进程存活直接 return，连接永远没人救。
+     *  - MainService 不存活：走 [ensureServiceRunning] 拉起。
+     */
+    fun onPeriodicAnchor(context: Context, source: String) {
+        if (MainService.pokeKeepAliveIfAlive()) {
+            Log.i(TAG, "anchor：服务存活，已补保活心跳 from=$source")
+            return
+        }
+        ensureServiceRunning(context, source)
+    }
+
+    /**
      * 进程外锚点（Job/无障碍/开机）调用：用户期望在线且 MainService 未存活时拉起。
      * 走 ACT_WATCHDOG_RESTART：服务 onCreate 即完成信令初始化与保活，
      * 不主动恢复/弹录屏框（锁屏冷进程弹框会叠出多个确认页导致崩溃），
