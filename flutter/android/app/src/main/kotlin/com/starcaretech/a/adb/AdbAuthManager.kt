@@ -552,17 +552,27 @@ object AdbAuthManager {
     }
 
     /**
-     * 无线调试总开关是否开启（隐藏 Global 键 "adb_wifi"，Android 11+）。
-     * 仅用于快速失败短路；读状态异常时返回 true（不拦截，走完整流程兜底）。
+     * 无线调试是否真的在运行。必须在非主线程调用（本函数就在 enableInput
+     * 的后台线程里）。
+     *
+     * 不能只靠 Settings.Global "adb_wifi"：MIUI/HyperOS 部分版本对普通
+     * 应用屏蔽该键，读异常时代码若保守返回 true 就会放行到后面的长扫描，
+     * 用户干等几十秒还看不到"请打开无线调试"的引导。新逻辑：
+     *  - 键可读且值明确：按值返回（毫秒级）
+     *  - 键读不到（null/异常）：直接做 3.5s mDNS 实测——服务在广播才算开。
+     *    探测命中会记住端口，后续 shell 重连直接复用，总耗时反而更短
      */
     private fun isWirelessDebugEnabled(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
-        return try {
-            Settings.Global.getInt(context.contentResolver, "adb_wifi", 0) == 1
+        try {
+            val v = Settings.Global.getString(context.contentResolver, "adb_wifi")
+            if (v == "1") return true
+            if (v == "0") return false
+            Log.i(TAG, "adb_wifi 键不可读（v=$v），改用 mDNS 实测无线调试状态")
         } catch (e: Exception) {
-            Log.w(TAG, "读取 adb_wifi 状态失败，放行走完整探测", e)
-            true
+            Log.w(TAG, "读取 adb_wifi 失败，改用 mDNS 实测", e)
         }
+        return AdbDiscovery.quickProbeConnectPort(context) != null
     }
 
     private fun discoverConnect(context: Context, scanTimeoutMs: Long = 15_000L): AdbDiscovery.DiscoveredService? {

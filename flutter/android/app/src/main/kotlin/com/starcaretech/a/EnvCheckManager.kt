@@ -90,11 +90,15 @@ object EnvCheckManager {
         if (pairingCapable) {
             items += Item("developer_options", globalStatus(context, "development_settings_enabled"))
             items += Item("adb_master", globalStatus(context, Settings.Global.ADB_ENABLED))
-            // ADB_WIFI_ENABLED（隐藏常量，值 "adb_wifi"，API30+）
+            // ADB_WIFI_ENABLED（隐藏常量，值 "adb_wifi"，API30+）。
+            // MIUI/HyperOS 部分版本对普通应用屏蔽该键（读到 null/异常），
+            // 此时不靠猜：直接探测 adbd 有没有在广播无线调试服务，
+            // 探测到=确实开着，探测不到=没开，清单不再显示无意义的问号。
+            // 注意：含 mDNS 短窗（最多 3.5s），调用方必须在非主线程。
             items += Item(
                 "wireless_debug",
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    globalStatus(context, "adb_wifi")
+                    wirelessDebugStatus(context)
                 } else {
                     STATUS_UNKNOWN
                 }
@@ -149,6 +153,33 @@ object EnvCheckManager {
     } catch (e: Throwable) {
         Log.w(TAG, "read global setting fail: $name", e)
         STATUS_UNKNOWN
+    }
+
+    /**
+     * 无线调试真实状态。必须在非主线程调用（读不到设置键时会做最多
+     * 3.5 秒的 mDNS 服务探测）：
+     *  - 设置键可读且值明确：直接按值返回（最快）
+     *  - 键被 ROM 屏蔽（null/异常，MIUI 常见）：探测系统是否真的在
+     *    广播 _adb-tls-connect 服务——无线调试开着时该服务必然存在。
+     *    探测结果同时缓存端口给恢复流程复用。
+     */
+    private fun wirelessDebugStatus(context: Context): String {
+        try {
+            val v = Settings.Global.getString(context.contentResolver, "adb_wifi")
+            if (v == "1") return STATUS_OK
+            if (v == "0") return STATUS_OFF
+            // v == null：键不存在或被屏蔽，落到探测
+        } catch (e: Throwable) {
+            Log.w(TAG, "read adb_wifi fail, fallback to mDNS probe", e)
+        }
+        val port = try {
+            com.starcaretech.a.adb.AdbDiscovery.quickProbeConnectPort(context)
+        } catch (e: Throwable) {
+            Log.w(TAG, "probe wireless debug service fail", e)
+            null
+        }
+        Log.i(TAG, "adb_wifi 不可读，mDNS 探测结果：${port ?: "未发现服务"}")
+        return if (port != null) STATUS_OK else STATUS_OFF
     }
 
     private fun checkNotification(

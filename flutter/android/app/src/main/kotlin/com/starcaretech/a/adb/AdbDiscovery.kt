@@ -81,6 +81,29 @@ object AdbDiscovery {
         false
     }
 
+    /**
+     * 快速探测无线调试是否真的在运行（必须在非主线程调用）。
+     *
+     * 部分 ROM（实测 MIUI/HyperOS）对普通应用隐藏/保护 Settings.Global
+     * 的 "adb_wifi" 键，读不到开关值；但无线调试开着时 adbd 一定会注册
+     * _adb-tls-connect 服务，且端口在回环真实监听——直接探测服务比读
+     * 被屏蔽的设置值可靠。顺序：缓存端口 bind 探活（毫秒级）→ 短窗 mDNS
+     * → 固定 5555 兜底。命中同时记住端口，后续 shell 重连可直接复用。
+     *
+     * @return 可用端口；未发现返回 null
+     */
+    fun quickProbeConnectPort(context: Context, timeoutMs: Long = 3_500L): Int? {
+        lastConnectPort?.let { p ->
+            if (isLoopbackPortListening(p)) return p
+        }
+        val s = findFirst(context, TYPE_CONNECT, timeoutMs = timeoutMs)
+        if (s != null) {
+            rememberConnectPort(s.port)
+            return s.port
+        }
+        return if (isLoopbackPortListening(5555)) 5555 else null
+    }
+
     private fun toService(info: NsdServiceInfo): DiscoveredService? {
         val host = info.host?.hostAddress ?: return null
         if (!isLocalAddress(host)) {

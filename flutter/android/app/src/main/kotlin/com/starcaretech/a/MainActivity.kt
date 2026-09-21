@@ -510,8 +510,9 @@ class MainActivity : FlutterActivity() {
                     result.success(opened)
                 }
                 "adb_env_check" -> {
-                    // 配对/保活前置环境清单：只读检查，很快，直接主线程返回。
-                    // 返回品牌信息 + 按品牌/机型下发的检查项。
+                    // 配对/保活前置环境清单。无线调试状态在设置键被 ROM 屏蔽
+                    // 时会做最多 3.5s 的 mDNS 实测探测，必须放后台线程，
+                    // 否则主线程阻塞触发 ANR。
                     // arguments 为 Map 且 mode=="review" 时是保活复查：
                     // 配对通知渠道不检查；但配对三项（开发者模式/USB调试/
                     // 无线调试/MIUI通知样式）在支持配对的机型上仍下发——
@@ -532,13 +533,14 @@ class MainActivity : FlutterActivity() {
                             )
                         )
                     } else {
-                        result.success(
-                            EnvCheckManager.envInfo(
+                        thread {
+                            val payload = EnvCheckManager.envInfo(
                                 context,
                                 pairingCapable = pairingCapable,
                                 checkPairingChannel = !reviewMode
                             )
-                        )
+                            activity.runOnUiThread { result.success(payload) }
+                        }
                     }
                 }
                 "adb_open_env" -> {
