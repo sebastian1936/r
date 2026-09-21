@@ -78,6 +78,21 @@ object AdbAuthManager {
     )
 
     /**
+     * shell 直写无障碍的分阶段结果，便于 UI 给出针对性指引：
+     *  - no_service：mDNS 找不到 connect 服务（无线调试页面没停留/服务没起来）
+     *  - rejected：TLS 握手或 ADB 认证被拒（配对钥匙失效，需要重新配对）
+     *  - connect_error：其他连接错误（端口有响应但协议失败等）
+     *  - put_denied：shell 写 secure settings 被 ROM 拒绝（小米"USB 调试安全设置"）
+     *  - verify_failed：命令执行了但系统名单里没有我们的组件
+     *  - ok：成功
+     */
+    private class DirectResult(val ok: Boolean, val stage: String, val detail: String) {
+        companion object {
+            fun ok() = DirectResult(true, "ok", "")
+        }
+    }
+
+    /**
      * 完整闭环：配对 → 授权 → 验证。
      * @param pairingCode 6 位配对码
      * @param pairingHost 配对服务地址（一般 127.0.0.1）
@@ -137,13 +152,13 @@ object AdbAuthManager {
         //     （shell 无 GRANT_RUNTIME_PERMISSIONS），但 shell 自身仍持有
         //     WRITE_SECURE_SETTINGS，可以直接 settings put secure 开启无障碍——
         //     Shizuku 生态的免 root 工具普遍用这个通道。
-        val directOut = try {
+        val directResult = try {
             shellDirectEnableAccessibility(context, identity)
         } catch (e: Exception) {
             Log.w(TAG, "shell 直写兜底失败", e)
-            null
+            DirectResult(false, "connect_error", e.chainText())
         }
-        if (directOut == true) {
+        if (directResult.ok) {
             saveResult(context, guid, "shell_direct")
             Log.i(TAG, "ADB 授权完成（shell 直写兼容模式）guid=$guid")
             return GrantResult(guid, shellDirect = true)
@@ -161,8 +176,10 @@ object AdbAuthManager {
     }
 
     /**
-     * 最多 3 轮：每轮重新发现 connect 端口（端口会变/陈旧记录要跳过），
-     * 连接成功即返回命令输出；3 次都连不上才判定连接失败。
+     * 分两阶段重试，避免"找不到端口"和"认证被拒"白等几十秒：
+     *  - 发现阶段：最多 2 轮 mDNS（15s + 8s 短窗）
+     *  - 连接阶段：命中端口后最多连 3 次；认证/TLS 被拒立即返回（重试无意义）；
+     *    TCP 类错误短窗重新发现端口（adbd 重启会换端口）
      */
     private fun runShellWithRetry(
         context: Context,
@@ -171,17 +188,24 @@ object AdbAuthManager {
     ): ShellRun {
         val cmd = command()
         val attempts = mutableListOf<String>()
+
+        // ---- 发现阶段 ----
+        var target: AdbDiscovery.DiscoveredService? = null
+        for (attempt in 1..2) {
+            target = discoverConnect(context, if (attempt == 1) 15_000L else 8_000L)
+            if (target != null) break
+            Log.w(TAG, "第 $attempt/2 次未发现有效的 connect 服务")
+            attempts.add(
+                "第 $attempt 次：mDNS 未发现有效的 connect 服务（无记录或端口未监听）。\n" +
+                "请打开「无线调试」页面停留几秒后重试"
+            )
+            if (attempt < 2) Thread.sleep(1500)
+        }
+        if (target == null) return ShellRun(connected = false, attempts = attempts)
+
+        // ---- 连接阶段 ----
         for (attempt in 1..3) {
-            val connect = discoverConnect(context)
-            if (connect == null) {
-                Log.w(TAG, "第 $attempt/3 次未发现有效的 connect 服务")
-                attempts.add(
-                    "第 $attempt 次：mDNS 未发现有效的 connect 服务（无记录或端口未监听）。\n" +
-                    "请确认系统「无线调试」开关仍处于开启状态，然后重试"
-                )
-                if (attempt < 3) Thread.sleep(2000)
-                continue
-            }
+            val connect = target!!
             Log.i(TAG, "第 $attempt/3 次连接 adbd ${connect.host}:${connect.port}（来源:${connect.serviceName}）")
             try {
                 val output = AdbConnection.shell(
@@ -189,9 +213,21 @@ object AdbAuthManager {
                 )
                 return ShellRun(connected = true, output = output)
             } catch (e: Exception) {
+                val t = e.chainText()
                 Log.w(TAG, "连接 adbd 失败 尝试 $attempt/3 ${connect.host}:${connect.port}", e)
-                attempts.add("第 $attempt 次（${connect.host}:${connect.port}，来源:${connect.serviceName}）:\n${e.chainText()}")
-                if (attempt < 3) Thread.sleep(2000)
+                attempts.add("第 $attempt 次（${connect.host}:${connect.port}，来源:${connect.serviceName}）:\n$t")
+                // 认证类失败：重试同一个端口结果不会变，立即返回让 UI 引导重新配对
+                if (t.contains("TLS") ||
+                    t.contains("配对可能未被系统接受") ||
+                    t.contains("阶段3-连接被拒绝")
+                ) {
+                    return ShellRun(connected = false, attempts = attempts)
+                }
+                if (attempt < 3) {
+                    Thread.sleep(1500)
+                    // 端口可能已变，短窗重新定位
+                    target = discoverConnect(context, 5_000L)
+                }
             }
         }
         return ShellRun(connected = false, attempts = attempts)
@@ -199,7 +235,7 @@ object AdbAuthManager {
 
     /**
      * shell 直写开启无障碍。在 adb shell 内用一条复合命令完成"读-改-写-校验"，
-     * 保留名单里其他应用的服务。返回 true 表示系统名单已包含我们的组件。
+     * 保留名单里其他应用的服务。返回 [DirectResult]，失败时带具体阶段与原始信息。
      * @param force true=名单中已有组件时也先移除再加回，强制系统重新绑定
      *              （开关显示开启但服务实际未运行的国产 ROM 场景）
      */
@@ -207,7 +243,7 @@ object AdbAuthManager {
         context: Context,
         identity: AdbKeyStore.Identity,
         force: Boolean = false
-    ): Boolean {
+    ): DirectResult {
         val comp = accessibilityComponent(context)
         // 组件名只含 [a-z0-9./]，直接内联安全；其余全部用 sh 变量，避免转义问题
         val forceFlag = if (force) "1" else "0"
@@ -241,24 +277,44 @@ object AdbAuthManager {
         val run = runShellWithRetry(context, identity) { script }
         if (!run.connected) {
             Log.w(TAG, "shell 直写时连接 adbd 失败：\n${run.attempts.joinToString("\n")}")
-            return false
+            val joined = run.attempts.joinToString("\n")
+            val stage = when {
+                // 三轮都没发现 connect 服务（无任何实际连接尝试）：
+                // 无线调试开关可能刚打开服务未就绪，或需要停留在无线调试页
+                joined.contains("未发现有效的 connect 服务") &&
+                    !joined.contains("连接 adbd 失败") -> "no_service"
+                // TLS 握手失败 / A_AUTH 被拒 / 配对未被接受 → 配对钥匙失效
+                joined.contains("TLS") ||
+                    joined.contains("配对可能未被系统接受") ||
+                    joined.contains("阶段3-连接被拒绝") -> "rejected"
+                else -> "connect_error"
+            }
+            return DirectResult(false, stage, joined.take(800))
         }
         val out = run.output
         if (out.contains("SecurityException") || out.contains("Permission denial")) {
             Log.w(TAG, "shell 直写被系统拒绝：$out")
-            return false
+            return DirectResult(false, "put_denied", out.take(800))
         }
         val afterMarker = out.substringAfter(MARKER, "")
         val listed = afterMarker.split('\n', ':', ' ').any { it.trim() == comp }
-        if (!listed) return false
+        if (!listed) {
+            return DirectResult(
+                false, "verify_failed",
+                "命令已执行但系统名单未包含本服务，返回：${out.take(400)}"
+            )
+        }
 
         // 系统设置落库后再用 App 侧视角确认一次（最多等 3 秒）
-        if (isAccessibilityListed(context)) return true
+        if (isAccessibilityListed(context)) return DirectResult.ok()
         for (i in 1..2) {
             Thread.sleep(1500)
-            if (isAccessibilityListed(context)) return true
+            if (isAccessibilityListed(context)) return DirectResult.ok()
         }
-        return false
+        return DirectResult(
+            false, "verify_failed",
+            "shell 侧名单已写入，但 App 侧连续 3 秒读不到（ROM 设置隔离/延迟）"
+        )
     }
 
     private fun saveResult(context: Context, guid: String, mode: String) {
@@ -404,19 +460,32 @@ object AdbAuthManager {
         return try {
             val identity = AdbKeyStore.getOrCreate(context)
             // 名单在但没绑定 → force 强制重绑；不在名单 → 普通追加
-            val ok = shellDirectEnableAccessibility(context, identity, force = listed)
-            if (ok) EnableResult(true, "shell") else EnableResult(false, "shell_failed")
+            val r = shellDirectEnableAccessibility(context, identity, force = listed)
+            if (r.ok) {
+                EnableResult(true, "shell")
+            } else {
+                // shell_no_service：开关开着但服务没广播（引导进无线调试页停留）
+                // shell_rejected：配对失效（引导重新配对）
+                // shell_put_denied：ROM 安全开关（引导 USB 调试安全设置）
+                // shell_verify_failed / shell_connect_error：重试+技术详情
+                EnableResult(false, "shell_${r.stage}", r.detail)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "enableInput shell 路径异常", e)
-            EnableResult(false, "shell_failed")
+            EnableResult(false, "shell_connect_error", e.chainText())
         }
     }
 
     /**
      * @param ok 是否成功把 InputService 写入系统名单（系统绑定可能滞后 1~2 秒）
-     * @param mode already/local/shell；失败时为原因码 not_paired/local_failed/shell_failed
+     * @param mode 成功：already/local/shell；
+     *   失败原因码：not_paired / wireless_debug_off / local_failed /
+     *   shell_no_service（无线调试开着但没发现连接服务）/
+     *   shell_rejected（配对失效需重新配对）/ shell_put_denied（ROM 安全开关拦截）/
+     *   shell_verify_failed / shell_connect_error
+     * @param detail 技术详情（原始错误片段，仅排查用）
      */
-    data class EnableResult(val ok: Boolean, val mode: String)
+    data class EnableResult(val ok: Boolean, val mode: String, val detail: String = "")
 
     /**
      * 无障碍自愈：把本应用的 InputService 写回系统无障碍开关（需要已获得 WRITE_SECURE_SETTINGS）。
@@ -496,16 +565,23 @@ object AdbAuthManager {
         }
     }
 
-    private fun discoverConnect(context: Context): AdbDiscovery.DiscoveredService? {
-        // 只从 mDNS 获取端口，host 强制 127.0.0.1（本机连本机回环最可靠）。
-        // findFirst 已做"本机网卡地址 + 127.0.0.1 端口存活"双重校验，自动跳过陈旧记录；
-        // 分多轮扫描，覆盖配对完成后 connect 服务刚注册的时间窗。
-        val deadline = System.currentTimeMillis() + 15_000
-        while (System.currentTimeMillis() < deadline) {
-            val s = AdbDiscovery.findFirst(context, AdbDiscovery.TYPE_CONNECT, timeoutMs = 5_000)
-            if (s != null) {
-                return AdbDiscovery.DiscoveredService(s.serviceName, "127.0.0.1", s.port, s.attributes)
+    private fun discoverConnect(context: Context, scanTimeoutMs: Long = 15_000L): AdbDiscovery.DiscoveredService? {
+        // 0) 先探活上次成功用过的端口：部分 ROM 重开无线调试会复用同一端口，
+        //    命中可跳过 NsdManager 冷启动的数秒延迟（不命中代价仅一次 bind）
+        AdbDiscovery.lastConnectPort?.let { p ->
+            if (AdbDiscovery.isLoopbackPortListening(p)) {
+                Log.i(TAG, "discoverConnect：命中缓存端口 :$p，直接使用")
+                return AdbDiscovery.DiscoveredService("cached", "127.0.0.1", p, emptyMap())
             }
+        }
+        // 只从 mDNS 获取端口，host 强制 127.0.0.1（本机连本机回环最可靠）。
+        // findFirst 已做"本机网卡地址 + 127.0.0.1 端口存活"双重校验，自动跳过陈旧记录。
+        // 单个连续发现窗口（不反复 stop/restart discovery）：
+        // NsdManager 冷启动本身就要几秒，连续窗口比"多次短窗重启扫描"命中率高。
+        val s = AdbDiscovery.findFirst(context, AdbDiscovery.TYPE_CONNECT, timeoutMs = scanTimeoutMs)
+        if (s != null) {
+            AdbDiscovery.rememberConnectPort(s.port)
+            return AdbDiscovery.DiscoveredService(s.serviceName, "127.0.0.1", s.port, s.attributes)
         }
         // 兜底：部分 ROM（或旧版无线调试）监听固定 5555，同样要求端口真的在监听
         return if (AdbDiscovery.isLoopbackPortListening(5555))

@@ -33,6 +33,21 @@ object AdbDiscovery {
     const val TYPE_PAIRING = "_adb-tls-pairing._tcp"
     const val TYPE_CONNECT = "_adb-tls-connect._tcp"
 
+    /**
+     * 最近一次成功发现的 connect 端口（进程内缓存）。
+     * adbd 重开无线调试后端口通常会变，但部分 ROM 会复用；
+     * 重连时先探活这个端口（一次 bind 探测，毫秒级），命中可直接跳过
+     * 冷启动 NsdManager 数秒的发现延迟。仅缓存"当时确实在监听"的端口，
+     * 使用前一律重新 bind 探活，陈旧记录不会被使用。
+     */
+    @Volatile
+    var lastConnectPort: Int? = null
+        private set
+
+    fun rememberConnectPort(port: Int) {
+        if (port > 0) lastConnectPort = port
+    }
+
     class DiscoveredService(
         val serviceName: String,
         val host: String,

@@ -704,27 +704,72 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           return;
         }
 
-        // 3) 已配对：先恢复无障碍。无线调试没开时 shell 重连会失败，
-        //    弹"开启前检查"让用户打开无线调试后重试（重试仍是重连，
-        //    不是重新配对）。恢复成功前不申请任何权限。
-        showToast("正在恢复控制权限…");
+        // 3) 已配对：先恢复无障碍。恢复过程最长约 30 秒（找调试服务+连接），
+        //    显示加载框；失败时按原生返回的原因码给针对性指引——配对失效
+        //    直接引导重新配对，其他情况引导处理无线调试后重试。恢复成功前
+        //    不申请任何权限。
         var inputOk = false;
+        String? failMode;
         while (mounted) {
+          // 3.1) 显示不可取消的恢复中加载框（替代一闪而过的 toast）
+          BuildContext? loadingCtx;
+          showDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (ctx) {
+              loadingCtx = ctx;
+              return WillPopScope(
+                onWillPop: () async => false,
+                child: const AlertDialog(
+                  content: Row(children: [
+                    CircularProgressIndicator(),
+                    SizedBox(width: 16),
+                    Expanded(
+                      child: Text("正在恢复控制权限，请稍候…",
+                          style: TextStyle(fontSize: 14)),
+                    ),
+                  ]),
+                ),
+              );
+            },
+          );
           try {
             final dynamic r =
                 await gFFI.invokeMethod("adb_enable_input", null);
             inputOk = r is Map && r["ok"] == true;
+            failMode = (r is Map && r["mode"] is String)
+                ? r["mode"] as String
+                : null;
           } catch (_) {
             inputOk = false;
           }
-          if (inputOk) break;
-          final again = await showDialog<bool>(
+          // 无论页面是否还在，都关掉加载框（其 context 独立于 State.context）
+          if (loadingCtx != null && loadingCtx!.mounted) {
+            Navigator.of(loadingCtx!).pop();
+          }
+          if (inputOk || !mounted) break;
+
+          // 本地直写失败/记录异常：直接走配对流程兜底
+          if (failMode == "not_paired" || failMode == "local_failed") {
+            _controlBusy = false;
+            _startPairing();
+            return;
+          }
+
+          final action = await showDialog<String>(
             context: context,
             barrierDismissible: false,
-            builder: (_) => const _EnvCheckDialog(retryMode: true),
+            builder: (_) =>
+                _EnvCheckDialog(retryMode: true, failMode: failMode),
           );
-          if (again != true) {
-            // 用户放弃：开关保持关闭
+          if (action == "repair") {
+            // 配对失效：释放忙碌锁后进配对流程（独立对话框）
+            _controlBusy = false;
+            _startPairing();
+            return;
+          }
+          if (action != "retry") {
+            // 用户取消：开关保持关闭
             return;
           }
         }
@@ -1118,14 +1163,22 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
 /// 自启动/电池/悬浮窗为保活建议项；MIUI 无法读取的状态显示「需确认」。
 class _EnvCheckDialog extends StatefulWidget {
   const _EnvCheckDialog(
-      {Key? key, this.reviewMode = false, this.retryMode = false})
+      {Key? key,
+      this.reviewMode = false,
+      this.retryMode = false,
+      this.failMode})
       : super(key: key);
 
   /// true=已配对后的复查入口（底部只显示「完成」，不显示开始配对）
   final bool reviewMode;
 
-  /// true=已配对但无线调试没开、恢复失败后的引导（底部：取消 / 我已打开重试）
+  /// true=已配对但恢复失败后的引导（底部：取消 / 我已打开重试）
   final bool retryMode;
+
+  /// retryMode 时原生返回的具体失败原因码（adb_enable_input 的 mode）：
+  /// wireless_debug_off / shell_no_service / shell_rejected /
+  /// shell_put_denied / shell_verify_failed / shell_connect_error
+  final String? failMode;
 
   @override
   State<_EnvCheckDialog> createState() => _EnvCheckDialogState();
@@ -1186,6 +1239,13 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
           "（部分版本入口在该页右上角齿轮里）。默认样式会吞掉通知上的"
           "配对码输入框，不设置将无法在通知栏输入配对码",
       true,
+    ],
+    "miui_direct_boot": [
+      "直接进入系统（可选）",
+      "开发者选项里打开「直接进入系统」。需要先取消锁屏密码"
+          "（设了密码时该开关是灰的，无法开启）；打开后远程唤醒手机"
+          "可直接进桌面，不用先在锁屏页上滑",
+      false,
     ],
     "samsung_sleep_apps": [
       "防止应用被休眠（三星必看）",
@@ -1280,6 +1340,38 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
       showToast("未找到对应设置页，请按文字指引手动开启");
     }
   }
+
+  /// 恢复失败时按原生分级原因给对应操作提示（只讲操作，不讲技术原理）
+  String get _retryHint {
+    switch (widget.failMode) {
+      case "shell_rejected":
+        return "之前的配对已失效（系统更新、恢复出厂，或在无线调试里撤销过"
+            "授权都会导致）。不需要折腾开关，点下方「重新配对」，按提示再"
+            "配对一次即可（约 30 秒）";
+      case "shell_no_service":
+        return "「无线调试」开关虽然开着，但调试服务还没完全启动。请进 "
+            "开发者选项 →「无线调试」页面停留 5～10 秒（不要马上退出），"
+            "再点重试；仍失败就把无线调试关掉重新打开，再停留几秒后重试";
+      case "shell_put_denied":
+        return "小米/红米手机还需要打开开发者选项里的「USB 调试（安全设置）」"
+            "（允许通过 USB 调试修改权限或模拟点击；部分版本要求登录小米账号"
+            "并插入 SIM 卡后才能打开）。打开后点重试";
+      case "shell_verify_failed":
+        return "系统没有确认权限生效。请把开发者选项里的「无线调试」关掉再"
+            "重新打开，等几秒后点重试；仍失败请重启一次手机再试";
+      case "wireless_debug_off":
+        return "没连上：开发者选项里「无线调试」是关着的（关过 WiFi 或重启"
+            "手机后系统会自动关掉它）。重新打开后点重试，配对只做第一次，"
+            "这里不需要重新配对";
+      default:
+        return "没连上：请确认开发者选项里「无线调试」是开着的（配对只做"
+            "第一次，这里不需要重新配对）。如果是刚打开的开关，请在"
+            "「无线调试」页面停留几秒再点重试";
+    }
+  }
+
+  /// shell_rejected 时底部主按钮走重新配对，其余原因走重试
+  bool get _isRepairNeeded => widget.failMode == "shell_rejected";
 
   String _statusOf(String key) {
     final it = _items.firstWhere(
@@ -1416,13 +1508,15 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
                   margin: const EdgeInsets.only(bottom: 8),
                   padding: const EdgeInsets.all(8),
                   decoration: BoxDecoration(
-                    color: Colors.orangeAccent.withOpacity(0.1),
+                    color: (_isRepairNeeded
+                            ? Colors.redAccent
+                            : Colors.orangeAccent)
+                        .withOpacity(0.1),
                     borderRadius: BorderRadius.circular(6),
                   ),
-                  child: const Text(
-                    "没连上：请确认开发者选项里「无线调试」是开着的"
-                    "（配对只做第一次，这里不需要重新配对）。打开后点下方重试。",
-                    style: TextStyle(fontSize: 12, height: 1.5),
+                  child: Text(
+                    _retryHint,
+                    style: const TextStyle(fontSize: 12, height: 1.5),
                   ),
                 ),
               if (widget.reviewMode)
@@ -1470,13 +1564,19 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
         ),
         if (widget.retryMode) ...[
           TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
+            onPressed: () => Navigator.of(context).pop("cancel"),
             child: const Text("取消"),
           ),
-          ElevatedButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text("我已打开，重试"),
-          ),
+          if (_isRepairNeeded)
+            ElevatedButton(
+              onPressed: () => Navigator.of(context).pop("repair"),
+              child: const Text("重新配对"),
+            )
+          else
+            ElevatedButton(
+              onPressed: () => Navigator.of(context).pop("retry"),
+              child: const Text("我已打开，重试"),
+            ),
         ] else if (widget.reviewMode)
           ElevatedButton(
             onPressed: () => Navigator.of(context).pop(),

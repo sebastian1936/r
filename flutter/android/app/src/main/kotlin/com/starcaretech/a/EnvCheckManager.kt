@@ -125,6 +125,10 @@ object EnvCheckManager {
             if (pairingCapable) {
                 items += Item("miui_notif_style", STATUS_UNKNOWN)
             }
+            // MIUI/HyperOS 开发者选项里的「直接进入系统」：无锁屏密码时打开它，
+            // 远程唤醒后不用在锁屏页上滑即可直接进桌面。状态无 API 可读，
+            // 恒 unknown；属于可选项（设了锁屏密码时该开关灰显，无法开启）。
+            items += Item("miui_direct_boot", STATUS_UNKNOWN)
         }
         if (isSamsung) {
             // One UI 无线调试/通知输入/无障碍均为标准实现，无配对相关特殊项；
@@ -310,6 +314,10 @@ object EnvCheckManager {
             // 用户按文案路径进入（通知与控制中心 → 通知通知栏 → 通知栏样式）
             "miui_notif_style" ->
                 launch(appContext, Intent(Settings.ACTION_SETTINGS))
+
+            // MIUI「直接进入系统」在开发者选项页内，无独立 intent
+            "miui_direct_boot" ->
+                launch(appContext, Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
 
             // One UI「后台使用限制/休眠应用」页无公开 intent，
             // 打开电池优化设置页（含本应用电池"不受限制"开关），再按文案操作

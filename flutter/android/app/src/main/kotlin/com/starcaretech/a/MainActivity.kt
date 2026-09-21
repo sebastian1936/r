@@ -577,7 +577,13 @@ class MainActivity : FlutterActivity() {
                             pushInputState()
                             android.os.Handler(android.os.Looper.getMainLooper())
                                 .postDelayed({ pushInputState() }, 2500)
-                            result.success(mapOf("ok" to r.ok, "mode" to r.mode))
+                            result.success(
+                                mapOf(
+                                    "ok" to r.ok,
+                                    "mode" to r.mode,
+                                    "detail" to r.detail
+                                )
+                            )
                         }
                     }
                 }
