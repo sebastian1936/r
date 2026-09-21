@@ -321,7 +321,11 @@ object EnvCheckManager {
     fun openSetting(context: Context, key: String): Boolean {
         val appContext = context.applicationContext
         return when (key) {
-            "developer_options", "adb_master", "wireless_debug" ->
+            // 无线调试：优先直达系统「无线调试」子页（少点一层），
+            // 组件不存在/未导出（部分 ROM）时回退开发者选项主页
+            "wireless_debug" -> openWirelessDebugSettings(appContext)
+
+            "developer_options", "adb_master" ->
                 launch(appContext, Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
 
             "notification" -> openNotificationSettings(appContext)
@@ -356,6 +360,34 @@ object EnvCheckManager {
 
             else -> openAppDetails(appContext)
         }
+    }
+
+    /**
+     * 直达「无线调试」子页面。系统未暴露公开 Intent action，只能按
+     * AOSP/各 ROM 常见组件名尝试；组件未导出/不存在会抛异常，被
+     * [launch] 兜住返回 false，最终回退开发者选项主页，行为不比现在差。
+     */
+    private fun openWirelessDebugSettings(context: Context): Boolean {
+        val candidates = mutableListOf<Intent>()
+        // AOSP 设置里无线调试页的内部 Activity（Pixel/原生/部分 MIUI 保留同名组件）
+        runCatching {
+            candidates += Intent().setComponent(
+                ComponentName(
+                    "com.android.settings",
+                    "com.android.settings.Settings\$WifiDebugActivity"
+                )
+            )
+        }
+        // AOSP activity-alias 形式（无 Settings$ 前缀）
+        runCatching {
+            candidates += Intent().setComponent(
+                ComponentName("com.android.settings", "com.android.settings.WifiDebugActivity")
+            )
+        }
+        // 部分 ROM 暴露的 action 别名
+        candidates += Intent("android.settings.WIFI_DEBUGGING_SETTINGS")
+        candidates.forEach { if (launch(context, it)) return true }
+        return launch(context, Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
     }
 
     private fun openNotificationSettings(context: Context): Boolean {

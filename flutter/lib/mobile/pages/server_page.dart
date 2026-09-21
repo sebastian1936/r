@@ -1019,6 +1019,10 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
       _controlPending = null;
     }
     final switchOn = _controlPending ?? mediaOk;
+    // 锁屏后部分 ROM（MIUI）会销毁 Flutter 界面引擎而服务进程仍在，
+    // 解锁回来内存勾选状态已重置但服务实际运行中——开关开着本身即代表
+    // 已完成防诈骗确认，用派生值兜底，避免"开关开着却显示未勾选"
+    final scamAck = _scamAcknowledged || switchOn;
     final pairedBefore = _lastSnap["paired"] == true;
     final String statusText = switchOn
         ? "正在接受远程控制，关闭后他人无法查看和操作本机"
@@ -1079,8 +1083,8 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
               onChanged: _controlBusy
                   ? null
                   : (v) {
-                      if (v == true && !_scamAcknowledged) {
-                        showToast("请先确认下方的警告");
+                      if (v == true && !scamAck) {
+                        showToast("请先确认上方的警告");
                         return;
                       }
                       _toggleControl(v == true);
@@ -1140,7 +1144,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
                 width: 22,
                 height: 22,
                 child: Checkbox(
-                  value: _scamAcknowledged,
+                  value: scamAck,
                   onChanged: switchOn
                       ? null
                       : (v) => setState(
@@ -1166,7 +1170,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
                     padding: const EdgeInsets.symmetric(horizontal: 12),
                     minimumSize: const Size(0, 34),
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap),
-                onPressed: _scamAcknowledged
+                onPressed: scamAck
                     ? _openEnvReview
                     : () => showToast("请先确认上方的警告"),
                 label: const Text("权限检查（自启动/通知/后台/电池）",
