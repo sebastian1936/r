@@ -923,6 +923,11 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
       builder: (_) => const _EnvCheckDialog(autoContinue: true),
     );
     if (go != true) return;
+    // 先直达系统「无线调试」页（用户接着点「使用配对码配对设备」），
+    // 再发配对通知——用户在设置页直接下拉通知栏输入配对码即可
+    try {
+      await gFFI.invokeMethod("adb_open_env", "wireless_debug");
+    } catch (_) {}
     await _launchPairing();
   }
 

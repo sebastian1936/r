@@ -109,7 +109,13 @@ object EnvCheckManager {
             checkNotification(context, checkPairingChannel = checkPairingChannel)
         )
         items += Item("overlay", checkOverlay(context))
-        items += Item("battery_optimization", checkBattery(context))
+        // 电池策略：小米只下发 MIUI 专属项（见下方 isMiui 块）——
+        // MIUI「应用省电策略→无限制」这一个操作同时决定 AOSP Doze 白名单
+        // 和 MIUI 私有省电限制，下发两个条目会让用户重复操作。
+        // 状态共用 checkBattery：手动选无限制或 adb 白名单豁免后均变绿
+        if (!isMiui) {
+            items += Item("battery_optimization", checkBattery(context))
+        }
         // 以下两项是功能可选项：不授权不影响远程看屏与操作，
         // 只影响对应能力（传文件 / 传被控端播放的声音）
         items += Item("file_storage", checkFileStorage(context))
@@ -133,10 +139,11 @@ object EnvCheckManager {
             // 远程唤醒后不用在锁屏页上滑即可直接进桌面。状态无 API 可读，
             // 恒 unknown；属于可选项（设了锁屏密码时该开关灰显，无法开启）。
             items += Item("miui_direct_boot", STATUS_UNKNOWN)
-            // MIUI 私有的应用省电策略（旧称神隐模式）独立于安卓 Doze，
-            // adb 也无法改写其配置：必须用户手动选「无限制」，否则锁屏后
-            // 系统会断网休眠，信令必断。恒 unknown，作为必看项展示。
-            items += Item("miui_battery_unrestricted", STATUS_UNKNOWN)
+            // MIUI 私有省电策略与 AOSP Doze 白名单在用户侧是同一个操作
+            // （应用信息→省电策略→无限制），合并为一个条目；状态复用
+            // checkBattery：手动设置或 adb 豁免下发后都能变绿。
+            // MIUI 配置 adb 写不了，首次配对前必须由用户手动设置一次。
+            items += Item("miui_battery_unrestricted", checkBattery(context))
         }
         if (isSamsung) {
             // One UI 无线调试/通知输入/无障碍均为标准实现，无配对相关特殊项；
