@@ -247,6 +247,30 @@ object AdbAuthManager {
         val comp = accessibilityComponent(context)
         // 组件名只含 [a-z0-9./]，直接内联安全；其余全部用 sh 变量，避免转义问题
         val forceFlag = if (force) "1" else "0"
+        // 保活豁免：利用 adb shell(uid 2000) 一次性把本应用放进系统电池/网络
+        // 白名单。深度 Doze 下应用层 alarm/wakelock/WiFi 会被系统统一挂起，
+        // 这是锁屏1小时左右必离线的根因，应用内任何手段都绕不过；而下列命令
+        // 等价于用户在系统设置里逐层手动配置，且更彻底，重启保留。
+        // 命令本身幂等，失败输出被吞掉且不影响无障碍名单写入这一主流程。
+        val pkg = context.packageName
+        val keepAliveExemptions = buildString {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                // Doze 白名单：白名单应用在 Doze 下网络不被切断、alarm/wakelock
+                // 不被推迟（等价"电池优化→不允许优化"，手动设置后白名单持久化）
+                appendLine("dumpsys deviceidle whitelist +$pkg 2>/dev/null || cmd deviceidle whitelist +$pkg 2>/dev/null")
+                // 放开后台运行 appops（部分 ROM 即使在 Doze 白名单也单独卡这个）
+                appendLine("cmd appops set $pkg RUN_IN_BACKGROUND allow 2>/dev/null")
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                appendLine("cmd appops set $pkg RUN_ANY_IN_BACKGROUND allow 2>/dev/null")
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                // standby 桶锁 active：最高优先级，系统不做任何作业/网络延迟
+                appendLine("am set-standby-bucket $pkg active 2>/dev/null")
+            }
+            // 休眠时保持 WLAN 连接（MIUI 默认可能省电断 WiFi，WifiLock 被忽略时兜底）
+            appendLine("settings put global wifi_sleep_policy 2 2>/dev/null")
+        }.trimIndent()
         val script = """
             old=${'$'}(settings get secure enabled_accessibility_services)
             target='$comp'
@@ -270,6 +294,7 @@ object AdbAuthManager {
             fi
             settings put secure accessibility_enabled 1
             settings put secure enabled_accessibility_services "${'$'}nval"
+            $keepAliveExemptions
             echo $MARKER
             settings get secure enabled_accessibility_services
         """.trimIndent()

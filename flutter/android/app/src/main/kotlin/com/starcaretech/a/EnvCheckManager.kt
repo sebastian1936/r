@@ -133,6 +133,10 @@ object EnvCheckManager {
             // 远程唤醒后不用在锁屏页上滑即可直接进桌面。状态无 API 可读，
             // 恒 unknown；属于可选项（设了锁屏密码时该开关灰显，无法开启）。
             items += Item("miui_direct_boot", STATUS_UNKNOWN)
+            // MIUI 私有的应用省电策略（旧称神隐模式）独立于安卓 Doze，
+            // adb 也无法改写其配置：必须用户手动选「无限制」，否则锁屏后
+            // 系统会断网休眠，信令必断。恒 unknown，作为必看项展示。
+            items += Item("miui_battery_unrestricted", STATUS_UNKNOWN)
         }
         if (isSamsung) {
             // One UI 无线调试/通知输入/无障碍均为标准实现，无配对相关特殊项；
@@ -354,6 +358,8 @@ object EnvCheckManager {
             "miui_direct_boot" ->
                 launch(appContext, Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
 
+            "miui_battery_unrestricted" -> openMiuiBatterySettings(appContext)
+
             // One UI「后台使用限制/休眠应用」页无公开 intent，
             // 打开电池优化设置页（含本应用电池"不受限制"开关），再按文案操作
             "samsung_sleep_apps" -> openBatterySettings(appContext)
@@ -426,6 +432,38 @@ object EnvCheckManager {
         )
         candidates.forEach { if (launch(context, it)) return true }
         return openAppDetails(context)
+    }
+
+    /**
+     * MIUI/HyperOS 单应用「省电策略」页（无限制/省电推荐/无限制后台）。
+     * 该页是 powerkeeper 私有 Activity，不同 MIUI 代际组件名不同，逐个尝试，
+     * 全部失败时回退系统"不优化电池"弹窗，再回退应用详情页
+     * （详情页内也有「省电策略」入口）。
+     */
+    private fun openMiuiBatterySettings(context: Context): Boolean {
+        val label = runCatching {
+            context.packageManager.getApplicationLabel(context.applicationInfo).toString()
+        }.getOrDefault(context.packageName)
+        val candidates = listOf(
+            // 旧版/MIUI 经典入口：神隐模式单应用配置页
+            Intent().setComponent(
+                ComponentName(
+                    "com.miui.powerkeeper",
+                    "com.miui.powerkeeper.ui.HiddenAppsConfigActivity"
+                )
+            ).putExtra("package_name", context.packageName)
+                .putExtra("package_label", label),
+            // MIUI 12/13 部分版本的应用电池详情页
+            Intent().setComponent(
+                ComponentName(
+                    "com.miui.powerkeeper",
+                    "com.miui.powerkeeper.ui.apps.detail.AppDetailActivity"
+                )
+            ).putExtra("package_name", context.packageName)
+                .putExtra("package_label", label)
+        )
+        candidates.forEach { if (launch(context, it)) return true }
+        return openBatterySettings(context)
     }
 
     private fun openMiuiPermissionEditor(context: Context): Boolean {
