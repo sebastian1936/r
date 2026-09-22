@@ -90,6 +90,9 @@ object EnvCheckManager {
         if (pairingCapable) {
             items += Item("developer_options", globalStatus(context, "development_settings_enabled"))
             items += Item("adb_master", globalStatus(context, Settings.Global.ADB_ENABLED))
+            // 无线调试必须在已连接 Wi-Fi 时才能打开/保持运行，放在它前面
+            // 先排查（系统在未连 Wi-Fi 时会直接灰掉或自动关闭无线调试）
+            items += Item("wifi_connected", checkWifi(context))
             // ADB_WIFI_ENABLED（隐藏常量，值 "adb_wifi"，API30+）。
             // MIUI/HyperOS 部分版本对普通应用屏蔽该键（读到 null/异常），
             // 此时不靠猜：直接探测 adbd 有没有在广播无线调试服务，
@@ -108,14 +111,16 @@ object EnvCheckManager {
             "notification",
             checkNotification(context, checkPairingChannel = checkPairingChannel)
         )
+        // 电池「无限制/不受限制」不是小米专有：Android 6+ 全系都有
+        // Doze 电池优化白名单（isIgnoringBatteryOptimizations 为通用 API），
+        // 只是 MIUI 的设置入口和文案不同——小米下发 MIUI 专属项直达私有页，
+        // 其余品牌下发通用项。两者是同一个操作的两种引导，不重复下发。
+        // 该项是被控端长期在线的前提，位置上移到必选区域。
+        items += Item(
+            if (isMiui) "miui_battery_unrestricted" else "battery_optimization",
+            checkBattery(context)
+        )
         items += Item("overlay", checkOverlay(context))
-        // 电池策略：小米只下发 MIUI 专属项（见下方 isMiui 块）——
-        // MIUI「应用省电策略→无限制」这一个操作同时决定 AOSP Doze 白名单
-        // 和 MIUI 私有省电限制，下发两个条目会让用户重复操作。
-        // 状态共用 checkBattery：手动选无限制或 adb 白名单豁免后均变绿
-        if (!isMiui) {
-            items += Item("battery_optimization", checkBattery(context))
-        }
         // 以下两项是功能可选项：不授权不影响远程看屏与操作，
         // 只影响对应能力（传文件 / 传被控端播放的声音）
         items += Item("file_storage", checkFileStorage(context))
@@ -135,11 +140,6 @@ object EnvCheckManager {
             if (pairingCapable) {
                 items += Item("miui_notif_style", STATUS_UNKNOWN)
             }
-            // MIUI 私有省电策略与 AOSP Doze 白名单在用户侧是同一个操作
-            // （应用信息→省电策略→无限制），合并为一个条目；状态复用
-            // checkBattery：手动设置或 adb 豁免下发后都能变绿。
-            // MIUI 配置 adb 写不了，首次配对前必须由用户手动设置一次。
-            items += Item("miui_battery_unrestricted", checkBattery(context))
         }
         if (isSamsung) {
             // One UI 无线调试/通知输入/无障碍均为标准实现，无配对相关特殊项；
@@ -187,6 +187,36 @@ object EnvCheckManager {
         }
         Log.i(TAG, "adb_wifi 不可读，mDNS 探测结果：${port ?: "未发现服务"}")
         return if (port != null) STATUS_OK else STATUS_OFF
+    }
+
+    /**
+     * Wi-Fi 是否已连接。无线调试的前提：未连 Wi-Fi 时系统会灰掉或自动
+     * 关闭无线调试。只认 WLAN 传输（手机蜂窝网络不算）；不要求能上外网。
+     */
+    private fun checkWifi(context: Context): String {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE)
+            as android.net.ConnectivityManager
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val caps = cm.activeNetwork?.let { cm.getNetworkCapabilities(it) }
+            if (caps != null &&
+                caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+            ) {
+                STATUS_OK
+            } else {
+                STATUS_OFF
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            val info = cm.activeNetworkInfo
+            @Suppress("DEPRECATION")
+            if (info != null && info.isConnected &&
+                info.type == android.net.ConnectivityManager.TYPE_WIFI
+            ) {
+                STATUS_OK
+            } else {
+                STATUS_OFF
+            }
+        }
     }
 
     private fun checkNotification(
@@ -331,6 +361,10 @@ object EnvCheckManager {
             // 无线调试：优先直达系统「无线调试」子页（少点一层），
             // 组件不存在/未导出（部分 ROM）时回退开发者选项主页
             "wireless_debug" -> openWirelessDebugSettings(appContext)
+
+            // Wi-Fi：直达系统 WLAN 设置页
+            "wifi_connected" ->
+                launch(appContext, Intent(Settings.ACTION_WIFI_SETTINGS))
 
             "developer_options", "adb_master" ->
                 launch(appContext, Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))

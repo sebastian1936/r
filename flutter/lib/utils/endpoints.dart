@@ -1,8 +1,10 @@
 // 线路（服务器）配置管理：
 // - 安装包内置 assets/config/endpoints_v1.json 作为出厂兜底；
 // - 可写缓存文件（应用数据目录）在 COS 更新后覆盖；
-// - 每次启动先读缓存/内置，再异步从 COS 拉取，校验通过才原子替换；
+// - 启动读缓存/内置并立即拉一次 COS，之后每 5 分钟周期同步，
+//   校验通过才原子替换，内容未变不写盘；
 // - 当前生效哪一段由 Rust option `traffic-obfuscate` 记忆（Y=混淆，N=官方）。
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -93,7 +95,13 @@ class EndpointStore {
   static const String _fileName = 'endpoints_v1.json';
   static const String _cosPath = '/endpoints_v1.json';
 
+  /// 周期性从 COS 同步线路的间隔。配置很少变化，5 分钟既能让换线路
+  /// 在可接受时间内全网生效，请求量也仍在可控范围。
+  static const Duration syncInterval = Duration(minutes: 5);
+
   static EndpointsConfig? _current;
+  static Timer? _syncTimer;
+  static bool _refreshing = false;
 
   /// 启动早期（runApp 前）已可用
   static EndpointsConfig get current => _current ?? _fallback;
@@ -178,8 +186,20 @@ class EndpointStore {
     await applyActive();
   }
 
-  /// 启动后异步从 COS 更新；5s 超时、静默失败，校验不过保留本地。
+  /// 启动周期性 COS 同步（每 [syncInterval] 一次）。随主 isolate 存活：
+  /// Android 被控端以前台服务保活，进程在计时就在；Doze 深度休眠期间
+  /// 系统会推迟触发，亮屏/唤醒后补一次——不追求强实时，只追求最终一致。
+  static void startPeriodicSync() {
+    _syncTimer?.cancel();
+    _syncTimer = Timer.periodic(syncInterval, (_) => refreshFromCos());
+  }
+
+  /// 从 COS 拉取一次；5s 超时、静默失败，校验不过保留本地。
+  /// 内容与本地缓存完全一致时直接返回：不写盘、不重对齐 option，
+  /// 周期性轮询的绝大多数请求都走这条最省路径。
   static Future<void> refreshFromCos() async {
+    if (_refreshing) return;
+    _refreshing = true;
     try {
       final resp = await http
           .get(Uri.parse('$kNodeConfigUrl$_cosPath'))
@@ -194,16 +214,21 @@ class EndpointStore {
         debugPrint('endpoints remote invalid, keep local');
         return;
       }
-      // 原子写：临时文件 + rename
       final f = await _cacheFile();
+      if (await f.exists() && await f.readAsString() == body) {
+        return;
+      }
+      // 原子写：临时文件 + rename
       final tmp = File('${f.path}.tmp');
       await tmp.writeAsBytes(resp.bodyBytes, flush: true);
       await tmp.rename(f.path);
       _current = cfg;
-      // 远端配置可能改了地址，按当前模式重新对齐 option
+      // 远端配置改了地址，按当前模式重新对齐 option（值没变不会重连）
       await applyActive();
     } catch (e) {
       debugPrint('endpoints cos update failed: $e');
+    } finally {
+      _refreshing = false;
     }
   }
 

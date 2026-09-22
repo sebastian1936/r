@@ -136,6 +136,8 @@ Future<void> initEnv(String appType) async {
   if (appType == kAppTypeMain) {
     await EndpointStore.applyActive();
     EndpointStore.refreshFromCos();
+    // 运行期每 5 分钟同步一次线路，换地址后无需等用户重启 App
+    EndpointStore.startPeriodicSync();
   }
   // await Firebase.initializeApp();
   _registerEventHandler();

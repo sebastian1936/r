@@ -947,7 +947,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
   Future<void> _launchPairing() async {
     try {
       await gFFI.invokeMethod("adb_start_pairing", null);
-      showToast("配对通知已发出，请下拉通知栏输入配对码");
+      showToast("请点「使用配对码配对设备」，看到 6 位码后下拉通知栏输入");
     } on PlatformException catch (e) {
       if (!mounted) return;
       showDialog<bool>(
@@ -1243,6 +1243,12 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
       "开发者选项里打开「USB 调试」",
       true,
     ],
+    "wifi_connected": [
+      "已连接 Wi-Fi",
+      "手机先连上 Wi-Fi（不要求能上网，热点/路由器均可）。"
+          "未连 Wi-Fi 时无线调试会被系统灰掉或自动关闭",
+      true,
+    ],
     "wireless_debug": [
       "无线调试",
       "开发者选项里打开「无线调试」总开关；配对后保持开启，输入控制可一键直开",
@@ -1259,9 +1265,11 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
       false,
     ],
     "battery_optimization": [
-      "电池策略：无限制",
-      "设置 → 应用管理 → 本应用 → 省电策略，选「无限制」",
-      false,
+      "电池：不受限制（必设）",
+      "设置 → 应用 → 本应用 → 电池（或「省电策略」），选「不受限制/无限制」。"
+          "这是安卓通用设置（不是小米专有），不设置的话锁屏一段时间后系统会"
+          "断网休眠，被控端必然离线，亮屏才恢复",
+      true,
     ],
     "miui_autostart": [
       "允许自启动",
@@ -1609,6 +1617,27 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
                     .map(_buildRow)
                     .toList(),
               const SizedBox(height: 8),
+              // 首次配对流程提示：点「开始配对」后用户要连续做三个系统侧
+              // 动作，仅靠随后的短时 toast 很容易漏看，固定在清单底部说明
+              if (!widget.reviewMode && !widget.retryMode)
+                Container(
+                  width: double.maxFinite,
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.primaryContainer,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: const Text(
+                    "点下方「开始配对」后（全程约 30 秒，只需配对一次）：\n"
+                    "1. 系统会自动打开「无线调试」页，请点「使用配对码配对设备」\n"
+                    "2. 看到 6 位配对码后，从屏幕顶部下拉通知栏\n"
+                    "3. 点本应用通知上的输入框，输入这 6 位码并发送，等待提示成功\n"
+                    "若通知栏里没有本应用的通知，请回到这里确认「通知权限」已开启"
+                    "（小米/红米还需设置「通知栏样式：经典」）",
+                    style: TextStyle(fontSize: 12, height: 1.6),
+                  ),
+                ),
               Container(
                 padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
@@ -1706,7 +1735,7 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
       await gFFI.invokeMethod("adb_start_pairing", null);
       if (!mounted) return;
       Navigator.of(context).pop(true);
-      showToast("配对通知已发出，请下拉通知栏输入配对码");
+      showToast("请点「使用配对码配对设备」，看到 6 位码后下拉通知栏输入");
     } on PlatformException catch (e) {
       setState(() {
         _busy = false;
