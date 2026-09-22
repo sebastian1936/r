@@ -71,9 +71,7 @@ class DesktopSettingPage extends StatefulWidget {
         !bind.isDisableSettings() &&
         bind.mainGetBuildinOption(key: kOptionHideSecuritySetting) != 'Y')
       SettingsTabKey.safety,
-    if (!bind.isDisableSettings() &&
-        bind.mainGetBuildinOption(key: kOptionHideNetworkSetting) != 'Y')
-      SettingsTabKey.network,
+    // Network 设置页已整体下线（选项固定，启动时强制写入）
     if (!bind.isIncomingOnly()) SettingsTabKey.display,
     if (!isWeb && !bind.isIncomingOnly() && bind.pluginFeatureIsEnabled())
       SettingsTabKey.plugin,
@@ -189,10 +187,8 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
           settingTabs.add(_TabInfo(tab, 'Security',
               Icons.enhanced_encryption_outlined, Icons.enhanced_encryption));
           break;
-        case SettingsTabKey.network:
-          settingTabs
-              .add(_TabInfo(tab, 'Network', Icons.link_outlined, Icons.link));
-          break;
+        // Network 页已下线：WebSocket/不安全TLS回退/禁用UDP 均固定，
+        // 选项在启动时强制写入，不再暴露给用户
         case SettingsTabKey.display:
           settingTabs.add(_TabInfo(tab, 'Display',
               Icons.desktop_windows_outlined, Icons.desktop_windows));
@@ -228,9 +224,7 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
         case SettingsTabKey.safety:
           children.add(const _Safety());
           break;
-        case SettingsTabKey.network:
-          children.add(const _Network());
-          break;
+        // Network 页已下线（与上方 _settingTabs 保持一致，列表不错位）
         case SettingsTabKey.display:
           children.add(const _Display());
           break;
@@ -542,34 +536,14 @@ class _GeneralState extends State<_General> {
             'Capture screen using DirectX',
             kOptionDirectxCapture,
           ),
-        if (!bind.isIncomingOnly()) ...[
-          // 替换第一个：Enable UDP hole punching
-          CheckboxListTile(
-            title: Text('Enable UDP hole punching'),
-            value: true,      // 默认开启
-            onChanged: null,   // 无法修改 (变灰禁用)
-            controlAffinity: ListTileControlAffinity.leading, // 复选框在左侧
-          ),
-          // 替换第二个：Enable IPv6 P2P connection
-          CheckboxListTile(
-            title: Text('Enable IPv6 P2P connection'),
-            value: true,      // 默认开启
-            onChanged: null,   // 无法修改 (变灰禁用)
-            controlAffinity: ListTileControlAffinity.leading,
-          ),
-        ],
+        // UDP 打洞/IPv6 P2P 固定开启，选项不展示（启动时强制写入）
       ],
     ];
     if (!isWeb && bind.mainShowOption(key: kOptionAllowLinuxHeadless)) {
       children.add(_OptionCheckBox(
           context, 'Allow linux headless', kOptionAllowLinuxHeadless));
     }
-    children.add(_OptionCheckBox(
-      context,
-      'note-at-conn-end-tip',
-      kOptionAllowAskForNoteAtEndOfConnection,
-      isServer: false,
-    ));
+    // “连接结束时请求备注”固定关闭，选项不展示
     return _Card(title: 'Other', children: children);
   }
 
@@ -1497,194 +1471,6 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
             }
           : null,
     ).marginOnly(left: _kCheckBoxLeftMargin);
-  }
-}
-
-class _Network extends StatefulWidget {
-  const _Network({Key? key}) : super(key: key);
-
-  @override
-  State<_Network> createState() => _NetworkState();
-}
-
-class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
-  @override
-  bool get wantKeepAlive => true;
-  bool locked = !isWeb && bind.mainIsInstalled();
-
-  final scrollController = ScrollController();
-
-  @override
-  Widget build(BuildContext context) {
-    super.build(context);
-    return ListView(controller: scrollController, children: [
-      _lock(locked, 'Unlock Network Settings', () {
-        locked = false;
-        setState(() => {});
-      }),
-      preventMouseKeyBuilder(
-        block: locked,
-        child: Column(children: [
-          network(context),
-        ]),
-      ),
-    ]).marginOnly(bottom: _kListViewBottomMargin);
-  }
-
-  Widget network(BuildContext context) {
-    final hideServer =
-        bind.mainGetBuildinOption(key: kOptionHideServerSetting) == 'Y';
-    final hideProxy =
-        isWeb || bind.mainGetBuildinOption(key: kOptionHideProxySetting) == 'Y';
-    final hideWebSocket = isWeb ||
-        bind.mainGetBuildinOption(key: kOptionHideWebSocketSetting) == 'Y';
-
-    if (hideServer && hideProxy && hideWebSocket) {
-      return Offstage();
-    }
-
-    // Helper function to create network setting ListTiles
-    Widget listTile({
-      required IconData icon,
-      required String title,
-      VoidCallback? onTap,
-      Widget? trailing,
-      bool showTooltip = false,
-      String tooltipMessage = '',
-    }) {
-      final titleWidget = showTooltip
-          ? Row(
-              children: [
-                Tooltip(
-                  waitDuration: Duration(milliseconds: 1000),
-                  message: translate(tooltipMessage),
-                  child: Row(
-                    children: [
-                      Text(
-                        translate(title),
-                        style: TextStyle(fontSize: _kContentFontSize),
-                      ),
-                      SizedBox(width: 5),
-                      Icon(
-                        Icons.help_outline,
-                        size: 14,
-                        color: Theme.of(context)
-                            .textTheme
-                            .titleLarge
-                            ?.color
-                            ?.withOpacity(0.7),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            )
-          : Text(
-              translate(title),
-              style: TextStyle(fontSize: _kContentFontSize),
-            );
-
-      return ListTile(
-        leading: Icon(icon, color: _accentColor),
-        title: titleWidget,
-        enabled: !locked,
-        onTap: onTap,
-        trailing: trailing,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(10),
-        ),
-        contentPadding: EdgeInsets.symmetric(horizontal: 16),
-        minLeadingWidth: 0,
-        horizontalTitleGap: 10,
-      );
-    }
-
-    Widget switchWidget(IconData icon, String title, String tooltipMessage,
-            String optionKey) =>
-        listTile(
-          icon: icon,
-          title: title,
-          showTooltip: true,
-          tooltipMessage: tooltipMessage,
-          trailing: Switch(
-            value: mainGetBoolOptionSync(optionKey),
-            onChanged: locked || isOptionFixed(optionKey)
-                ? null
-                : (value) {
-                    mainSetBoolOption(optionKey, value);
-                    setState(() {});
-                  },
-          ),
-        );
-
-    final outgoingOnly = bind.isOutgoingOnly();
-
-    final divider = const Divider(height: 1, indent: 16, endIndent: 16);
-    return _Card(
-      title: 'Network',
-      children: [
-        Container(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // ID/中继服务器由 endpoints_v1.json + “兼容 iOS”开关统一管理；
-              // Socks5/Http(s) 代理入口已下线（普通用户易误填导致无法连接，
-              // 启动时会自动清空历史残留代理配置）
-              if (!hideWebSocket)
-              // 使用原生 ListTile 绕过自定义函数的参数限制
-                ListTile(
-                  leading: Icon(Icons.web_asset_outlined),
-                  title: Text(translate('Use WebSocket')), // 使用翻译函数
-                  subtitle: Text(
-                    '${translate('websocket_tip')}\n\n${translate('server-oss-not-support-tip')}',
-                    style: TextStyle(fontSize: 12),
-                  ),
-                  trailing: Switch(
-                    value: false,
-                    onChanged: null,
-                  ),
-                ),
-
-              if (!isWeb)
-                futureBuilder(
-                  future: bind.mainIsUsingPublicServer(),
-                  hasData: (isUsingPublicServer) {
-                    if (isUsingPublicServer) {
-                      return Offstage();
-                    } else {
-                      return Column(
-                        children: [
-                          if (!hideServer || !hideProxy || !hideWebSocket)
-                            divider,
-                          switchWidget(
-                              Icons.no_encryption_outlined,
-                              'Allow insecure TLS fallback',
-                              'allow-insecure-tls-fallback-tip',
-                              kOptionAllowInsecureTLSFallback),
-                          if (!outgoingOnly) divider,
-                          if (!outgoingOnly)
-                          listTile(
-                          icon: Icons.lan_outlined,
-                          title: 'Disable UDP',
-                          showTooltip: true,
-                          tooltipMessage: '${translate('disable-udp-tip')}\n\n${translate('server-oss-not-support-tip')}',
-                          trailing: Switch(
-                          // 1. 强制设为 false (关闭状态)
-                          value: false,
-                          // 2. 强制设为 null (禁用点击，按钮会变灰且无法操作)
-                          onChanged: null,
-                          ),
-                          ),
-                        ],
-                      );
-                    }
-                  },
-                ),
-            ],
-          ),
-        ),
-      ],
-    );
   }
 }
 

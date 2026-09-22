@@ -141,6 +141,9 @@ Future<void> initEnv(String appType) async {
       await bind.mainSetSocks(proxy: '', username: '', password: '');
     }
     await EndpointStore.applyActive();
+    // 精简设置：UI 已移除的网络/备注开关在此强制对齐策略值，
+    // 避免老版本持久化的用户选择残留继续生效
+    await applyForcedClientOptions();
     // 每次启动都从 COS 同步一次最新线路（内容未变不写盘、不重连）
     EndpointStore.refreshFromCos();
     // 低频保底同步；主力触发是"连不上信令服务器"（下面的状态监听），
@@ -156,6 +159,34 @@ Future<void> initEnv(String appType) async {
   _registerEventHandler();
   // Update the system theme.
   updateSystemWindowTheme();
+}
+
+/// 精简客户端设置：以下开关已从设置界面（移动端 + PC 端）移除，
+/// 启动时强制写入策略值。仅删 UI 而不清理持久化配置，老用户残留选择
+/// 仍会生效，所以必须在每次启动时主动对齐。
+Future<void> applyForcedClientOptions() async {
+  // —— 普通 option（桌面端经 IPC 写入独立服务进程）——
+  // 使用 WebSocket：关闭
+  await bind.mainSetOption(key: kOptionAllowWebSocket, value: 'N');
+  // 允许回退到不安全的 TLS：启用（自建/反代线路需要）
+  await bind.mainSetOption(key: kOptionAllowInsecureTLSFallback, value: 'Y');
+  // 禁用 UDP：不启用（即保持 UDP 可用）
+  await bind.mainSetOption(key: kOptionDisableUdp, value: 'N');
+
+  // —— 本地 option ——
+  // UDP 打洞：固定打开
+  await bind.mainSetLocalOption(key: kOptionEnableUdpPunch, value: 'Y');
+  // IPv6 P2P：固定打开
+  await bind.mainSetLocalOption(key: kOptionEnableIpv6Punch, value: 'Y');
+  // 连接结束时请求备注：关闭
+  await bind.mainSetLocalOption(
+      key: kOptionAllowAskForNoteAtEndOfConnection, value: 'N');
+
+  // 硬件编码：默认启用（空值即默认开，这里补成显式 Y），
+  // 用户显式关闭过（N）时尊重其选择；设置页的开关保留
+  if (bind.mainGetOptionSync(key: kOptionEnableHwcodec).isEmpty) {
+    await bind.mainSetOption(key: kOptionEnableHwcodec, value: 'Y');
+  }
 }
 
 void runMainApp(bool startService) async {

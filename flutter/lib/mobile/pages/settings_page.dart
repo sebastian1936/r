@@ -84,7 +84,6 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   var _enableDirectIPAccess = false;
   var _enableRecordSession = false;
   var _enableHardwareCodec = false;
-  var _allowWebSocket = false;
   var _autoRecordIncomingSession = false;
   var _autoRecordOutgoingSession = false;
   var _allowAutoDisconnect = false;
@@ -95,15 +94,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   var _autoDisconnectTimeout = "";
   var _hideServer = false;
   var _hideProxy = false;
-  var _hideNetwork = false;
-  var _hideWebSocket = false;
   var _enableTrustedDevices = false;
-  var _enableUdpPunch = false;
-  var _allowInsecureTlsFallback = false;
-  var _disableUdp = false;
-  var _enableIpv6Punch = false;
-  var _isUsingPublicServer = false;
-  var _allowAskForNoteAtEndOfConnection = false;
 
   _SettingsState() {
     _enableAbr = option2bool(
@@ -117,10 +108,6 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         bind.mainGetOptionSync(key: kOptionEnableRecordSession));
     _enableHardwareCodec = option2bool(kOptionEnableHwcodec,
         bind.mainGetOptionSync(key: kOptionEnableHwcodec));
-    _allowWebSocket = mainGetBoolOptionSync(kOptionAllowWebSocket);
-    _allowInsecureTlsFallback =
-        mainGetBoolOptionSync(kOptionAllowInsecureTLSFallback);
-    _disableUdp = bind.mainGetOptionSync(key: kOptionDisableUdp) == 'Y';
     _autoRecordIncomingSession = option2bool(kOptionAllowAutoRecordIncoming,
         bind.mainGetOptionSync(key: kOptionAllowAutoRecordIncoming));
     _autoRecordOutgoingSession = option2bool(kOptionAllowAutoRecordOutgoing,
@@ -134,16 +121,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
     _hideServer =
         bind.mainGetBuildinOption(key: kOptionHideServerSetting) == 'Y';
     _hideProxy = bind.mainGetBuildinOption(key: kOptionHideProxySetting) == 'Y';
-    _hideNetwork =
-        bind.mainGetBuildinOption(key: kOptionHideNetworkSetting) == 'Y';
-    _hideWebSocket =
-        bind.mainGetBuildinOption(key: kOptionHideWebSocketSetting) == 'Y' ||
-            isWeb;
     _enableTrustedDevices = mainGetBoolOptionSync(kOptionEnableTrustedDevices);
-    _enableUdpPunch = mainGetLocalBoolOptionSync(kOptionEnableUdpPunch);
-    _enableIpv6Punch = mainGetLocalBoolOptionSync(kOptionEnableIpv6Punch);
-    _allowAskForNoteAtEndOfConnection =
-        mainGetLocalBoolOptionSync(kOptionAllowAskForNoteAtEndOfConnection);
   }
 
   @override
@@ -211,12 +189,6 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
       if (_buildDate != buildDate) {
         update = true;
         _buildDate = buildDate;
-      }
-
-      final isUsingPublicServer = await bind.mainIsUsingPublicServer();
-      if (_isUsingPublicServer != isUsingPublicServer) {
-        update = true;
-        _isUsingPublicServer = isUsingPublicServer;
       }
 
       if (update) {
@@ -761,58 +733,10 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
               ],
           ),
         SettingsSection(title: Text(translate("Settings")), tiles: [
-          // ID/中继服务器由 endpoints_v1.json + “兼容 iOS”开关统一管理；
-          // Socks5/Http(s) 代理入口已下线（普通用户易误填导致无法连接，
-          // 启动时会自动清空历史残留代理配置）
-          if (!disabledSettings && !_hideNetwork && !_hideWebSocket)
-            SettingsTile.switchTile(
-          title: Text(translate('Use WebSocket')),
-          // 1. 强制设为 false (关闭状态)
-          initialValue: false,
-          // 2. 强制设为 null (禁用交互，按钮会变灰且无法点击)
-          onToggle: null,
-          ),
-          if (!_isUsingPublicServer)
-            SettingsTile.switchTile(
-              title: Text(translate('Allow insecure TLS fallback')),
-              initialValue: _allowInsecureTlsFallback,
-              onToggle: isOptionFixed(kOptionAllowInsecureTLSFallback)
-                  ? null
-                  : (v) async {
-                      await mainSetBoolOption(
-                          kOptionAllowInsecureTLSFallback, v);
-                      final newValue = mainGetBoolOptionSync(
-                          kOptionAllowInsecureTLSFallback);
-                      setState(() {
-                        _allowInsecureTlsFallback = newValue;
-                      });
-                    },
-            ),
-          if (isAndroid && !outgoingOnly && !_isUsingPublicServer)
-            SettingsTile.switchTile(
-              title: Text(translate('Disable UDP')),
-              // 1. 强制初始值为 false (关闭状态)
-              initialValue: false,
-              // 2. 强制设为 null (禁用交互，控件会变为灰色不可点击)
-              onToggle: null,
-            ),
-
-          if (!incomingOnly)
-            SettingsTile.switchTile(
-              title: Text(translate('Enable UDP hole punching')),
-              // 1. 强制设为 true (默认启用状态)
-              initialValue: true,
-              // 2. 设为 null 以禁用交互 (按钮会变灰且无法点击)
-              onToggle: null,
-            ),
-          if (!incomingOnly)
-            SettingsTile.switchTile(
-              title: Text(translate('Enable IPv6 P2P connection')),
-              // 1. 强制设为 true (默认启用状态)
-              initialValue: true,
-              // 2. 设为 null 以禁用交互 (按钮会变灰且无法点击)
-              onToggle: null,
-            ),
+          // 网络相关开关已全部下线并固定：WebSocket 关、允许不安全 TLS 回退开、
+          // UDP 不禁用、UDP 打洞/IPv6 P2P 开（启动时由客户端强制写入，
+          // 见 main.dart applyForcedClientOptions）；ID/中继线路由
+          // endpoints_v1.json + “兼容 iOS”开关统一管理
            SettingsTile(
            title: Text(translate('Language')),
            leading: Icon(Icons.translate),
@@ -834,19 +758,6 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
               showThemeSettings(gFFI.dialogManager);
             },
           ),
-          SettingsTile.switchTile(
-            title: Text(translate('note-at-conn-end-tip')),
-            initialValue: _allowAskForNoteAtEndOfConnection,
-            onToggle: (v) async {
-              await mainSetLocalBoolOption(
-                  kOptionAllowAskForNoteAtEndOfConnection, v);
-              final newValue = mainGetLocalBoolOptionSync(
-                  kOptionAllowAskForNoteAtEndOfConnection);
-              setState(() {
-                _allowAskForNoteAtEndOfConnection = newValue;
-              });
-            },
-          )
         ]),
         if (isAndroid)
           SettingsSection(title: Text(translate('Hardware Codec')), tiles: [
