@@ -761,14 +761,9 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
               ],
           ),
         SettingsSection(title: Text(translate("Settings")), tiles: [
-          // ID/中继服务器由 endpoints_v1.json + “兼容 iOS”开关统一管理，不提供手动选择入口
-          if (!_hideNetwork && !_hideProxy)
-            SettingsTile(
-                title: Text(translate('Socks5/Http(s) Proxy')),
-                leading: Icon(Icons.network_ping),
-                onPressed: (context) {
-                  changeSocks5Proxy();
-                }),
+          // ID/中继服务器由 endpoints_v1.json + “兼容 iOS”开关统一管理；
+          // Socks5/Http(s) 代理入口已下线（普通用户易误填导致无法连接，
+          // 启动时会自动清空历史残留代理配置）
           if (!disabledSettings && !_hideNetwork && !_hideWebSocket)
             SettingsTile.switchTile(
           title: Text(translate('Use WebSocket')),

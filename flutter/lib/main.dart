@@ -134,7 +134,14 @@ Future<void> initEnv(String appType) async {
   // 主窗口：先按线路文件对齐服务器配置（文件是唯一事实来源），
   // 再异步从 COS 更新；更新成功且地址有变化时会自动重新对齐并重连
   if (appType == kAppTypeMain) {
+    // Socks5/Http(s) 代理入口已下线：普通用户易误填导致完全无法连接，
+    // 启动时清空老版本残留的代理配置（空 proxy 会触发一次 mediator 重连）
+    final legacySocks = await bind.mainGetSocks();
+    if (legacySocks.isNotEmpty && legacySocks.first.trim().isNotEmpty) {
+      await bind.mainSetSocks(proxy: '', username: '', password: '');
+    }
     await EndpointStore.applyActive();
+    // 每次启动都从 COS 同步一次最新线路（内容未变不写盘、不重连）
     EndpointStore.refreshFromCos();
     // 低频保底同步；主力触发是"连不上信令服务器"（下面的状态监听），
     // 正常在线时不产生 COS 请求
