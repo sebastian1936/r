@@ -1,8 +1,10 @@
 // 线路（服务器）配置管理：
 // - 安装包内置 assets/config/endpoints_v1.json 作为出厂兜底；
 // - 可写缓存文件（应用数据目录）在 COS 更新后覆盖；
-// - 启动读缓存/内置并立即拉一次 COS，之后每 5 分钟周期同步，
-//   校验通过才原子替换，内容未变不写盘；
+// - 启动读缓存/内置并立即拉一次 COS；
+// - 运行期以"连不上信令服务器"为主要触发（见 onConnectStatusChanged）：
+//   正常在线时零请求；另保留 [syncInterval] 一次的低频保底轮询，
+//   防止极端僵尸连接状态；校验通过才原子替换，内容未变不写盘；
 // - 当前生效哪一段由 Rust option `traffic-obfuscate` 记忆（Y=混淆，N=官方）。
 import 'dart:async';
 import 'dart:convert';
@@ -95,12 +97,24 @@ class EndpointStore {
   static const String _fileName = 'endpoints_v1.json';
   static const String _cosPath = '/endpoints_v1.json';
 
-  /// 周期性从 COS 同步线路的间隔。配置很少变化，5 分钟既能让换线路
-  /// 在可接受时间内全网生效，请求量也仍在可控范围。
-  static const Duration syncInterval = Duration(minutes: 5);
+  /// 低频保底同步间隔。主力是"连不上就拉"的事件触发（正常在线零请求）；
+  /// 保底只为覆盖极端情况（旧信令一直半死不活、状态始终未变 -1）。
+  /// 万级客户端 6 小时一次约 1200 万次/月，费用可忽略。
+  static const Duration syncInterval = Duration(hours: 6);
+
+  /// 应急回源退避间隔：检测到连不上后立即拉一次，仍不通则依次
+  /// 30s/60s/2min/5min 重试，封顶后保持 5 分钟一次直到恢复在线。
+  static const List<Duration> _fallbackIntervals = [
+    Duration(seconds: 30),
+    Duration(seconds: 60),
+    Duration(minutes: 2),
+    Duration(minutes: 5),
+  ];
 
   static EndpointsConfig? _current;
   static Timer? _syncTimer;
+  static Timer? _fallbackTimer;
+  static int _fallbackRound = 0;
   static bool _refreshing = false;
 
   /// 启动早期（runApp 前）已可用
@@ -186,12 +200,50 @@ class EndpointStore {
     await applyActive();
   }
 
-  /// 启动周期性 COS 同步（每 [syncInterval] 一次）。随主 isolate 存活：
+  /// 启动低频保底 COS 同步（每 [syncInterval] 一次）。随主 isolate 存活：
   /// Android 被控端以前台服务保活，进程在计时就在；Doze 深度休眠期间
-  /// 系统会推迟触发，亮屏/唤醒后补一次——不追求强实时，只追求最终一致。
+  /// 系统会推迟触发，亮屏/唤醒后补一次。
   static void startPeriodicSync() {
     _syncTimer?.cancel();
     _syncTimer = Timer.periodic(syncInterval, (_) => refreshFromCos());
+  }
+
+  /// 信令连接状态变化回调（由主窗口监听 serverModel.connectStatus 驱动）。
+  /// status 语义（底层 mainGetConnectStatus）：
+  ///   >0 = 已注册在线；0 = 连接中；-1 = 连续多次注册无响应（约 15~30s）。
+  /// 变 -1 时立即回源 COS 拉最新线路，并按退避间隔持续重试；
+  /// 恢复在线后取消重试、重置退避。正常在线期间不产生任何请求。
+  static void onConnectStatusChanged(int status) {
+    if (status > 0) {
+      if (_fallbackTimer != null || _fallbackRound != 0) {
+        _fallbackTimer?.cancel();
+        _fallbackTimer = null;
+        _fallbackRound = 0;
+        debugPrint('endpoints: rendezvous online, fallback sync reset');
+      }
+      return;
+    }
+    if (status != -1 || _fallbackTimer != null) return;
+    debugPrint('endpoints: rendezvous unreachable, fetch COS now');
+    refreshFromCos();
+    _scheduleFallback();
+  }
+
+  static void _scheduleFallback() {
+    final idx = _fallbackRound < _fallbackIntervals.length
+        ? _fallbackRound
+        : _fallbackIntervals.length - 1;
+    final delay = _fallbackIntervals[idx];
+    _fallbackRound++;
+    _fallbackTimer?.cancel();
+    _fallbackTimer = Timer(delay, () async {
+      await refreshFromCos();
+      // 期间若已恢复在线，onConnectStatusChanged 会把 timer 置空，
+      // 不再安排下一轮；否则继续退避（封顶后停留在 5 分钟）。
+      if (_fallbackTimer != null) {
+        _scheduleFallback();
+      }
+    });
   }
 
   /// 从 COS 拉取一次；5s 超时、静默失败，校验不过保留本地。

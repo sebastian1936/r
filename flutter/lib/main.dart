@@ -136,8 +136,14 @@ Future<void> initEnv(String appType) async {
   if (appType == kAppTypeMain) {
     await EndpointStore.applyActive();
     EndpointStore.refreshFromCos();
-    // 运行期每 5 分钟同步一次线路，换地址后无需等用户重启 App
+    // 低频保底同步；主力触发是"连不上信令服务器"（下面的状态监听），
+    // 正常在线时不产生 COS 请求
     EndpointStore.startPeriodicSync();
+    // connectStatus=-1（连续注册无响应）时立即回源 COS 拉最新线路，
+    // 恢复在线后自动停止重试，全平台生效（桌面状态经 IPC 取自服务进程）
+    gFFI.serverModel.addListener(() {
+      EndpointStore.onConnectStatusChanged(gFFI.serverModel.connectStatus);
+    });
   }
   // await Firebase.initializeApp();
   _registerEventHandler();
