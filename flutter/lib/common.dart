@@ -28,6 +28,7 @@ import 'package:window_manager/window_manager.dart';
 import 'package:window_size/window_size.dart' as window_size;
 
 import '../consts.dart';
+import 'common/widgets/login.dart';
 import 'common/widgets/overlay.dart';
 import 'mobile/pages/file_manager_page.dart';
 import 'mobile/pages/remote_page.dart';
@@ -2561,6 +2562,13 @@ connect(BuildContext context, String id,
     String? connToken,
     bool? isSharedPassword}) async {
   if (id == '') return;
+  // 主控发起连接前本地校验登录态：未登录直接弹登录框，
+  // 不再向服务端发 punch hole 等服务端拒绝（服务端 MUST_LOGIN）。
+  // 登录成功后继续本次连接；取消则中止。
+  if (!gFFI.userModel.isLogin) {
+    final loggedIn = await loginDialog();
+    if (loggedIn != true) return;
+  }
   if (!isDesktop || desktopType == DesktopType.main) {
     try {
       if (Get.isRegistered<IDTextEditingController>()) {

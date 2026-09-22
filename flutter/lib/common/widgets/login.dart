@@ -605,6 +605,19 @@ Future<bool?> loginDialog() async {
             onLogin: onLogin,
             userFocusNode: userFocusNode,
           ),
+          // 注册统一走网页：系统浏览器打开注册页，与设置页注册按钮一致
+          Padding(
+            padding: const EdgeInsets.only(top: 4.0),
+            child: Center(
+              child: TextButton(
+                onPressed: () => launchRegisterUrl(),
+                child: Text(
+                  '注册',
+                  style: TextStyle(fontSize: 14),
+                ),
+              ),
+            ),
+          ),
           thirdAuthWidget(),
         ],
       ),
