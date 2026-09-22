@@ -12,7 +12,7 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
 import '../common.dart';
-import '../models/model.dart';
+import '../models/platform_model.dart';
 
 /// 流量模式 option（对应 Rust 侧 hbb_common::config::OPTION_TRAFFIC_OBFUSCATE）。
 /// Y = 混淆模式（默认），N = 官方明文模式（兼容 iOS App Store 官方客户端）。

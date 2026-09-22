@@ -5,7 +5,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/utils/endpoints.dart';
 
-import '../common.dart';
+import '../../common.dart';
 
 class IosCompatSwitch extends StatefulWidget {
   const IosCompatSwitch({Key? key}) : super(key: key);

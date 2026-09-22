@@ -919,7 +919,10 @@ where
     pub fn new(conn: T) -> Self {
         Self {
             // 本机 IPC：两端永远是同一安装包，固定混淆即可，不受对外流量模式影响
-            inner: Framed::new(conn, BytesCodec::new_obfuscate(Config::OBFUSCATE_KEY)),
+            inner: Framed::new(
+                conn,
+                BytesCodec::new_obfuscate(config::OBFUSCATE_KEY),
+            ),
         }
     }
 
