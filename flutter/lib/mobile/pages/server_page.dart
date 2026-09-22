@@ -713,6 +713,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         while (mounted) {
           // 3.1) 显示不可取消的恢复中加载框（替代一闪而过的 toast）
           BuildContext? loadingCtx;
+          var loadingSlow = false;
           showDialog(
             context: context,
             barrierDismissible: false,
@@ -720,27 +721,52 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
               loadingCtx = ctx;
               return WillPopScope(
                 onWillPop: () async => false,
-                child: const AlertDialog(
-                  content: Row(children: [
-                    CircularProgressIndicator(),
-                    SizedBox(width: 16),
-                    Expanded(
-                      child: Text("正在恢复控制权限，请稍候…",
-                          style: TextStyle(fontSize: 14)),
-                    ),
-                  ]),
-                ),
+                child: StatefulBuilder(builder: (ctx, _) {
+                  return AlertDialog(
+                    content: Row(children: [
+                      const CircularProgressIndicator(),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Text(
+                            loadingSlow
+                                ? "无线调试连接较慢，仍在恢复中，请稍候…"
+                                : "正在恢复控制权限，请稍候…",
+                            style: const TextStyle(fontSize: 14)),
+                      ),
+                    ]),
+                  );
+                }),
               );
             },
           );
+          // 30s 未返回：无线调试 mDNS 发现+重连确实可能较久，更新文案安抚，
+          // 不中断流程；85s 硬超时（覆盖原生最坏约 70s + 余量），避免通道
+          // 异常（如划掉任务后重开的生命周期竞态）导致永久转圈
+          final slowTimer =
+              Timer(const Duration(seconds: 30), () {
+            final c = loadingCtx;
+            if (c != null && c.mounted) {
+              loadingSlow = true;
+              c.markNeedsBuild();
+            }
+          });
           try {
-            final dynamic r =
-                await gFFI.invokeMethod("adb_enable_input", null);
+            final dynamic r = await gFFI
+                .invokeMethod("adb_enable_input", null)
+                .timeout(const Duration(seconds: 85), onTimeout: () {
+              return {
+                "ok": false,
+                "mode": "shell_connect_error",
+                "detail": "client-timeout-85s"
+              };
+            });
+            slowTimer.cancel();
             inputOk = r is Map && r["ok"] == true;
             failMode = (r is Map && r["mode"] is String)
                 ? r["mode"] as String
                 : null;
           } catch (_) {
+            slowTimer.cancel();
             inputOk = false;
           }
           // 无论页面是否还在，都关掉加载框（其 context 独立于 State.context）

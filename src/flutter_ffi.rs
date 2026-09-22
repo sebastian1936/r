@@ -2832,6 +2832,15 @@ pub mod server_side {
         crate::rendezvous_mediator::RendezvousMediator::restart();
     }
 
+    /// 用户在最近任务列表划掉 App（MainService.onTaskRemoved）时调用：
+    /// 停掉 Rust 侧信令注册（与 Dart 端 mainStopService 等价），
+    /// 使被控端真正离线，而非只销毁 Android 前台服务壳。
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_stopService(_env: JNIEnv, _class: JClass) {
+        log::debug!("stopService from jvm");
+        crate::flutter_ffi::main_stop_service();
+    }
+
     /// 主控/被控双包拆分：供 Android 端按编译 flavor 注入硬设置。
     /// controller flavor 注入 conn-type=outgoing 后，is_outgoing_only() 生效，
     /// Dart 侧自动隐藏被控入口，Rust 侧不再初始化被控服务。

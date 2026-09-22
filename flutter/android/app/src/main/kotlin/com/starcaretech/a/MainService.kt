@@ -803,6 +803,23 @@ class MainService : Service() {
     }
 
     /**
+     * 用户在最近任务列表划掉本应用：视为"主动退出"，彻底停止被控服务。
+     * - 停 Rust 信令注册（真正从服务器离线），再 destroy Android 前台服务壳；
+     * - destroy() 会清 KEY_SERVICE_WANTED 并取消看门狗/开机恢复，
+     *   不会在 15 分钟后或重启手机后被自动拉起；
+     * - 同时关闭无障碍输入，与总开关"关"的最终状态一致。
+     * 注意区分：系统在后台因内存杀进程不会回调本方法，那条路径看门狗照常兜底。
+     * 个别国产 ROM 上滑划任务直接杀进程、不保证回调，属尽力而为。
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Log.i(logTag, "最近任务被划掉：用户主动退出，停止被控服务")
+        runCatching { FFI.stopService() }
+        runCatching { InputService.requestDisable() }
+        destroy()
+        super.onTaskRemoved(rootIntent)
+    }
+
+    /**
      * 用授权结果 Intent 建立 MediaProjection 并注册掉线回调。
      * @return false 表示 token 已失效（SecurityException/IllegalStateException）
      */
