@@ -55,12 +55,12 @@ const bool kUseHttpApi = bool.fromEnvironment('USE_HTTP', defaultValue: false);
 // 见 utils/endpoints.dart；USE_HTTP 测试包在其内部强制改写为 http:41111。
 String get apiBase => EndpointStore.apiBase;
 
-// 线路（节点）配置订阅地址。固定走 http：该文件只含公开的服务器地址与
-// 公钥，不含任何私密信息；5 分钟级轮询在万级客户端规模下，省去 TLS
-// 握手的流量是主要成本。明文仅在 network_security_config 中对该域名
-// 单独放开，业务 API 仍强制 https。
-const String kNodeConfigUrl =
-    'http://apple-1300444545.cos-website.ap-nanjing.myqcloud.com';
+// 线路（节点）配置订阅地址：cos 地址 http/https 均可访问。
+// 正式包走 https（防路径篡改），Win7(http 测试包) 走 http，
+// 避免老系统 TLS 无法建立 https 连接导致拉不到线路。
+const String kNodeConfigUrl = kUseHttpApi
+    ? 'http://apple-1300444545.cos-website.ap-nanjing.myqcloud.com'
+    : 'https://apple-1300444545.cos-website.ap-nanjing.myqcloud.com';
 
 // 网页端（user-web）地址：注册、充值统一在浏览器里完成。
 // 后端挂载点是 /_user（见 ra/http/router/router.go: g.StaticFS("/_user", ...)），
