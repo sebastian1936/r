@@ -188,7 +188,9 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
               Icons.enhanced_encryption_outlined, Icons.enhanced_encryption));
           break;
         // Network 页已下线：WebSocket/不安全TLS回退/禁用UDP 均固定，
-        // 选项在启动时强制写入，不再暴露给用户
+        // 选项在启动时强制写入，不再暴露给用户。
+        // case 标签保留（空体落空到 display）以满足穷尽匹配
+        case SettingsTabKey.network:
         case SettingsTabKey.display:
           settingTabs.add(_TabInfo(tab, 'Display',
               Icons.desktop_windows_outlined, Icons.desktop_windows));
@@ -224,7 +226,8 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
         case SettingsTabKey.safety:
           children.add(const _Safety());
           break;
-        // Network 页已下线（与上方 _settingTabs 保持一致，列表不错位）
+        // Network 页已下线（空体落空到 display，标签与页签列表保持一致）
+        case SettingsTabKey.network:
         case SettingsTabKey.display:
           children.add(const _Display());
           break;
