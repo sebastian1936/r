@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- 默认拒绝明文，业务 API/hbbs/hbbr 全部走 TLS -->
+    <base-config cleartextTrafficPermitted="false" />
+    <!-- 仅线路配置 COS 允许 http：文件不含密钥，明文可省去每 5 分钟
+         一次的 TLS 握手流量（万级客户端规模下是主要成本） -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">apple-1300444545.cos-website.ap-nanjing.myqcloud.com</domain>
+    </domain-config>
+</network-security-config>

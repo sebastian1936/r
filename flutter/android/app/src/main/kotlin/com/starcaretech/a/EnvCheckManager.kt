@@ -469,33 +469,25 @@ object EnvCheckManager {
 
     /**
      * MIUI/HyperOS 单应用「省电策略」页（无限制/省电推荐/无限制后台）。
-     * 该页是 powerkeeper 私有 Activity，不同 MIUI 代际组件名不同，逐个尝试，
-     * 全部失败时回退系统"不优化电池"弹窗，再回退应用详情页
+     * 该页是 powerkeeper 私有 Activity，组件名随 MIUI 代际变化，只尝试
+     * 现役版本的入口；失败时回退系统"不优化电池"弹窗，再回退应用详情页
      * （详情页内也有「省电策略」入口）。
+     * 注：MIUI 旧版「神隐模式」配置页（HiddenAppsConfigActivity）已不再
+     * 适配，那些远古版本不在支持范围内。
      */
     private fun openMiuiBatterySettings(context: Context): Boolean {
         val label = runCatching {
             context.packageManager.getApplicationLabel(context.applicationInfo).toString()
         }.getOrDefault(context.packageName)
-        val candidates = listOf(
-            // 旧版/MIUI 经典入口：神隐模式单应用配置页
-            Intent().setComponent(
-                ComponentName(
-                    "com.miui.powerkeeper",
-                    "com.miui.powerkeeper.ui.HiddenAppsConfigActivity"
-                )
-            ).putExtra("package_name", context.packageName)
-                .putExtra("package_label", label),
-            // MIUI 12/13 部分版本的应用电池详情页
-            Intent().setComponent(
-                ComponentName(
-                    "com.miui.powerkeeper",
-                    "com.miui.powerkeeper.ui.apps.detail.AppDetailActivity"
-                )
-            ).putExtra("package_name", context.packageName)
-                .putExtra("package_label", label)
-        )
-        candidates.forEach { if (launch(context, it)) return true }
+        // MIUI 12/13 ~ HyperOS 的应用电池详情页
+        val direct = Intent().setComponent(
+            ComponentName(
+                "com.miui.powerkeeper",
+                "com.miui.powerkeeper.ui.apps.detail.AppDetailActivity"
+            )
+        ).putExtra("package_name", context.packageName)
+            .putExtra("package_label", label)
+        if (launch(context, direct)) return true
         return openBatterySettings(context)
     }
 
