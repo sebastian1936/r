@@ -713,6 +713,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         while (mounted) {
           // 3.1) 显示不可取消的恢复中加载框（替代一闪而过的 toast）
           BuildContext? loadingCtx;
+          StateSetter? loadingSetState;
           var loadingSlow = false;
           showDialog(
             context: context,
@@ -721,7 +722,8 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
               loadingCtx = ctx;
               return WillPopScope(
                 onWillPop: () async => false,
-                child: StatefulBuilder(builder: (ctx, _) {
+                child: StatefulBuilder(builder: (ctx, setSt) {
+                  loadingSetState = setSt;
                   return AlertDialog(
                     content: Row(children: [
                       const CircularProgressIndicator(),
@@ -746,8 +748,9 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
               Timer(const Duration(seconds: 30), () {
             final c = loadingCtx;
             if (c != null && c.mounted) {
-              loadingSlow = true;
-              c.markNeedsBuild();
+              loadingSetState?.call(() {
+                loadingSlow = true;
+              });
             }
           });
           try {
