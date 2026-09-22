@@ -19,7 +19,6 @@ import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../widgets/dialog.dart';
 import 'home_page.dart';
-import 'scan_page.dart';
 import 'package:http/http.dart' as http;
 
 
@@ -30,8 +29,9 @@ class SettingsPage extends StatefulWidget implements PageShape {
   @override
   final icon = Icon(Icons.settings);
 
+  // 线路由 endpoints_v1.json + “兼容 iOS”开关统一管理，不再支持扫码导入服务器配置
   @override
-  final appBarActions = bind.isDisableSettings() ? [] : [ScanButton()];
+  final appBarActions = <Widget>[];
 
   @override
   State<SettingsPage> createState() => _SettingsState();
@@ -761,16 +761,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
               ],
           ),
         SettingsSection(title: Text(translate("Settings")), tiles: [
-          if (!disabledSettings && !_hideNetwork && !_hideServer)
-            SettingsTile(
-                title: Text(translate('ID/Relay Server')),
-                leading: Icon(Icons.cloud),
-                onPressed: (context) {
-                  showServerSettings(gFFI.dialogManager, (callback) async {
-                    _isUsingPublicServer = await bind.mainIsUsingPublicServer();
-                    setState(callback);
-                  });
-                }),
+          // ID/中继服务器由 endpoints_v1.json + “兼容 iOS”开关统一管理，不提供手动选择入口
           if (!_hideNetwork && !_hideProxy)
             SettingsTile(
                 title: Text(translate('Socks5/Http(s) Proxy')),
@@ -1115,23 +1106,6 @@ void showAbout(OverlayDialogManager dialogManager) {
       actions: [],
     );
   }, clickMaskDismiss: true, backDismiss: true);
-}
-
-class ScanButton extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    return IconButton(
-      icon: Icon(Icons.qr_code_scanner),
-      onPressed: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (BuildContext context) => ScanPage(),
-          ),
-        );
-      },
-    );
-  }
 }
 
 class _DisplayPage extends StatefulWidget {
