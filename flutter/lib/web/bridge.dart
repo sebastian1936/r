@@ -795,6 +795,16 @@ class RustdeskImpl {
     return Future.value('');
   }
 
+  Future<void> mainApplyTrafficMode(
+      {required String mode,
+      required String idServer,
+      required String relayServer,
+      required String apiServer,
+      required String key,
+      dynamic hint}) {
+    throw UnimplementedError("mainApplyTrafficMode");
+  }
+
   Future<void> mainSetSocks(
       {required String proxy,
       required String username,

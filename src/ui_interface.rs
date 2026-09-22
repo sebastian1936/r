@@ -445,6 +445,45 @@ pub fn set_option(key: String, value: String) {
     }
 }
 
+/// 双模流量切换：模式 + 全套线路一次性落盘。
+/// 桌面端必须 merge 进全量 OPTIONS 后用**一条** IPC 消息发给服务进程，
+/// 逐条 set_option 会让服务进程在"新模式 + 旧服务器"的中间态重启
+/// mediator，发出明文/混淆错配包；移动端无 IPC，逐个本地写入即可
+/// （由调用方在全部写完后统一 restart 一次）。
+#[inline]
+pub fn apply_traffic_mode(
+    mode: String,
+    id_server: String,
+    relay_server: String,
+    api_server: String,
+    key: String,
+) {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let mut options = OPTIONS.lock().unwrap().clone();
+        options.insert(config::OPTION_TRAFFIC_OBFUSCATE.to_owned(), mode);
+        options.insert("custom-rendezvous-server".to_owned(), id_server);
+        options.insert("relay-server".to_owned(), relay_server);
+        options.insert("api-server".to_owned(), api_server);
+        if !key.is_empty() {
+            options.insert("key".to_owned(), key);
+        }
+        *OPTIONS.lock().unwrap() = options.clone();
+        ipc::set_options(options).ok();
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _nat = crate::CheckTestNatType::new();
+        Config::set_option(config::OPTION_TRAFFIC_OBFUSCATE.to_owned(), mode);
+        Config::set_option("custom-rendezvous-server".to_owned(), id_server);
+        Config::set_option("relay-server".to_owned(), relay_server);
+        Config::set_option("api-server".to_owned(), api_server);
+        if !key.is_empty() {
+            Config::set_option("key".to_owned(), key);
+        }
+    }
+}
+
 #[inline]
 pub fn install_path() -> String {
     #[cfg(windows)]

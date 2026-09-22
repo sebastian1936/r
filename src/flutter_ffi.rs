@@ -1020,6 +1020,30 @@ pub fn main_set_options(json: String) {
     }
 }
 
+/// 双模流量切换专用：把"流量模式 + 全套服务器线路"作为一个整体写入，
+/// 全部落盘后只重建一次信令 mediator。
+///
+/// 必须原子化：模式（决定 UDP/TCP codec 是混淆还是明文）与服务器地址
+/// 若分多次 set_option，每次写入都会触发一次 mediator 重启，中间状态
+/// （新 codec + 旧服务器，或旧 codec + 新服务器）会让客户端把错配包
+/// 打到错误模式的 hbbs —— 明文包打混淆端口即报
+/// "bytes remaining on stream"，反之亦然。
+pub fn main_apply_traffic_mode(
+    mode: String,
+    id_server: String,
+    relay_server: String,
+    api_server: String,
+    key: String,
+) {
+    crate::ui_interface::apply_traffic_mode(mode, id_server, relay_server, api_server, key);
+    // 桌面安装态服务进程由 ipc.rs 的 CheckIfRestart 在收到整批 Options 后统一重启；
+    // 此处 restart 对 Android / 桌面便携态（信令在本进程）生效。
+    #[cfg(not(target_os = "ios"))]
+    crate::rendezvous_mediator::RendezvousMediator::restart();
+    #[cfg(any(target_os = "android", target_os = "ios", feature = "cli"))]
+    crate::common::test_rendezvous_server();
+}
+
 pub fn main_test_if_valid_server(server: String, test_with_proxy: bool) -> String {
     test_if_valid_server(server, test_with_proxy)
 }

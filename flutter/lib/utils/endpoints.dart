@@ -191,13 +191,22 @@ class EndpointStore {
   }
 
   /// 主页开关切换：true=官方（兼容 iOS），false=混淆。
-  /// 先写模式再写服务器，保证随后的 mediator 重启用新 codec 探测新服务器。
+  /// 模式 option 与全套线路必须在**同一个批量调用**里原子生效：
+  /// 若先写模式触发重启、再写服务器，新 mediator 会用新 codec 连旧服务器，
+  /// 发出错配包（明文包打到混淆 hbbs 报 "bytes remaining on stream"，
+  /// 反之亦然）；先写服务器同理。批量写入后 Rust 侧只重启一次。
   static Future<void> switchMode(bool official) async {
     final mode = official ? 'N' : 'Y';
-    if (bind.mainGetOptionSync(key: kTrafficObfuscateOption) != mode) {
-      await bind.mainSetOption(key: kTrafficObfuscateOption, value: mode);
-    }
-    await applyActive();
+    final ep = current.section(official);
+    // 一个 FFI 调用原子完成（Rust 侧落盘全部 option 后只重启一次信令），
+    // 绑定 mainApplyTrafficMode 由 flutter_rust_bridge 在 CI 构建时生成
+    await bind.mainApplyTrafficMode(
+      mode: mode,
+      idServer: ep.id,
+      relayServer: ep.relay,
+      apiServer: ep.api,
+      key: ep.key,
+    );
   }
 
   /// 启动低频保底 COS 同步（每 [syncInterval] 一次）。随主 isolate 存活：
