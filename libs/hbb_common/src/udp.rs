@@ -9,7 +9,6 @@ use tokio::net::{lookup_host, ToSocketAddrs, UdpSocket};
 use tokio_socks::{udp::Socks5UdpFramed, IntoTargetAddr, TargetAddr, ToProxyAddrs};
 use tokio_util::udp::UdpFramed;
 use rand::Rng;
-use crate::config::Config;
 use crate::bytes_codec::BytesCodec;
 
 pub enum FramedSocket {
@@ -63,10 +62,13 @@ impl FramedSocket {
             .next()
             .context("could not resolve to any address")?;
 
-        // --- 核心修改：获取混淆密钥并初始化 Codec ---
-        // 如果获取不到密钥，则程序无法确保 UDP 通信安全，抛出错误
-        let obfuscate_key = Config::get_obfuscate_key();
-        let codec = BytesCodec::new_obfuscate(obfuscate_key);
+        // 按运行时 traffic-obfuscate option 选择 codec：
+        // 混淆模式保留长度帧头+ChaCha20；官方明文模式强制 raw 透传，
+        // 与官方 tokio_util BytesCodec 的 UDP 行为一致（每个数据报独立）。
+        let mut codec = BytesCodec::new_auto();
+        if codec.is_raw_compatible() {
+            codec.set_raw();
+        }
 
         let udp_socket = UdpSocket::from_std(new_socket(addr, reuse, buf_size)?.into_udp_socket())?;
 

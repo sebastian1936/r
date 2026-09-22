@@ -29,6 +29,7 @@ import 'consts.dart';
 import 'mobile/pages/home_page.dart';
 import 'mobile/pages/server_page.dart';
 import 'models/platform_model.dart';
+import 'utils/endpoints.dart';
 
 import 'package:flutter_hbb/plugin/handlers.dart'
     if (dart.library.html) 'package:flutter_hbb/web/plugin/handlers.dart';
@@ -41,6 +42,9 @@ late List<String> kBootArgs;
 Future<void> main(List<String> args) async {
   earlyAssert();
   WidgetsFlutterBinding.ensureInitialized();
+
+  // 最早加载线路配置（缓存文件 → 内置 asset），后续 apiBase/首启写入依赖它
+  await EndpointStore.init();
 
   debugPrint("launch args: $args");
   kBootArgs = List.from(args);
@@ -127,6 +131,12 @@ Future<void> initEnv(String appType) async {
   // for convenience, use global FFI on mobile platform
   // focus on multi-ffi on desktop first
   await initGlobalFFI();
+  // 主窗口：先按线路文件对齐服务器配置（文件是唯一事实来源），
+  // 再异步从 COS 更新；更新成功且地址有变化时会自动重新对齐并重连
+  if (appType == kAppTypeMain) {
+    await EndpointStore.applyActive();
+    EndpointStore.refreshFromCos();
+  }
   // await Firebase.initializeApp();
   _registerEventHandler();
   // Update the system theme.

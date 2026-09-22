@@ -365,6 +365,7 @@ pub struct CheckIfRestart {
     disable_udp: String,
     allow_insecure_tls_fallback: String,
     api_server: String,
+    traffic_obfuscate: String,
 }
 
 impl CheckIfRestart {
@@ -380,6 +381,7 @@ impl CheckIfRestart {
                 config::keys::OPTION_ALLOW_INSECURE_TLS_FALLBACK,
             ),
             api_server: Config::get_option("api-server"),
+            traffic_obfuscate: Config::get_option(config::OPTION_TRAFFIC_OBFUSCATE),
         }
     }
 }
@@ -396,6 +398,7 @@ impl Drop for CheckIfRestart {
             || self.ws != Config::get_option(OPTION_ALLOW_WEBSOCKET)
             || self.disable_udp != Config::get_option(config::keys::OPTION_DISABLE_UDP)
             || self.api_server != Config::get_option("api-server")
+            || self.traffic_obfuscate != Config::get_option(config::OPTION_TRAFFIC_OBFUSCATE)
         {
             if allow_insecure_tls_fallback_changed {
                 hbb_common::tls::reset_tls_cache();
@@ -915,7 +918,8 @@ where
 {
     pub fn new(conn: T) -> Self {
         Self {
-            inner: Framed::new(conn, BytesCodec::new_obfuscate(Config::get_obfuscate_key())),
+            // 本机 IPC：两端永远是同一安装包，固定混淆即可，不受对外流量模式影响
+            inner: Framed::new(conn, BytesCodec::new_obfuscate(Config::OBFUSCATE_KEY)),
         }
     }
 

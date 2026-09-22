@@ -32,6 +32,10 @@ pub fn core_main() -> Option<Vec<String>> {
     if !crate::common::global_init() {
         return None;
     }
+    // 桌面端配置目录/配置文件名/IPC 管道/服务名与官方 RustDesk 隔离，
+    // 避免读到用户之前安装官方版时手填的服务器配置，也允许两个客户端共存。
+    // 必须在任何 Config 路径计算之前设置。移动端按应用包名天然隔离，无需此改动。
+    *config::APP_NAME.write().unwrap() = "Rust-Desk".to_owned();
     crate::load_custom_client();
     #[cfg(windows)]
     if !crate::platform::windows::bootstrap() {

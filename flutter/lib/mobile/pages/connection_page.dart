@@ -12,6 +12,7 @@ import 'package:flutter_hbb/models/peer_model.dart';
 
 import '../../common.dart';
 import '../../common/widgets/peer_tab_page.dart';
+import '../../common/widgets/ios_compat_switch.dart';
 import '../../common/widgets/autocomplete.dart';
 import '../../consts.dart';
 import '../../models/model.dart';
@@ -86,6 +87,8 @@ class _ConnectionPageState extends State<ConnectionPage> {
             delegate: SliverChildListDelegate([
           if (!bind.isCustomClient() && !isIOS)
             Obx(() => _buildUpdateUI(stateGlobal.updateUrl.value)),
+          // 双模流量开关：勾选=官方线路（兼容 iOS），不勾选=加密线路
+          if (!isIOS) const IosCompatSwitch(),
           _buildRemoteIDTextField(),
         ])),
         SliverFillRemaining(

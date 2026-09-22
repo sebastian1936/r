@@ -20,7 +20,6 @@ use tokio::{
 };
 use tokio_socks::IntoTargetAddr;
 use tokio_util::codec::Framed;
-use crate::config::Config;
 
 pub trait TcpStreamTrait: AsyncRead + AsyncWrite + Unpin {}
 pub struct DynTcpStream(pub Box<dyn TcpStreamTrait + Send + Sync>);
@@ -102,7 +101,7 @@ impl FramedStream {
                     return Ok(Self(
                         Framed::new(
                             DynTcpStream(Box::new(stream)),
-                            BytesCodec::new_obfuscate(Config::get_obfuscate_key())
+                            BytesCodec::new_auto()
                         ),
                         addr,
                         None,
@@ -139,7 +138,7 @@ impl FramedStream {
         Self(
             Framed::new(
                 DynTcpStream(Box::new(stream)),
-                BytesCodec::new_obfuscate(Config::get_obfuscate_key())
+                BytesCodec::new_auto()
             ),
             addr,
             None,

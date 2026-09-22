@@ -2035,7 +2035,7 @@ class _AccountState extends State<_Account> {
     try {
       // 后台接口：GET /api/user/info，返回 UserPayload，含 expire_time1 / expire_time2
       final response = await http.get(
-        Uri.parse('$kApiBase/api/user/info'),
+        Uri.parse('$apiBase/api/user/info'),
         headers: getHttpHeaders(),
       );
 

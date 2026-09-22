@@ -22,7 +22,6 @@ use crate::{
     tls::{get_cached_tls_accept_invalid_cert, get_cached_tls_type, upsert_tls_cache, TlsType},
     ResultType,
 };
-use crate::config::Config;
 
 #[derive(Debug, ThisError)]
 pub enum ProxyError {
@@ -401,7 +400,7 @@ impl Proxy {
                     super::timeout(self.ms_timeout, self.http_connect(stream, &target_addr))
                         .await??;
                 Ok(FramedStream(
-                    Framed::new(DynTcpStream(Box::new(stream)), BytesCodec::new_obfuscate(Config::get_obfuscate_key())),
+                    Framed::new(DynTcpStream(Box::new(stream)), BytesCodec::new_auto()),
                     addr,
                     None,
                     0,
@@ -442,7 +441,7 @@ impl Proxy {
                     }
                 };
                 Ok(FramedStream(
-                    Framed::new(stream, BytesCodec::new_obfuscate(Config::get_obfuscate_key())),
+                    Framed::new(stream, BytesCodec::new_auto()),
                     addr,
                     None,
                     0,
@@ -469,7 +468,7 @@ impl Proxy {
                     .await??
                 };
                 Ok(FramedStream(
-                    Framed::new(DynTcpStream(Box::new(stream)), BytesCodec::new_obfuscate(Config::get_obfuscate_key())),
+                    Framed::new(DynTcpStream(Box::new(stream)), BytesCodec::new_auto()),
                     addr,
                     None,
                     0,

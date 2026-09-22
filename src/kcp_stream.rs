@@ -13,7 +13,6 @@ use kcp_sys::{
     stream,
 };
 use std::{net::SocketAddr, sync::Arc};
-use hbb_common::config::Config;
 
 pub struct KcpStream {
     _endpoint: KcpEndpoint,
@@ -23,7 +22,7 @@ pub struct KcpStream {
 impl KcpStream {
     fn create_framed(stream: stream::KcpStream, local_addr: Option<SocketAddr>) -> Stream {
         Stream::Tcp(FramedStream(
-            tokio_util::codec::Framed::new(DynTcpStream(Box::new(stream)), BytesCodec::new_obfuscate(Config::get_obfuscate_key())),
+            tokio_util::codec::Framed::new(DynTcpStream(Box::new(stream)), BytesCodec::new_auto()),
             local_addr.unwrap_or(config::Config::get_any_listen_addr(true)),
             None,
             0,

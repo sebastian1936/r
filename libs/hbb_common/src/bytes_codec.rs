@@ -22,11 +22,22 @@ enum DecodeState {
 
 impl Default for BytesCodec {
     fn default() -> Self {
-        Self::new_obfuscate(Config::get_obfuscate_key())
+        Self::new_auto()
     }
 }
 
 impl BytesCodec {
+    /// 官方明文模式（帧格式与官方 RustDesk 完全一致，兼容 App Store 客户端/服务端）
+    pub fn new() -> Self {
+        Self {
+            state: DecodeState::Head,
+            raw: false,
+            max_packet_length: usize::MAX,
+            obfuscate_key: None,
+        }
+    }
+
+    /// 混淆模式（ChaCha20 流密码伪装 payload 特征）
     pub fn new_obfuscate(key: [u8; 32]) -> Self {
         Self {
             state: DecodeState::Head,
@@ -34,6 +45,19 @@ impl BytesCodec {
             max_packet_length: usize::MAX,
             obfuscate_key: Some(key),
         }
+    }
+
+    /// 按运行时 option `traffic-obfuscate` 自动选择混淆或官方明文模式
+    pub fn new_auto() -> Self {
+        match Config::get_obfuscate_key() {
+            Some(key) => Self::new_obfuscate(key),
+            None => Self::new(),
+        }
+    }
+
+    /// 是否为官方明文模式（UDP 明文时需 set_raw 退化为透传，对齐官方行为）
+    pub fn is_raw_compatible(&self) -> bool {
+        self.obfuscate_key.is_none()
     }
     pub fn set_raw(&mut self) {
         self.raw = true;

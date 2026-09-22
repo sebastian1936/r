@@ -987,12 +987,16 @@ pub fn main_set_option(key: String, value: String) {
         || key.eq(config::keys::OPTION_ALLOW_WEBSOCKET)
         || key.eq(config::keys::OPTION_DISABLE_UDP)
         || key.eq("api-server")
+        || key.eq(config::OPTION_TRAFFIC_OBFUSCATE)
     {
         if is_allow_tls_fallback {
             hbb_common::tls::reset_tls_cache();
         }
         set_option(key, value.clone());
-        #[cfg(target_os = "android")]
+        // 流量模式/信令服务器变化后必须重建 UDP/TCP socket，新 socket 才会用新 codec。
+        // Android 与桌面（非服务进程内）均在此重启；桌面安装态服务进程由
+        // ipc.rs 的 CheckIfRestart 在收到 Options 后重启。
+        #[cfg(not(target_os = "ios"))]
         crate::rendezvous_mediator::RendezvousMediator::restart();
         #[cfg(any(target_os = "android", target_os = "ios", feature = "cli"))]
         crate::common::test_rendezvous_server();

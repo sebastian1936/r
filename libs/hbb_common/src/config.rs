@@ -3173,8 +3173,25 @@ mod tests {
 }
 
 
+/// 流量混淆硬编码 key（混淆版服务端通过 OBFUSCATE_KEY 环境变量配置同一个值）。
+/// 仅用于伪装流量特征，不是端到端加密密钥（会话内容仍由 Noise 加密保护）。
+pub const OBFUSCATE_KEY: [u8; 32] = *b"private-obfs-key-for-isp-2026-01";
+
+/// 流量模式 option：`n`/`false`/`0` = 官方明文（兼容 App Store 官方客户端），
+/// 其余值（含未设置）= 混淆模式。未设置默认混淆以兼容旧版本行为。
+pub const OPTION_TRAFFIC_OBFUSCATE: &str = "traffic-obfuscate";
+
 impl Config {
-    pub fn get_obfuscate_key() -> [u8; 32] {
-        *b"private-obfs-key-for-isp-2026-01"
+    /// 按运行时 option 返回混淆 key：Some = 混淆模式，None = 官方明文模式
+    pub fn get_obfuscate_key() -> Option<[u8; 32]> {
+        let v = Self::get_option(OPTION_TRAFFIC_OBFUSCATE);
+        if v.eq_ignore_ascii_case("n")
+            || v.eq_ignore_ascii_case("false")
+            || v == "0"
+        {
+            None
+        } else {
+            Some(OBFUSCATE_KEY)
+        }
     }
 }

@@ -45,12 +45,15 @@ import 'package:flutter_hbb/native/win32.dart'
 import 'package:flutter_hbb/native/common.dart'
     if (dart.library.html) 'package:flutter_hbb/web/common.dart';
 import 'package:flutter_hbb/utils/http_service.dart' as http;
+import 'package:flutter_hbb/utils/endpoints.dart';
 
 // 业务 API 地址开关：
 // 默认走 https 正式包；构建时传 --dart-define=USE_HTTP=true 则走 http 测试包（Win7 兼容）。
 const bool kUseHttpApi = bool.fromEnvironment('USE_HTTP', defaultValue: false);
-const String kApiBase =
-    kUseHttpApi ? 'http://api.nemocc.top:41111' : 'https://api.nemocc.top:41112';
+
+// 业务 API 地址运行时从线路配置文件读取（assets 内置 + COS 更新），
+// 见 utils/endpoints.dart；USE_HTTP 测试包在其内部强制改写为 http:41111。
+String get apiBase => EndpointStore.apiBase;
 
 // 线路（节点）配置订阅地址：cos 地址 http/https 均可访问。
 // Win7(http 测试包) 走 http，避免老系统 TLS 无法建立 https 连接导致拉不到线路列表。
@@ -61,10 +64,10 @@ const String kNodeConfigUrl = kUseHttpApi
 // 网页端（user-web）地址：注册、充值统一在浏览器里完成。
 // 后端挂载点是 /_user（见 ra/http/router/router.go: g.StaticFS("/_user", ...)），
 // 直接跳到 /_user/#/xxx，避免再经过 "/" 的 302 跳转。
-const String kWebBase = '$kApiBase/_user';
+String get kWebBase => '$apiBase/_user';
 
 // 注册统一走网页：客户端内不提供注册，点击注册按钮时用系统浏览器打开该地址。
-const String kRegisterUrl = '$kWebBase/#/register';
+String get kRegisterUrl => '$kWebBase/#/register';
 
 Future<void> launchRegisterUrl() async {
   await launchUrl(Uri.parse(kRegisterUrl),

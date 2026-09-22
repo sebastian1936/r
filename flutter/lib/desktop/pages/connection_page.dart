@@ -17,6 +17,7 @@ import 'package:flutter_hbb/models/peer_model.dart';
 import '../../common.dart';
 import '../../common/formatter/id_formatter.dart';
 import '../../common/widgets/peer_tab_page.dart';
+import '../../common/widgets/ios_compat_switch.dart';
 import '../../common/widgets/autocomplete.dart';
 import '../../models/platform_model.dart';
 import '../../desktop/widgets/material_mod_popup_menu.dart' as mod_menu;
@@ -309,6 +310,8 @@ class _ConnectionPageState extends State<ConnectionPage>
         Expanded(
             child: Column(
           children: [
+            // 双模流量开关：勾选=官方线路（兼容 iOS），不勾选=加密线路
+            const IosCompatSwitch().paddingSymmetric(horizontal: 12),
             Row(
               children: [
                 Flexible(child: _buildRemoteIDTextField(context)),
