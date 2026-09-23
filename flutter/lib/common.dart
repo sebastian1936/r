@@ -4077,11 +4077,9 @@ String getConnectionText(bool secure, bool direct, String streamType) {
   }
 }
 
-/// 质量监测面板里的连接方式分类：
-/// IPv6直连 / 加密直连 / 加密中继（普通版|专业版）。
-/// isPro 由后台 /api/user/info 的专业版到期时间判定；null（未登录/查询失败）时不标注等级。
+/// 质量监测面板里的连接方式分类：IPv6直连 / 加密直连 / 加密中继。
 String getConnectionModeLabel(
-    bool secure, bool direct, String streamType, bool? isPro) {
+    bool secure, bool direct, String streamType) {
   if (direct) {
     if (streamType == 'IPv6') {
       return 'IPv6直连';
@@ -4091,10 +4089,7 @@ String getConnectionModeLabel(
   if (!secure) {
     return '中继（未加密）';
   }
-  if (isPro == null) {
-    return '加密中继';
-  }
-  return isPro ? '加密中继（专业版）' : '加密中继（普通版）';
+  return '加密中继';
 }
 
 String decode_http_response(http.Response resp) {

@@ -3322,15 +3322,6 @@ class QualityMonitorModel with ChangeNotifier {
   Timer? _autoHideTimer;
   final _data = QualityMonitorData();
 
-  // 最近一次连接方式参数，用于会员等级查询返回后重算文案
-  bool? _lastSecure;
-  bool? _lastDirect;
-  String _lastStreamType = '';
-  // 会员等级（专业版）查询缓存，避免每次连接都请求后台
-  static bool? _cachedIsPro;
-  static DateTime? _memberCacheTime;
-  static const _memberCacheTtl = Duration(minutes: 5);
-
   bool get show => _showOption || _showAuto;
   QualityMonitorData get data => _data;
 
@@ -3364,47 +3355,9 @@ class QualityMonitorModel with ChangeNotifier {
 
   /// 根据 connection_ready 的参数计算连接方式文案并写入面板数据。
   void updateConnectionType(bool secure, bool direct, String streamType) {
-    _lastSecure = secure;
-    _lastDirect = direct;
-    _lastStreamType = streamType;
     _data.connectionType =
-        getConnectionModeLabel(secure, direct, streamType, _cachedIsPro);
-    if (!direct && secure) {
-      _refreshMembership();
-    }
+        getConnectionModeLabel(secure, direct, streamType);
     notifyListeners();
-  }
-
-  Future<void> _refreshMembership() async {
-    final now = DateTime.now();
-    if (_cachedIsPro != null &&
-        _memberCacheTime != null &&
-        now.difference(_memberCacheTime!) < _memberCacheTtl) {
-      return;
-    }
-    bool? isPro;
-    try {
-      final response =
-          await http.get(Uri.parse('$apiBase/api/user/info'), headers: getHttpHeaders());
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final expire2 = DateTime.tryParse(
-            (data is Map ? data['expire_time2'] : null)?.toString() ?? '');
-        if (expire2 != null) {
-          final today = DateTime(now.year, now.month, now.day);
-          isPro = !expire2.isBefore(today);
-        }
-      }
-    } catch (e) {
-      isPro = null;
-    }
-    _cachedIsPro = isPro;
-    _memberCacheTime = now;
-    if (_lastSecure != null && _lastDirect != null) {
-      _data.connectionType =
-          getConnectionModeLabel(_lastSecure!, _lastDirect!, _lastStreamType, isPro);
-      notifyListeners();
-    }
   }
 
   updateQualityStatus(Map<String, dynamic> evt) {
