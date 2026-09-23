@@ -181,6 +181,14 @@ pub fn core_main() -> Option<Vec<String>> {
         crate::platform::elevate_or_run_as_system(click_setup, _is_elevate, _is_run_as_system);
         return None;
     }
+    // Windows 未安装的普通启动：默认纯主控，不自行拉起用户态被控服务，
+    // 用户在主页点"接受控制"完成提权安装、服务运行后才具备被控能力。
+    // 快速支持形态（exe 名含 -qs- / --quick_support / pre-elevate-service=Y）
+    // 保留免安装临时被控，不受影响。
+    #[cfg(windows)]
+    if !crate::platform::is_installed() && !_is_quick_support {
+        no_server = true;
+    }
     #[cfg(all(feature = "flutter", feature = "plugin_framework"))]
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     init_plugins(&args);

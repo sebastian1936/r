@@ -6,7 +6,10 @@ stdout.println("is_xfce: ", is_xfce);
 const msgbox_default_height = 180;
 const incoming_only_width = 180;
 
-const outgoing_only = handler.is_outgoing_only();
+// 未安装的普通 Windows 客户端按纯主控形态展示（隐藏本机 ID/密码），
+// 用户点"接受控制"安装服务后才具备被控能力；快速支持等其他形态不受影响。
+const outgoing_only = handler.is_outgoing_only()
+    || (is_win && !handler.is_installed() && !handler.is_disable_installation());
 const incoming_only = handler.is_incoming_only();
 const disable_installation = handler.is_disable_installation();
 const disable_account = handler.is_disable_account();
@@ -743,8 +746,8 @@ class InstallMe: Reactor.Component {
     function render() {
         return <div .install-me>
             <span />
-            <div>{translate('install_tip')}</div>
-            <div><button #install-me .button>{translate('Install')}</button></div>
+            <div>当前为主控模式，仅可控制其他设备。安装服务后，本机可被远程控制。</div>
+            <div><button #install-me .button>接受控制</button></div>
         </div>;
     }
 

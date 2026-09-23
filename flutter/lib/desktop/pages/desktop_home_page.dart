@@ -56,6 +56,11 @@ class _DesktopHomePageState extends State<DesktopHomePage>
 
   final GlobalKey _childKey = GlobalKey();
 
+  /// 纯主控形态：定制客户端 outgoing-only，或 Windows 未安装服务。
+  /// 未安装时不显示本机 ID/密码，用户点"接受控制"完成安装后才转为可被控。
+  bool get _controllerOnly =>
+      bind.isOutgoingOnly() || (isWindows && !bind.mainIsInstalled());
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -78,7 +83,8 @@ class _DesktopHomePageState extends State<DesktopHomePage>
 
   Widget buildLeftPane(BuildContext context) {
     final isIncomingOnly = bind.isIncomingOnly();
-    final isOutgoingOnly = bind.isOutgoingOnly();
+    // 纯主控形态：定制客户端 outgoing-only，或 Windows 未安装（用户尚未点"接受控制"）
+    final isOutgoingOnly = _controllerOnly;
     final children = <Widget>[
       if (!isOutgoingOnly) buildPresetPasswordWarning(),
       if (bind.isCustomClient())
@@ -389,7 +395,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   }
 
   buildTip(BuildContext context) {
-    final isOutgoingOnly = bind.isOutgoingOnly();
+    final isOutgoingOnly = _controllerOnly;
     return Padding(
       padding:
           const EdgeInsets.only(left: 20.0, right: 16, top: 16.0, bottom: 5),
@@ -420,7 +426,9 @@ class _DesktopHomePageState extends State<DesktopHomePage>
             ),
           if (isOutgoingOnly)
             Text(
-              translate("outgoing_only_desk_tip"),
+              isWindows && !bind.isOutgoingOnly()
+                  ? "当前为主控模式。需要让这台电脑被远程控制时，请点击下方「接受控制」完成安装。"
+                  : translate("outgoing_only_desk_tip"),
               overflow: TextOverflow.clip,
               style: Theme.of(context).textTheme.bodySmall,
             ),
@@ -457,8 +465,9 @@ class _DesktopHomePageState extends State<DesktopHomePage>
     if (isWindows && !bind.isDisableInstallation()) {
       if (!bind.mainIsInstalled()) {
         return buildInstallCard(
-            "", bind.isOutgoingOnly() ? "" : "install_tip", "Install",
-            () async {
+            "接受远程控制",
+            "当前仅可主动控制其他设备。开启后，其他设备可通过本机 ID 远程控制这台电脑，需要安装系统服务。",
+            "接受控制", () async {
           await rustDeskWinManager.closeAllSubWindows();
           bind.mainGotoInstall();
         });
