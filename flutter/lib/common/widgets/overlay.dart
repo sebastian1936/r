@@ -594,6 +594,9 @@ class QualityMonitor extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      _row("连接方式",
+                          qualityMonitorModel.data.connectionType ?? '-',
+                          rightColor: Colors.greenAccent),
                       _row("Speed", qualityMonitorModel.data.speed ?? '-'),
                       _row("FPS", qualityMonitorModel.data.fps ?? '-'),
                       // let delay be 0 if fps is 0

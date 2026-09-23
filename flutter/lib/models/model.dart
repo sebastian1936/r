@@ -237,6 +237,7 @@ class FfiModel with ChangeNotifier {
     clearPermissions();
     waitForImageTimer?.cancel();
     timerScreenshot?.cancel();
+    qualityMonitorModel.cancelAutoShow();
   }
 
   setConnectionType(
@@ -246,6 +247,8 @@ class FfiModel with ChangeNotifier {
     cachedPeerData.streamType = streamType;
     _secure = secure;
     _direct = direct;
+    // 连接建立：右上角质量监测自动展示 15 秒（含本次连接方式）
+    qualityMonitorModel.showAutoOnConnected(secure, direct, streamType);
     try {
       var connectionType = ConnectionTypeState.find(peerId);
       connectionType.setSecure(secure);
@@ -3300,6 +3303,7 @@ class CursorModel with ChangeNotifier {
 }
 
 class QualityMonitorData {
+  String? connectionType;
   String? speed;
   String? fps;
   String? delay;
@@ -3312,18 +3316,93 @@ class QualityMonitorModel with ChangeNotifier {
   WeakReference<FFI> parent;
 
   QualityMonitorModel(this.parent);
-  var _show = false;
+  // _showOption：用户手动勾选（持久化）；_showAuto：建立连接后自动展示 15 秒
+  var _showOption = false;
+  var _showAuto = false;
+  Timer? _autoHideTimer;
   final _data = QualityMonitorData();
 
-  bool get show => _show;
+  // 最近一次连接方式参数，用于会员等级查询返回后重算文案
+  bool? _lastSecure;
+  bool? _lastDirect;
+  String _lastStreamType = '';
+  // 会员等级（专业版）查询缓存，避免每次连接都请求后台
+  static bool? _cachedIsPro;
+  static DateTime? _memberCacheTime;
+  static const _memberCacheTtl = Duration(minutes: 5);
+
+  bool get show => _showOption || _showAuto;
   QualityMonitorData get data => _data;
 
   checkShowQualityMonitor(SessionID sessionId) async {
     final show = await bind.sessionGetToggleOption(
             sessionId: sessionId, arg: 'show-quality-monitor') ==
         true;
-    if (_show != show) {
-      _show = show;
+    if (_showOption != show) {
+      _showOption = show;
+      notifyListeners();
+    }
+  }
+
+  /// 建立连接后自动在右上角展示 15 秒；用户手动勾选的常驻显示不受影响。
+  void showAutoOnConnected(bool secure, bool direct, String streamType) {
+    updateConnectionType(secure, direct, streamType);
+    _showAuto = true;
+    _autoHideTimer?.cancel();
+    _autoHideTimer = Timer(const Duration(seconds: 15), () {
+      _showAuto = false;
+      notifyListeners();
+    });
+  }
+
+  /// 会话关闭时取消自动隐藏计时，避免销毁后回调。
+  void cancelAutoShow() {
+    _autoHideTimer?.cancel();
+    _autoHideTimer = null;
+    _showAuto = false;
+  }
+
+  /// 根据 connection_ready 的参数计算连接方式文案并写入面板数据。
+  void updateConnectionType(bool secure, bool direct, String streamType) {
+    _lastSecure = secure;
+    _lastDirect = direct;
+    _lastStreamType = streamType;
+    _data.connectionType =
+        getConnectionModeLabel(secure, direct, streamType, _cachedIsPro);
+    if (!direct && secure) {
+      _refreshMembership();
+    }
+    notifyListeners();
+  }
+
+  Future<void> _refreshMembership() async {
+    final now = DateTime.now();
+    if (_cachedIsPro != null &&
+        _memberCacheTime != null &&
+        now.difference(_memberCacheTime!) < _memberCacheTtl) {
+      return;
+    }
+    bool? isPro;
+    try {
+      final response =
+          await http.get(Uri.parse('$apiBase/api/user/info'), headers: getHttpHeaders());
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final expire2 = DateTime.tryParse(
+            (data is Map ? data['expire_time2'] : null)?.toString() ?? '');
+        if (expire2 != null) {
+          final today = DateTime(now.year, now.month, now.day);
+          isPro = !expire2.isBefore(today);
+        }
+      }
+    } catch (e) {
+      isPro = null;
+    }
+    _cachedIsPro = isPro;
+    _memberCacheTime = now;
+    if (_lastSecure != null && _lastDirect != null) {
+      _data.connectionType =
+          getConnectionModeLabel(_lastSecure!, _lastDirect!, _lastStreamType, isPro);
       notifyListeners();
     }
   }
