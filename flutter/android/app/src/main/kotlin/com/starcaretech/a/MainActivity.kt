@@ -91,7 +91,7 @@ class MainActivity : FlutterActivity() {
                 mapOf("name" to "input", "value" to inputPer.toString())
             )
         }
-        // 防电诈：从系统权限页返回时若刚授予 READ_PHONE_STATE，补注册电话监听
+        // 防电诈：回到前台时补启动通话监听（内部有 started 保护，可重复调用）
         if (!isController) {
             CallStateMonitor.start(applicationContext)
         }

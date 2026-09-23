@@ -603,7 +603,7 @@ class MainService : Service() {
         keepAwakeInstance = this
         applyKeepScreenOn(pendingKeepScreenOn)
 
-        // 防电诈：系统通话期间锁定被控输入（READ_PHONE_STATE 未授予时内部静默跳过）
+        // 防电诈：系统通话期间锁定被控输入（AudioManager 轮询，无需权限）
         CallStateMonitor.start(applicationContext)
     }
 
@@ -625,8 +625,8 @@ class MainService : Service() {
         applyKeepScreenOn(false)
         keepAwakeInstance = null
         stopService(Intent(this, FloatingWindowService::class.java))
-        // 防电诈：注销电话监听并恢复输入锁
-        CallStateMonitor.stop(applicationContext)
+        // 防电诈：注销通话监听并恢复输入锁
+        CallStateMonitor.stop()
         super.onDestroy()
     }
 

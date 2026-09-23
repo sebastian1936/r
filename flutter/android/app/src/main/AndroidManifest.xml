@@ -21,8 +21,6 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- 录屏授权失效时全屏通知一键拉起确认页（Android 10+ 后台禁止直接启动 Activity） -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
-    <!-- 防电诈：监听系统电话状态，响铃/通话中临时锁定被控输入 -->
-    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
 
     <queries>
         <intent>

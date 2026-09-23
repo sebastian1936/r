@@ -84,7 +84,7 @@ pub static CLICK_TIME: AtomicI64 = AtomicI64::new(0);
 pub static MOUSE_MOVE_TIME: AtomicI64 = AtomicI64::new(0);
 
 // 防电诈：Android 系统电话（响铃/通话中）期间硬锁被控输入注入，
-// 状态由 PhoneStateListener 经 JNI 设置，挂断自动恢复。
+// 状态由 CallStateMonitor（AudioManager 轮询系统通话模式）经 JNI 设置，挂断自动恢复。
 #[cfg(target_os = "android")]
 static CALL_INPUT_LOCKED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
