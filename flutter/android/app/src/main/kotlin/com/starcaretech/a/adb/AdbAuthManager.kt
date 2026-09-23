@@ -41,6 +41,27 @@ object AdbAuthManager {
 
     private const val MARKER = "__ADB_SHELL_MARKER__"
 
+    /**
+     * 名单写入后等待系统真正绑定 InputService 的最长时间。
+     * AOSP 通常 1~2s；MIUI 等国产 ROM 在 disableSelf 后重新写名单时，
+     * 只恢复开关显示而不绑定的情况也靠这段轮询识别出来。
+     */
+    private const val AWAIT_BIND_MS = 5_000L
+
+    /** 轮询等待 InputService 完成 onServiceConnected（只能在后台线程调用） */
+    private fun awaitBound(timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (true) {
+            if (InputService.isOpen) return true
+            if (System.currentTimeMillis() >= deadline) return false
+            try {
+                Thread.sleep(200)
+            } catch (e: InterruptedException) {
+                return InputService.isOpen
+            }
+        }
+    }
+
     /** 把异常链（含异常类型）展开成可展示文本 */
     private fun Throwable?.chainText(): String {
         val sb = StringBuilder()
@@ -456,16 +477,24 @@ object AdbAuthManager {
 
         val listed = isAccessibilityListed(context)
 
-        // 2) App 自身有权限：本地写 secure settings，离线、瞬时
+        // 2) App 自身有 WRITE_SECURE_SETTINGS：本地写 secure settings，离线、瞬时
         if (isWriteSecureSettingsGranted(context)) {
-            val ok = if (listed) {
-                // 名单在但服务没起来：先移除再加回触发系统重绑（约 800ms）
+            // 名单在但服务没起来：先移除再加回触发系统重绑；不在名单：普通追加
+            val firstOk = if (listed) {
                 Log.i(TAG, "enableInput：名单在但未绑定，强制重绑")
                 forceRebindAccessibility(context)
             } else {
                 repairAccessibility(context)
             }
-            return if (ok) EnableResult(true, "local") else EnableResult(false, "local_failed")
+            if (firstOk && awaitBound(AWAIT_BIND_MS)) {
+                return EnableResult(true, "local")
+            }
+            // 名单写入成功但系统迟迟不绑定（实测 MIUI Android12 在 disableSelf
+            // 之后普通追加只恢复开关显示）：无条件再做一次"移除→加回"强制重绑
+            Log.w(TAG, "enableInput：本地写名单后 ${AWAIT_BIND_MS}ms 未绑定，强制重绑重试")
+            val rebound = forceRebindAccessibility(context) && awaitBound(AWAIT_BIND_MS)
+            return if (rebound) EnableResult(true, "local")
+            else EnableResult(false, "local_failed")
         }
 
         // 3) 没本地权限：必须配对过，且此刻无线调试开着才能连 adbd
@@ -485,9 +514,18 @@ object AdbAuthManager {
         return try {
             val identity = AdbKeyStore.getOrCreate(context)
             // 名单在但没绑定 → force 强制重绑；不在名单 → 普通追加
-            val r = shellDirectEnableAccessibility(context, identity, force = listed)
-            if (r.ok) {
+            var r = shellDirectEnableAccessibility(context, identity, force = listed)
+            if (r.ok && awaitBound(AWAIT_BIND_MS)) {
                 EnableResult(true, "shell")
+            } else if (r.ok) {
+                // 同本地路径：名单已写入但系统不绑定，force 重写一轮强制触发重绑
+                Log.w(TAG, "enableInput：shell 写名单后 ${AWAIT_BIND_MS}ms 未绑定，force 重写重试")
+                r = shellDirectEnableAccessibility(context, identity, force = true)
+                if (r.ok && awaitBound(AWAIT_BIND_MS)) {
+                    EnableResult(true, "shell")
+                } else {
+                    EnableResult(false, "shell_${r.stage}", r.detail)
+                }
             } else {
                 // shell_no_service：开关开着但服务没广播（引导进无线调试页停留）
                 // shell_rejected：配对失效（引导重新配对）
@@ -502,7 +540,8 @@ object AdbAuthManager {
     }
 
     /**
-     * @param ok 是否成功把 InputService 写入系统名单（系统绑定可能滞后 1~2 秒）
+     * @param ok InputService 是否已经真正被系统绑定（onServiceConnected 完成），
+     *   不再是"名单写入成功"——部分国产 ROM 写名单后只恢复开关显示而不绑定
      * @param mode 成功：already/local/shell；
      *   失败原因码：not_paired / wireless_debug_off / local_failed /
      *   shell_no_service（无线调试开着但没发现连接服务）/
