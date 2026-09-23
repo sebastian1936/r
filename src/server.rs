@@ -65,6 +65,8 @@ pub mod input_service {
 }
 
 mod connection;
+#[cfg(target_os = "android")]
+pub use connection::set_call_input_locked;
 pub mod display_service;
 #[cfg(windows)]
 pub mod portable_service;

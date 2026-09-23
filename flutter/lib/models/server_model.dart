@@ -28,6 +28,8 @@ class ServerModel with ChangeNotifier {
   bool _isStart = false; // Android MainService status
   bool _mediaOk = false;
   bool _inputOk = false;
+  // 防电诈：系统电话（响铃/通话中）期间为 true，输入控制被临时硬锁
+  bool _callLocked = false;
   bool _audioOk = false;
   bool _fileOk = false;
   bool _clipboardOk = false;
@@ -72,6 +74,15 @@ class ServerModel with ChangeNotifier {
   bool get mediaOk => _mediaOk;
 
   bool get inputOk => _inputOk;
+
+  bool get callLocked => _callLocked;
+
+  // 由 Android PhoneStateListener 经 mChannel(on_call_state_changed) 回写
+  void setCallLocked(bool locked) {
+    if (_callLocked == locked) return;
+    _callLocked = locked;
+    notifyListeners();
+  }
 
   bool get audioOk => _audioOk;
 
@@ -239,6 +250,15 @@ class ServerModel with ChangeNotifier {
     final clipOption = await bind.mainGetOption(key: kOptionEnableClipboard);
     _clipboardOk = clipOption != 'N';
 
+    // 防电诈：申请电话状态权限用于通话中锁定被控输入；
+    // 仅 Android 11+ 非鸿蒙（低版本/鸿蒙挂断后无法自动恢复输入权限，不做）；
+    // 用户拒绝则功能静默不生效，不阻断其他功能
+    if (androidVersion >= 30 &&
+        !isHarmonyOs &&
+        !await AndroidPermissionManager.check(kReadPhoneState)) {
+      AndroidPermissionManager.request(kReadPhoneState).catchError((_) => false);
+    }
+
     notifyListeners();
   }
 
@@ -360,6 +380,11 @@ class ServerModel with ChangeNotifier {
   }
 
   toggleInput() async {
+    // 通话锁定期禁止手动重新打开，防止骗子电话中诱导操作
+    if (_callLocked) {
+      showToast(translate('call_input_locked_tip'));
+      return;
+    }
     if (clients.isNotEmpty) {
       await showClientsMayNotBeChangedAlert(parent.target);
     }

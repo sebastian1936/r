@@ -79,6 +79,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Canvas Zoom", "Canvas zoom"),
         ("Screen Capture", "Screen capture"),
         ("Input Control", "Input control"),
+        ("call_input_locked_tip", "A phone call is in progress. Remote control has been temporarily locked and will resume after the call ends."),
         ("Audio Capture", "Audio capture"),
         ("Open System Setting", "Open system setting"),
         ("android_input_permission_tip1", "In order for a remote device to control your Android device via mouse or touch, you need to allow RustDesk to use the \"Accessibility\" service."),

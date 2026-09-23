@@ -602,6 +602,9 @@ class MainService : Service() {
         // 保持屏幕开启：服务启动时按设置项恢复常亮状态
         keepAwakeInstance = this
         applyKeepScreenOn(pendingKeepScreenOn)
+
+        // 防电诈：系统通话期间锁定被控输入（READ_PHONE_STATE 未授予时内部静默跳过）
+        CallStateMonitor.start(applicationContext)
     }
 
     override fun onDestroy() {
@@ -622,6 +625,8 @@ class MainService : Service() {
         applyKeepScreenOn(false)
         keepAwakeInstance = null
         stopService(Intent(this, FloatingWindowService::class.java))
+        // 防电诈：注销电话监听并恢复输入锁
+        CallStateMonitor.stop(applicationContext)
         super.onDestroy()
     }
 

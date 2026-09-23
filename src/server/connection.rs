@@ -83,6 +83,38 @@ pub static CLICK_TIME: AtomicI64 = AtomicI64::new(0);
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub static MOUSE_MOVE_TIME: AtomicI64 = AtomicI64::new(0);
 
+// 防电诈：Android 系统电话（响铃/通话中）期间硬锁被控输入注入，
+// 状态由 PhoneStateListener 经 JNI 设置，挂断自动恢复。
+#[cfg(target_os = "android")]
+static CALL_INPUT_LOCKED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "android")]
+#[inline]
+pub fn is_call_input_locked() -> bool {
+    CALL_INPUT_LOCKED.load(Ordering::SeqCst)
+}
+
+#[cfg(not(target_os = "android"))]
+#[inline]
+pub fn is_call_input_locked() -> bool {
+    false
+}
+
+/// 通话状态变化（Android JNI 调用）：更新硬锁，并实时同步所有在线连接，
+/// 使主控端"键盘/鼠标"权限按钮即时置灰、挂断后按用户原设置恢复。
+#[cfg(target_os = "android")]
+pub fn set_call_input_locked(locked: bool) {
+    CALL_INPUT_LOCKED.store(locked, Ordering::SeqCst);
+    let option_key = keys::OPTION_ENABLE_KEYBOARD;
+    let user_enabled = config::option2bool(option_key, &Config::get_option(option_key));
+    log::info!("call input locked: {locked}, keyboard restored to: {}", user_enabled && !locked);
+    crate::ui_cm_interface::switch_permission_all(
+        "keyboard".to_owned(),
+        user_enabled && !locked,
+    );
+}
+
 #[cfg(all(feature = "flutter", feature = "plugin_framework"))]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 lazy_static::lazy_static! {
@@ -474,7 +506,7 @@ impl Connection {
         #[cfg(target_os = "android")]
         start_channel(rx_to_cm, tx_from_cm);
         #[cfg(target_os = "android")]
-        conn.send_permission(Permission::Keyboard, conn.keyboard)
+        conn.send_permission(Permission::Keyboard, conn.peer_keyboard_enabled())
             .await;
         #[cfg(not(target_os = "android"))]
         if !conn.keyboard {
@@ -1720,7 +1752,7 @@ impl Connection {
     }
 
     fn peer_keyboard_enabled(&self) -> bool {
-        self.keyboard && !self.disable_keyboard
+        self.keyboard && !self.disable_keyboard && !is_call_input_locked()
     }
 
     fn clipboard_enabled(&self) -> bool {
@@ -2313,7 +2345,16 @@ impl Connection {
                     if self.is_authed_view_camera_conn() {
                         return true;
                     }
-                    #[cfg(any(target_os = "android", target_os = "ios"))]
+                    // Android：服务端按权限/通话锁硬门控（原来无条件转发）
+                    #[cfg(target_os = "android")]
+                    if self.peer_keyboard_enabled() {
+                        if let Err(e) =
+                            call_main_service_pointer_input("mouse", me.mask, me.x, me.y)
+                        {
+                            log::debug!("call_main_service_pointer_input fail:{}", e);
+                        }
+                    }
+                    #[cfg(target_os = "ios")]
                     if let Err(e) = call_main_service_pointer_input("mouse", me.mask, me.x, me.y) {
                         log::debug!("call_main_service_pointer_input fail:{}", e);
                     }
@@ -2352,7 +2393,44 @@ impl Connection {
                     if self.is_authed_view_camera_conn() {
                         return true;
                     }
-                    #[cfg(any(target_os = "android", target_os = "ios"))]
+                    #[cfg(target_os = "android")]
+                    if self.peer_keyboard_enabled() {
+                        if let Err(e) = match pde.union {
+                            Some(pointer_device_event::Union::TouchEvent(touch)) => {
+                                match touch.union {
+                                    Some(touch_event::Union::PanStart(pan_start)) => {
+                                        call_main_service_pointer_input(
+                                            "touch",
+                                            4,
+                                            pan_start.x,
+                                            pan_start.y,
+                                        )
+                                    }
+                                    Some(touch_event::Union::PanUpdate(pan_update)) => {
+                                        call_main_service_pointer_input(
+                                            "touch",
+                                            5,
+                                            pan_update.x,
+                                            pan_update.y,
+                                        )
+                                    }
+                                    Some(touch_event::Union::PanEnd(pan_end)) => {
+                                        call_main_service_pointer_input(
+                                            "touch",
+                                            6,
+                                            pan_end.x,
+                                            pan_end.y,
+                                        )
+                                    }
+                                    _ => Ok(()),
+                                }
+                            }
+                            _ => Ok(()),
+                        } {
+                            log::debug!("call_main_service_pointer_input fail:{}", e);
+                        }
+                    }
+                    #[cfg(target_os = "ios")]
                     if let Err(e) = match pde.union {
                         Some(pointer_device_event::Union::TouchEvent(touch)) => match touch.union {
                             Some(touch_event::Union::PanStart(pan_start)) => {
@@ -2394,6 +2472,8 @@ impl Connection {
                     if self.is_authed_view_camera_conn() {
                         return true;
                     }
+                    // 通话锁/无键盘权限期间直接丢弃，不注入系统
+                    if self.peer_keyboard_enabled() {
                     let key = match me.mode.enum_value() {
                         Ok(KeyboardMode::Map) => {
                             Some(crate::keyboard::keycode_to_rdev_key(me.chr()))
@@ -2442,6 +2522,7 @@ impl Connection {
                         Err(e) => {
                             log::debug!("encode key event fail: {}", e);
                         }
+                    }
                     }
                 }
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]

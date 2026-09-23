@@ -29,4 +29,6 @@ object FFI {
     external fun getLocalOption(key: String): String
     external fun onClipboardUpdate(clips: ByteBuffer)
     external fun isServiceClipboardEnabled(): Boolean
+    // 防电诈：系统通话期间 true=锁定被控输入，false=恢复
+    external fun setCallInputLocked(locked: Boolean)
 }

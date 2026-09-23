@@ -272,6 +272,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Selected", "已选择"),
         ("Screen Capture", "观看屏幕-警惕诈骗"),
         ("Input Control", "控制屏幕-警惕诈骗"),
+        ("call_input_locked_tip", "通话中，远程控制已临时锁定，挂断后自动恢复"),
         ("Audio Capture", "音频录制"),
         ("Do you accept?", "是否接受？"),
         ("Open System Setting", "打开系统设置"),

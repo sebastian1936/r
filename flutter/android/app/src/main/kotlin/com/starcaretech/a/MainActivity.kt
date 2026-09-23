@@ -91,6 +91,10 @@ class MainActivity : FlutterActivity() {
                 mapOf("name" to "input", "value" to inputPer.toString())
             )
         }
+        // 防电诈：从系统权限页返回时若刚授予 READ_PHONE_STATE，补注册电话监听
+        if (!isController) {
+            CallStateMonitor.start(applicationContext)
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

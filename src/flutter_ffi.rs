@@ -2932,4 +2932,13 @@ pub mod server_side {
     ) -> jboolean {
         jboolean::from(crate::server::is_clipboard_service_ok())
     }
+
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_setCallInputLocked(
+        _env: JNIEnv,
+        _class: JClass,
+        locked: jboolean,
+    ) {
+        crate::server::set_call_input_locked(locked != 0);
+    }
 }

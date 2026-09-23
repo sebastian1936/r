@@ -1191,6 +1191,42 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
             ]),
           ),
         ),
+        const SizedBox(height: 8),
+        // 通话自动锁定说明；通话中高亮提示，挂断后恢复
+        Builder(builder: (context) {
+          final locked = serverModel.callLocked;
+          final accent = locked ? Colors.orange[700]! : Colors.blue;
+          return Container(
+            width: double.maxFinite,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: accent.withOpacity(0.06),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: accent.withOpacity(0.3)),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                    locked
+                        ? Icons.phone_in_talk_rounded
+                        : Icons.phone_android_rounded,
+                    color: accent,
+                    size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    locked
+                        ? "通话中，远程控制已临时锁定，挂断后自动恢复"
+                        : "为防范电信诈骗，通话时将断开远程，通话结束后恢复。",
+                    style: TextStyle(
+                        fontSize: 12.5, height: 1.5, color: accent),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }),
         const Divider(height: 20),
         // ④ 辅助操作区：保活检查常驻；未配对时附带配对诊断入口
         Wrap(
@@ -2284,6 +2320,12 @@ void androidChannelInit() {
         case "on_media_projection_canceled":
           {
             gFFI.serverModel.stopService();
+            break;
+          }
+        case "on_call_state_changed":
+          {
+            // 防电诈：系统电话开始/结束，输入控制硬锁/恢复
+            gFFI.serverModel.setCallLocked(arguments["locked"] == true);
             break;
           }
         case "msgbox":
