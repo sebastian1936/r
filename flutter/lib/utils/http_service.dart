@@ -4,12 +4,24 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:http/http.dart' as http;
 import '../models/platform_model.dart';
 import 'package:flutter_hbb/common.dart';
+import 'endpoints.dart';
 export 'package:http/http.dart' show Response;
 
 enum HttpMethod { get, post, put, delete }
 
 class HttpService {
   Future<http.Response> sendRequest(
+    Uri url,
+    HttpMethod method, {
+    Map<String, String>? headers,
+    dynamic body,
+  }) async {
+    // https 传输层失败（Win7 等老系统 TLS 不兼容）自动重试 http 兜底地址。
+    return HttpFallback.send(
+        url, (u) => _sendRequestOnce(u, method, headers: headers, body: body));
+  }
+
+  Future<http.Response> _sendRequestOnce(
     Uri url,
     HttpMethod method, {
     Map<String, String>? headers,

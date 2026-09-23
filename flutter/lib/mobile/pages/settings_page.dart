@@ -17,7 +17,7 @@ import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../widgets/dialog.dart';
 import 'home_page.dart';
-import 'package:http/http.dart' as http;
+import 'package:flutter_hbb/utils/http_service.dart' as http;
 
 
 class SettingsPage extends StatefulWidget implements PageShape {

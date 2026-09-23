@@ -92,6 +92,105 @@ class EndpointsConfig {
   }
 }
 
+/// 老系统（Win7 等）TLS 兼容：业务 API 先走 https，发生传输层失败
+/// （TLS 握手失败 / 连接被拒 / 超时，HTTP 状态码不算）后自动改走 http，
+/// 替代过去的 USE_HTTP 单独编译包。
+///
+/// - 切换结果持久化在 option [optionForceHttp]，重启不丢，后续请求零损耗；
+/// - [reProbeAfter] 后用下一次请求再探一次 https，服务端证书/网络修复后自动切回；
+/// - 地址改写规则与旧 USE_HTTP 包一致：scheme https→http，端口 41112→41111；
+/// - USE_HTTP 编译包（[kUseHttpApi]）行为不变，恒走 http。
+class HttpFallback {
+  static const String optionForceHttp = 'api-force-http';
+  static const String optionForceHttpAt = 'api-force-http-at';
+  static const Duration reProbeAfter = Duration(hours: 12);
+
+  static bool? _forceHttp;
+
+  /// 编译期 http 包恒为 true；运行期自动回退只看持久化 option。
+  static bool get forceHttp {
+    if (kUseHttpApi) return true;
+    _forceHttp ??= bind.mainGetOptionSync(key: optionForceHttp) == 'Y';
+    return _forceHttp!;
+  }
+
+  /// https 地址对应的 http 兜底地址（无 https 前缀时原样返回）。
+  static String toHttpAlt(String url) {
+    if (!url.startsWith('https://')) return url;
+    return url
+        .replaceFirst('https://', 'http://')
+        .replaceFirst(':41112', ':41111');
+  }
+
+  /// 按当前回退状态解析业务 API 基址。
+  static String resolve(String url) =>
+      forceHttp && url.startsWith('https://') ? toHttpAlt(url) : url;
+
+  /// 传输层失败才允许回退；拿到 HTTP 响应（含 4xx/5xx）一律不回退。
+  static bool isTransportFailure(Object e) {
+    if (e is HandshakeException ||
+        e is SocketException ||
+        e is TlsException ||
+        e is TimeoutException ||
+        e is http.ClientException) {
+      return true;
+    }
+    // Rust 通道（reqwest）传输层失败时，状态不是合法 JSON，
+    // HttpService 会包成 "Failed to parse response" 抛出。
+    final s = e.toString();
+    return s.contains('Failed to parse response') ||
+        s.contains('The HTTP request failed');
+  }
+
+  /// 以 https 先发，失败自动重试 http；url 非 https 时直通。
+  /// 调用方只需保证 [run] 对传入的 Uri 各执行一次完整请求。
+  static Future<http.Response> send(
+    Uri url,
+    Future<http.Response> Function(Uri) run,
+  ) async {
+    if (!url.isScheme('https')) {
+      return run(url);
+    }
+    // 已切 http：未到重探周期直接走 http；到周期则先用 https 探一次。
+    if (forceHttp && !_probeDue) {
+      return run(Uri.parse(toHttpAlt(url.toString())));
+    }
+    try {
+      final resp = await run(url);
+      if (forceHttp) {
+        // 重探 https 成功，清除回退标记，后续恢复 https。
+        _forceHttp = false;
+        bind.mainSetOption(key: optionForceHttp, value: 'N');
+        debugPrint('api-fallback: https recovered, back to https');
+      }
+      return resp;
+    } catch (e) {
+      if (!isTransportFailure(e)) rethrow;
+      if (!forceHttp) {
+        _forceHttp = true;
+        final now = DateTime.now().millisecondsSinceEpoch.toString();
+        bind.mainSetOption(key: optionForceHttp, value: 'Y');
+        bind.mainSetOption(key: optionForceHttpAt, value: now);
+        debugPrint('api-fallback: https failed ($e), switch to http');
+      } else {
+        // 重探失败：刷新计时，接下来 12h 不再为每次请求付出 https 尝试代价。
+        bind.mainSetOption(
+            key: optionForceHttpAt,
+            value: DateTime.now().millisecondsSinceEpoch.toString());
+      }
+      return run(Uri.parse(toHttpAlt(url.toString())));
+    }
+  }
+
+  static bool get _probeDue {
+    if (!forceHttp || kUseHttpApi) return false;
+    final at =
+        int.tryParse(bind.mainGetOptionSync(key: optionForceHttpAt)) ?? 0;
+    return DateTime.now().millisecondsSinceEpoch - at >
+        reProbeAfter.inMilliseconds;
+  }
+}
+
 class EndpointStore {
   static const String _assetName = 'assets/config/endpoints_v1.json';
   static const String _fileName = 'endpoints_v1.json';
@@ -130,15 +229,16 @@ class EndpointStore {
   /// 当前模式生效的线路段
   static EndpointInfo get active => current.section(officialMode);
 
-  /// 业务 API 地址。USE_HTTP 测试包（Win7）强制 http:41111。
+  /// 业务 API 地址。正常 https；老系统 https 传输失败后由 [HttpFallback]
+  /// 自动改写为 http:41111（USE_HTTP 编译包则直接恒 http）。
   static String get apiBase {
-    var url = current.section(officialMode).api;
+    final url = current.section(officialMode).api;
     if (kUseHttpApi) {
-      url = url
+      return url
           .replaceFirst('https://', 'http://')
           .replaceFirst(':41112', ':41111');
     }
-    return url;
+    return HttpFallback.resolve(url);
   }
 
   static Future<File> _cacheFile() async {
@@ -262,9 +362,12 @@ class EndpointStore {
     if (_refreshing) return;
     _refreshing = true;
     try {
-      final resp = await http
-          .get(Uri.parse('$kNodeConfigUrl$_cosPath'))
-          .timeout(const Duration(seconds: 5));
+      // COS 同样 https 优先；老系统 TLS 失败自动改 http（站点两种 scheme 都支持）。
+      final uri = Uri.parse('$kNodeConfigUrl$_cosPath');
+      final resp = await HttpFallback.send(
+        uri,
+        (u) => http.get(u).timeout(const Duration(seconds: 5)),
+      );
       if (resp.statusCode != 200) {
         debugPrint('endpoints cos status: ${resp.statusCode}');
         return;

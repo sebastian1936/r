@@ -1024,6 +1024,15 @@ pub fn get_api_server(api: String, custom: String) -> String {
     {
         return res.replace(":21114", "");
     }
+    // Win7 等老系统 TLS 不兼容时，Dart 侧 HttpFallback 会把本 option 置 Y。
+    // Rust 侧自发的业务请求（心跳/OIDC/录像上传/审计/插件签名/CLI）以及
+    // Dart 经 mainGetApiServer() 取址的请求都汇聚到本函数，在此统一跟随，
+    // 改写规则必须与 Dart HttpFallback.toHttpAlt 保持一致。
+    if Config::get_option("api-force-http") == "Y" && res.starts_with("https://") {
+        res = res
+            .replacen("https://", "http://", 1)
+            .replacen(":41112", ":41111", 1);
+    }
     res
 }
 
