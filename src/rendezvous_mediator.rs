@@ -41,6 +41,14 @@ lazy_static::lazy_static! {
 }
 static SHOULD_EXIT: AtomicBool = AtomicBool::new(false);
 static MANUAL_RESTARTED: AtomicBool = AtomicBool::new(false);
+// 进程内"禁止入站"开关：仅关闭信令注册与入站监听（纯主控形态），
+// 不影响 IPC。与 config::is_outgoing_only() 的区别：不经过 HARD_SETTINGS，
+// 不会污染同一进程后续的安装服务脚本生成。
+static INCOMING_DISABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_incoming_disabled(disabled: bool) {
+    INCOMING_DISABLED.store(disabled, Ordering::SeqCst);
+}
 
 #[derive(Clone)]
 pub struct RendezvousMediator {
@@ -59,7 +67,7 @@ impl RendezvousMediator {
 
     pub async fn start_all() {
         crate::test_nat_type();
-        if config::is_outgoing_only() {
+        if config::is_outgoing_only() || INCOMING_DISABLED.load(Ordering::SeqCst) {
             loop {
                 sleep(1.).await;
             }

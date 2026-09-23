@@ -181,13 +181,16 @@ pub fn core_main() -> Option<Vec<String>> {
         crate::platform::elevate_or_run_as_system(click_setup, _is_elevate, _is_run_as_system);
         return None;
     }
-    // Windows 未安装的普通启动：默认纯主控，不自行拉起用户态被控服务，
-    // 用户在主页点"接受控制"完成提权安装、服务运行后才具备被控能力。
+    // Windows 未安装的普通启动：默认纯主控。
+    // 注意不能走 no_server 分支——未安装时 IPC 服务端由本进程内拉起，
+    // 不启动会导致界面连不上 core 白屏卡死。这里只关闭入站（信令注册/监听），
+    // IPC 与全部主控功能照常。用户点"接受控制"装完服务后由系统服务进程接管，
+    // 新进程 is_installed()=true，本开关不再设置。
     // 快速支持形态（exe 名含 -qs- / --quick_support / pre-elevate-service=Y）
     // 保留免安装临时被控，不受影响。
     #[cfg(windows)]
     if !crate::platform::is_installed() && !_is_quick_support {
-        no_server = true;
+        crate::rendezvous_mediator::set_incoming_disabled(true);
     }
     #[cfg(all(feature = "flutter", feature = "plugin_framework"))]
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
