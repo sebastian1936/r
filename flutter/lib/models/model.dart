@@ -3498,6 +3498,11 @@ class FFI {
   FFI(SessionID? sId) {
     sessionId = sId ?? (isDesktop ? Uuid().v4obj() : _constSessionId);
     imageModel = ImageModel(WeakReference(this));
+    // 必须早于 ffiModel 构造：FfiModel 构造函数首行调用 clear()，其内部经
+    // parent.target.qualityMonitorModel 反向访问本对象；若放到 ffiModel 之后
+    // 才赋值，这里会读到尚未初始化的 late 字段而抛 LateInitializationError
+    // （release 混淆后表现为 Field 'xxx' has not been initialized / 启动白屏）。
+    qualityMonitorModel = QualityMonitorModel(WeakReference(this));
     ffiModel = FfiModel(WeakReference(this));
     cursorModel = CursorModel(WeakReference(this));
     canvasModel = CanvasModel(WeakReference(this));
@@ -3508,7 +3513,6 @@ class FFI {
     peerTabModel = PeerTabModel(WeakReference(this));
     abModel = AbModel(WeakReference(this));
     groupModel = GroupModel(WeakReference(this));
-    qualityMonitorModel = QualityMonitorModel(WeakReference(this));
     recordingModel = RecordingModel(WeakReference(this));
     inputModel = InputModel(WeakReference(this));
     elevationModel = ElevationModel(WeakReference(this));

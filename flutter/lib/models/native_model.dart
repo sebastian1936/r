@@ -33,6 +33,11 @@ class PlatformFFI {
   String _homeDir = '';
   final _eventHandlers = <String, Map<String, HandleEvent>>{};
   late RustdeskImpl _ffiBind;
+  // 核心库（.so）是否已成功加载并绑定。init() 的大 try 会吞掉中途异常，
+  // 若在 _ffiBind 赋值前失败，下游任何 bind 调用只会得到无信息的
+  // LateInitializationError；用该标志在 init 末尾把真实根因抛出。
+  bool _coreReady = false;
+  Object? _initError;
   late String _appType;
   StreamEventHandler? _eventCallback;
 
@@ -140,6 +145,7 @@ class PlatformFFI {
         debugPrint('Failed to get documents directory: $e');
       }
       _ffiBind = RustdeskImpl(dylib);
+      _coreReady = true;
 
       if (isLinux) {
         if (isMain) {
@@ -225,7 +231,14 @@ class PlatformFFI {
         customClientConfig: '',
       );
     } catch (e) {
+      _initError = e;
       debugPrintStack(label: 'initialize failed: $e');
+    }
+    // 核心库未就绪：此时 _ffiBind 未赋值，之后任何 bind.* 调用都会抛出
+    // 无信息的 LateInitializationError（release 下表现为启动白屏）。
+    // 直接把被吞掉的真实根因抛出，由启动错误页展示，便于定位。
+    if (!_coreReady) {
+      throw StateError('Rust 核心库加载/绑定失败：$_initError');
     }
     version = await getVersion();
   }

@@ -126,41 +126,55 @@ Future<void> main(List<String> args) async {
   }
 }
 
+/// 移动端启动的当前子步骤，仅用于 release 白屏时在错误页定位具体卡点。
+String mobileStartupStep = '';
+
 Future<void> initEnv(String appType) async {
   // global shared preference
+  mobileStartupStep = 'platformFFI.init';
   await platformFFI.init(appType);
   // global FFI, use this **ONLY** for global configuration
   // for convenience, use global FFI on mobile platform
   // focus on multi-ffi on desktop first
+  mobileStartupStep = 'initGlobalFFI';
   await initGlobalFFI();
   // 主窗口：先按线路文件对齐服务器配置（文件是唯一事实来源），
   // 再异步从 COS 更新；更新成功且地址有变化时会自动重新对齐并重连
   if (appType == kAppTypeMain) {
     // Socks5/Http(s) 代理入口已下线：普通用户易误填导致完全无法连接，
     // 启动时清空老版本残留的代理配置（空 proxy 会触发一次 mediator 重连）
+    mobileStartupStep = 'clearLegacySocks';
     final legacySocks = await bind.mainGetSocks();
     if (legacySocks.isNotEmpty && legacySocks.first.trim().isNotEmpty) {
       await bind.mainSetSocks(proxy: '', username: '', password: '');
     }
+    mobileStartupStep = 'EndpointStore.applyActive';
     await EndpointStore.applyActive();
     // 精简设置：UI 已移除的网络/备注开关在此强制对齐策略值，
     // 避免老版本持久化的用户选择残留继续生效
+    mobileStartupStep = 'applyForcedClientOptions';
     await applyForcedClientOptions();
     // 每次启动都从 COS 同步一次最新线路（内容未变不写盘、不重连）
+    mobileStartupStep = 'refreshFromCos';
     EndpointStore.refreshFromCos();
     // 低频保底同步；主力触发是"连不上信令服务器"（下面的状态监听），
     // 正常在线时不产生 COS 请求
+    mobileStartupStep = 'startPeriodicSync';
     EndpointStore.startPeriodicSync();
     // connectStatus=-1（连续注册无响应）时立即回源 COS 拉最新线路，
     // 恢复在线后自动停止重试，全平台生效（桌面状态经 IPC 取自服务进程）
+    mobileStartupStep = 'serverModel.addListener';
     gFFI.serverModel.addListener(() {
       EndpointStore.onConnectStatusChanged(gFFI.serverModel.connectStatus);
     });
   }
   // await Firebase.initializeApp();
+  mobileStartupStep = 'registerEventHandler';
   _registerEventHandler();
   // Update the system theme.
+  mobileStartupStep = 'updateSystemWindowTheme';
   updateSystemWindowTheme();
+  mobileStartupStep = '';
 }
 
 /// 精简客户端设置：以下开关已从设置界面（移动端 + PC 端）移除，
@@ -240,10 +254,13 @@ void runMobileApp() {
   // 整个移动端启动链放进 zone：runApp 之前任何 await 抛异常在 release 下
   // 都表现为永久白屏，这里兜底渲染错误页，无 adb 也能截图定位。
   var step = 'main()';
+  String stepLabel() =>
+      mobileStartupStep.isEmpty ? step : '$step > $mobileStartupStep';
   final watchdog = Timer(const Duration(seconds: 15), () {
     runMobileFatalErrorApp(
-      '启动超过 15 秒未进入界面（卡住，非崩溃），当前步骤：$step',
+      '启动超过 15 秒未进入界面（卡住，非崩溃），当前步骤：${stepLabel()}',
       StackTrace.current,
+      stepLabel(),
     );
   });
   runZonedGuarded(() async {
@@ -265,7 +282,7 @@ void runMobileApp() {
     await initUniLinks();
   }, (error, stack) {
     watchdog.cancel();
-    runMobileFatalErrorApp(error, stack);
+    runMobileFatalErrorApp(error, stack, stepLabel());
   });
 }
 
@@ -296,7 +313,7 @@ void _installMobileErrorGuard() {
 }
 
 /// runApp 前启动链异常的最终兜底页面。
-void runMobileFatalErrorApp(Object error, StackTrace? stack) {
+void runMobileFatalErrorApp(Object error, StackTrace? stack, String step) {
   runApp(MaterialApp(
     debugShowCheckedModeBanner: false,
     home: Scaffold(
@@ -312,6 +329,14 @@ void runMobileFatalErrorApp(Object error, StackTrace? stack) {
                 style: TextStyle(
                     color: Colors.redAccent,
                     fontSize: 18,
+                    fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '启动步骤：$step',
+                style: const TextStyle(
+                    color: Colors.amberAccent,
+                    fontSize: 13,
                     fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 12),
