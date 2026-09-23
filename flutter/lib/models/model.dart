@@ -237,7 +237,7 @@ class FfiModel with ChangeNotifier {
     clearPermissions();
     waitForImageTimer?.cancel();
     timerScreenshot?.cancel();
-    qualityMonitorModel.cancelAutoShow();
+    parent.target?.qualityMonitorModel.cancelAutoShow();
   }
 
   setConnectionType(
@@ -248,7 +248,8 @@ class FfiModel with ChangeNotifier {
     _secure = secure;
     _direct = direct;
     // 连接建立：右上角质量监测自动展示 15 秒（含本次连接方式）
-    qualityMonitorModel.showAutoOnConnected(secure, direct, streamType);
+    parent.target?.qualityMonitorModel
+        .showAutoOnConnected(secure, direct, streamType);
     try {
       var connectionType = ConnectionTypeState.find(peerId);
       connectionType.setSecure(secure);
