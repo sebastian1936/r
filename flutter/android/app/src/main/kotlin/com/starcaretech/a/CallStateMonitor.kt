@@ -7,7 +7,6 @@ import android.os.Build
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyManager
 import android.util.Log
-import androidx.core.content.ContextCompat
 import com.starcaretech.a.adb.HarmonyOsDetector
 import ffi.FFI
 
@@ -38,7 +37,7 @@ object CallStateMonitor {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || HarmonyOsDetector.isHarmonyOs) {
             return
         }
-        val granted = ContextCompat.checkSelfPermission(ctx, PERMISSION) ==
+        val granted = ctx.checkSelfPermission(PERMISSION) ==
                 PackageManager.PERMISSION_GRANTED
         if (!granted) {
             Log.i(TAG, "READ_PHONE_STATE not granted, monitor disabled")
