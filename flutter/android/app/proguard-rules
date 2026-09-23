@@ -36,3 +36,10 @@
 # ADB 配对：libstaradb.so 的 JNI_OnLoad 通过 FindClass + RegisterNatives
 # 按名注册 native 方法，PairingContext 类名与 native* 方法名不可混淆
 -keep class com.starcaretech.a.adb.PairingContext { *; }
+
+# 应用自身业务包整体保留：含 MainActivity 的 MethodChannel handler、
+# 各 FFI 回调与工具类。release 开启 R8 后两 flavor（host/controller）首启白屏，
+# 业务类多经 JNI/channel/反射间接引用，R8 全程序分析在 Flutter 场景易误判裁剪，
+# 统一 keep 消除该类问题。降杀软特征靠 so 中性命名与字符串清零，不依赖混淆这些类。
+-keep class com.starcaretech.a.** { *; }
+
