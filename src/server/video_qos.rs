@@ -1,5 +1,6 @@
 use super::*;
-use scrap::codec::{CodecFormat, Encoder, Quality, BR_BALANCED, BR_BEST, BR_SPEED};
+use scrap::codec::{Encoder, Quality, BR_BALANCED, BR_BEST, BR_SPEED};
+use scrap::CodecFormat;
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
