@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui';
 
 import 'package:bot_toast/bot_toast.dart';
 import 'package:desktop_multi_window/desktop_multi_window.dart';
@@ -50,6 +51,7 @@ Future<void> main(List<String> args) async {
   kBootArgs = List.from(args);
 
   if (!isDesktop) {
+    _installMobileErrorGuard();
     runMobileApp();
     return;
   }
@@ -234,16 +236,96 @@ void runMainApp(bool startService) async {
   });
 }
 
-void runMobileApp() async {
-  await initEnv(kAppTypeMain);
-  checkUpdate();
-  if (isAndroid) androidChannelInit();
-  if (isAndroid) platformFFI.syncAndroidServiceAppDirConfigPath();
-  draggablePositions.load();
-  await Future.wait([gFFI.abModel.loadCache(), gFFI.groupModel.loadCache()]);
-  gFFI.userModel.refreshCurrentUser();
-  runApp(App());
-  await initUniLinks();
+void runMobileApp() {
+  // 整个移动端启动链放进 zone：runApp 之前任何 await 抛异常在 release 下
+  // 都表现为永久白屏，这里兜底渲染错误页，无 adb 也能截图定位。
+  var step = 'main()';
+  final watchdog = Timer(const Duration(seconds: 15), () {
+    runMobileFatalErrorApp(
+      '启动超过 15 秒未进入界面（卡住，非崩溃），当前步骤：$step',
+      StackTrace.current,
+    );
+  });
+  runZonedGuarded(() async {
+    step = 'initEnv';
+    await initEnv(kAppTypeMain);
+    step = 'checkUpdate';
+    checkUpdate();
+    if (isAndroid) androidChannelInit();
+    if (isAndroid) platformFFI.syncAndroidServiceAppDirConfigPath();
+    step = 'draggablePositions';
+    draggablePositions.load();
+    step = 'loadCache';
+    await Future.wait([gFFI.abModel.loadCache(), gFFI.groupModel.loadCache()]);
+    step = 'refreshCurrentUser';
+    gFFI.userModel.refreshCurrentUser();
+    step = 'runApp';
+    watchdog.cancel();
+    runApp(App());
+    await initUniLinks();
+  }, (error, stack) {
+    watchdog.cancel();
+    runMobileFatalErrorApp(error, stack);
+  });
+}
+
+/// release 下把 Dart 异常可视化（默认白屏无任何信息）。
+void _installMobileErrorGuard() {
+  // build 阶段抛异常：release 默认是空白灰块，改成可见的错误文本
+  ErrorWidget.builder = (FlutterErrorDetails details) => Material(
+        color: const Color(0xFF2B0000),
+        child: SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(12),
+            child: SelectableText(
+              'Widget 异常：${details.exceptionAsString()}\n\n${details.stack}',
+              style: const TextStyle(color: Colors.white, fontSize: 11),
+            ),
+          ),
+        ),
+      );
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    debugPrint('flutter-onError: ${details.exceptionAsString()}');
+  };
+  // 未被 zone 捕获的异步异常，仅记录不杀进程
+  PlatformDispatcher.instance.onError = (error, stack) {
+    debugPrint('platform-onError: $error\n$stack');
+    return true;
+  };
+}
+
+/// runApp 前启动链异常的最终兜底页面。
+void runMobileFatalErrorApp(Object error, StackTrace? stack) {
+  runApp(MaterialApp(
+    debugShowCheckedModeBanner: false,
+    home: Scaffold(
+      backgroundColor: const Color(0xFF1B1B1B),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '启动异常（请截图反馈）',
+                style: TextStyle(
+                    color: Colors.redAccent,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 12),
+              SelectableText(
+                '$error\n\n$stack',
+                style: const TextStyle(
+                    color: Colors.white70, fontSize: 12, height: 1.4),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  ));
 }
 
 void runMultiWindow(
