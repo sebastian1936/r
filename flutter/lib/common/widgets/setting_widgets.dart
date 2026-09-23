@@ -178,41 +178,6 @@ customImageQualitySetting() {
       showMoreQuality: true);
 }
 
-List<Widget> ServerConfigImportExportWidgets(
-  List<TextEditingController> controllers,
-  List<RxString> errMsgs,
-) {
-  import() {
-    Clipboard.getData(Clipboard.kTextPlain).then((value) {
-      importConfig(controllers, errMsgs, value?.text);
-    });
-  }
-
-  export() {
-    final text = ServerConfig(
-            idServer: controllers[0].text.trim(),
-            relayServer: controllers[1].text.trim(),
-            apiServer: controllers[2].text.trim(),
-            key: controllers[3].text.trim())
-        .encode();
-    debugPrint("ServerConfig export: $text");
-    Clipboard.setData(ClipboardData(text: text));
-    showToast(translate('Export server configuration successfully'));
-  }
-
-  return [
-    Tooltip(
-      message: translate('Import server config'),
-      child: IconButton(
-          icon: Icon(Icons.paste, color: Colors.grey), onPressed: import),
-    ),
-    Tooltip(
-        message: translate('Export Server Config'),
-        child: IconButton(
-            icon: Icon(Icons.copy, color: Colors.grey), onPressed: export))
-  ];
-}
-
 List<(String, String)> otherDefaultSettings() {
   List<(String, String)> v = [
     ('View Mode', kOptionViewOnly),
