@@ -1,5 +1,5 @@
 use super::*;
-use scrap::codec::{Quality, BR_BALANCED, BR_BEST, BR_SPEED};
+use scrap::codec::{CodecFormat, Encoder, Quality, BR_BALANCED, BR_BEST, BR_SPEED};
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
@@ -43,6 +43,12 @@ const HISTORY_DELAY_LEN: usize = 2;
 const ADJUST_RATIO_INTERVAL: usize = 3; // Adjust quality ratio every 3 seconds
 const DYNAMIC_SCREEN_THRESHOLD: usize = 2; // Allow increase quality ratio if encode more than 2 times in one second
 const DELAY_THRESHOLD_150MS: u32 = 150; // 150ms is the threshold for good network condition
+
+// 低帧率保护：实际出帧持续低于 20fps 且编码忙碌率达标（确认是编码瓶颈，
+// 而非静态画面/网络等待）时，强制切换到更轻量的 VP8 软编。
+const LOW_FPS_THRESHOLD: usize = 20;
+const LOW_FPS_TRIGGER_SECONDS: u32 = 3;
+const LOW_FPS_ENCODE_BUSY_MS: u64 = 600;
 
 #[derive(Default, Debug, Clone)]
 struct UserDelay {
@@ -99,6 +105,7 @@ struct UserData {
 struct DisplayData {
     send_counter: usize, // Number of times encode during period
     support_changing_quality: bool,
+    low_fps_count: u32, // 连续"低帧且编码忙碌"秒数
 }
 
 // Main QoS controller structure
@@ -111,6 +118,8 @@ pub struct VideoQoS {
     adjust_ratio_instant: Instant,
     abr_config: bool,
     new_user_instant: Instant,
+    // 本会话是否已因低帧率强制切到 VP8（单向，连接全断开后重置，避免反复横跳）
+    vp8_forced: bool,
 }
 
 impl Default for VideoQoS {
@@ -124,6 +133,7 @@ impl Default for VideoQoS {
             adjust_ratio_instant: Instant::now(),
             abr_config: true,
             new_user_instant: Instant::now(),
+            vp8_forced: false,
         }
     }
 }
@@ -193,6 +203,10 @@ impl VideoQoS {
     pub fn on_connection_close(&mut self, id: i32) {
         self.users.remove(&id);
         if self.users.is_empty() {
+            // 全部连接断开：解除 VP8 强制，新连接重新按协商结果选择编码器
+            if self.vp8_forced {
+                Encoder::set_low_fps_vp8(false);
+            }
             *self = Default::default();
         }
     }
@@ -355,7 +369,57 @@ impl VideoQoS {
         self.displays.remove(video_service_name);
     }
 
-    pub fn update_display_data(&mut self, video_service_name: &str, send_counter: usize) {
+    pub fn update_display_data(
+        &mut self,
+        video_service_name: &str,
+        send_counter: usize,
+        encode_ms: u64,
+    ) {
+        // 低帧率保护判定（每秒一次）：
+        // 仅"出帧 <20 且编码忙碌率 >=60%"才计为编码瓶颈——
+        // 静态画面 send_counter 天然接近 0、网络等待时编码耗时极低，均不误判。
+        if !self.vp8_forced && Encoder::negotiated_codec() != CodecFormat::VP8 {
+            let low_fps = send_counter < LOW_FPS_THRESHOLD
+                && send_counter > 0
+                && encode_ms >= LOW_FPS_ENCODE_BUSY_MS;
+            if let Some(display) = self.displays.get_mut(video_service_name) {
+                if low_fps {
+                    display.low_fps_count += 1;
+                } else {
+                    display.low_fps_count = 0;
+                }
+                if display.low_fps_count >= LOW_FPS_TRIGGER_SECONDS {
+                    // 立即重算协商 codec；若所有对端都支持 VP8，视频循环检测到
+                    // negotiated_codec 变化后会自动重建为 VP8 编码器
+                    Encoder::set_low_fps_vp8(true);
+                    if Encoder::negotiated_codec() == CodecFormat::VP8 {
+                        log::info!(
+                            "low fps protection triggered: {}fps, encode busy {}ms/s for {}s, switch to VP8",
+                            send_counter,
+                            encode_ms,
+                            display.low_fps_count
+                        );
+                        self.vp8_forced = true;
+                    } else {
+                        // 有对端不支持 VP8：保持计数继续重试，等其断开或能力更新
+                        display.low_fps_count = LOW_FPS_TRIGGER_SECONDS - 1;
+                        log::info!(
+                            "low fps protection aborted: a peer cannot decode VP8 ({}fps, {}ms/s)",
+                            send_counter,
+                            encode_ms
+                        );
+                    }
+                } else if send_counter > 0 || encode_ms > 0 {
+                    log::trace!(
+                        "qos perf: {}fps, encode {}ms/s, low streak {}",
+                        send_counter,
+                        encode_ms,
+                        display.low_fps_count
+                    );
+                }
+            }
+        }
+
         if let Some(display) = self.displays.get_mut(video_service_name) {
             display.send_counter += send_counter;
         }

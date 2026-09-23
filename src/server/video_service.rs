@@ -651,6 +651,8 @@ fn run(vs: VideoService) -> ResultType<()> {
     let capture_width = c.width;
     let capture_height = c.height;
     let (mut second_instant, mut send_counter) = (Instant::now(), 0);
+    // 每秒累计编码耗时（ms），供 QoS 低帧率保护判定编码瓶颈
+    let mut encode_elapsed_ms: u64 = 0;
 
     while sp.ok() {
         #[cfg(windows)]
@@ -661,6 +663,7 @@ fn run(vs: VideoService) -> ResultType<()> {
             &mut spf,
             client_record,
             &mut send_counter,
+            &mut encode_elapsed_ms,
             &mut second_instant,
             &sp.name(),
         )?;
@@ -765,6 +768,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                     }
 
                     let frame = frame.to(encoder.yuvfmt(), &mut yuv, &mut mid_data)?;
+                    let encode_begin = Instant::now();
                     let send_conn_ids = handle_one_frame(
                         display_idx,
                         &sp,
@@ -777,6 +781,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                         capture_width,
                         capture_height,
                     )?;
+                    encode_elapsed_ms += encode_begin.elapsed().as_millis() as u64;
                     frame_controller.set_send(now, send_conn_ids);
                     send_counter += 1;
                 }
@@ -824,6 +829,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                     // yun.len() > 0 means the frame is not texture.
                     if repeat_encode_counter < repeat_encode_max {
                         repeat_encode_counter += 1;
+                        let encode_begin = Instant::now();
                         let send_conn_ids = handle_one_frame(
                             display_idx,
                             &sp,
@@ -836,6 +842,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                             capture_width,
                             capture_height,
                         )?;
+                        encode_elapsed_ms += encode_begin.elapsed().as_millis() as u64;
                         frame_controller.set_send(now, send_conn_ids);
                         send_counter += 1;
                     }
@@ -1313,6 +1320,7 @@ fn check_qos(
     spf: &mut Duration,
     client_record: bool,
     send_counter: &mut usize,
+    encode_elapsed_ms: &mut u64,
     second_instant: &mut Instant,
     name: &str,
 ) -> ResultType<()> {
@@ -1337,8 +1345,9 @@ fn check_qos(
     }
     if second_instant.elapsed() > Duration::from_secs(1) {
         *second_instant = Instant::now();
-        video_qos.update_display_data(&name, *send_counter);
+        video_qos.update_display_data(&name, *send_counter, *encode_elapsed_ms);
         *send_counter = 0;
+        *encode_elapsed_ms = 0;
     }
     drop(video_qos);
     Ok(())

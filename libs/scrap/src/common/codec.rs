@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::Instant,
 };
 
@@ -44,6 +47,10 @@ lazy_static::lazy_static! {
     static ref THREAD_LOG_TIME: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     static ref USABLE_ENCODING: Arc<Mutex<Option<SupportedEncoding>>> = Arc::new(Mutex::new(None));
 }
+
+// 低帧率保护：被控端检测到编码性能瓶颈（有画面但出帧 <20fps）时强制使用 VP8，
+// 所有连接断开后由服务端重置。VP8 软编开销显著低于 VP9/AV1。
+static LOW_FPS_FORCE_VP8: AtomicBool = AtomicBool::new(false);
 
 pub const ENCODE_NEED_SWITCH: &'static str = "ENCODE_NEED_SWITCH";
 
@@ -310,6 +317,17 @@ impl Encoder {
             }
             PreferCodec::Auto => auto_codec,
         };
+        // 低帧率保护：所有在线对端都支持 VP8 时强制覆盖协商结果
+        if LOW_FPS_FORCE_VP8.load(Ordering::SeqCst) {
+            if vp8_useable {
+                if *format != CodecFormat::VP8 {
+                    log::info!("low fps protection: force codec {:?} -> VP8", *format);
+                }
+                *format = CodecFormat::VP8;
+            } else {
+                log::info!("low fps protection pending: some peers cannot decode VP8");
+            }
+        }
         if decodings.len() > 0 {
             log::info!(
                 "usable: vp8={vp8_useable}, av1={av1_useable}, h264={h264_useable}, h265={h265_useable}",
@@ -326,6 +344,16 @@ impl Encoder {
     #[inline]
     pub fn negotiated_codec() -> CodecFormat {
         ENCODE_CODEC_FORMAT.lock().unwrap().clone()
+    }
+
+    // 低帧率保护开关：打开/关闭后立即重算协商 codec，
+    // 服务端视频循环检测到 negotiated_codec 变化会自动重建编码器。
+    pub fn set_low_fps_vp8(force: bool) {
+        let changed = LOW_FPS_FORCE_VP8.swap(force, Ordering::SeqCst) != force;
+        if changed {
+            log::info!("low fps protection {}", if force { "enabled" } else { "disabled" });
+            Self::update(EncodingUpdate::Check);
+        }
     }
 
     pub fn supported_encoding() -> SupportedEncoding {
