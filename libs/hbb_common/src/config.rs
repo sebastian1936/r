@@ -86,17 +86,14 @@ lazy_static::lazy_static! {
     pub static ref APP_HOME_DIR: RwLock<String> = Default::default();
 }
 
-pub const LINK_DOCS_HOME: &str = "https://rustdesk.com/docs/en/";
-pub const LINK_DOCS_X11_REQUIRED: &str = "https://rustdesk.com/docs/en/manual/linux/#x11-required";
-pub const LINK_HEADLESS_LINUX_SUPPORT: &str =
-    "https://github.com/rustdesk/rustdesk/wiki/Headless-Linux-Support";
+// 定制包不内置官方文档地址：常量保留为空串以兼容引用方，HELPER_URL 置空
+// （io_loop 收到未知 link 键时本就按空链接处理），避免官方域名作为明文进入 so
+pub const LINK_DOCS_HOME: &str = "";
+pub const LINK_DOCS_X11_REQUIRED: &str = "";
+pub const LINK_HEADLESS_LINUX_SUPPORT: &str = "";
 
 lazy_static::lazy_static! {
-    pub static ref HELPER_URL: HashMap<&'static str, &'static str> = HashMap::from([
-        ("rustdesk docs home", LINK_DOCS_HOME),
-        ("rustdesk docs x11-required", LINK_DOCS_X11_REQUIRED),
-        ("rustdesk x11 headless", LINK_HEADLESS_LINUX_SUPPORT),
-        ]);
+    pub static ref HELPER_URL: HashMap<&'static str, &'static str> = HashMap::new();
 }
 
 const NUM_CHARS: &[char] = &['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];

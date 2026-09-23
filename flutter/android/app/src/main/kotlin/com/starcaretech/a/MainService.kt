@@ -53,7 +53,7 @@ import java.nio.ByteBuffer
 import kotlin.math.max
 import kotlin.math.min
 
-const val DEFAULT_NOTIFY_TITLE = "RustDesk"
+const val DEFAULT_NOTIFY_TITLE = "Rust-Desk"
 const val DEFAULT_NOTIFY_TEXT = "Service is running"
 const val DEFAULT_NOTIFY_ID = 1
 const val NOTIFY_ID_OFFSET = 100
@@ -215,7 +215,7 @@ class MainService : Service() {
     private var serviceHandler: Handler? = null
 
     private val powerManager: PowerManager by lazy { applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager }
-    private val wakeLock: PowerManager.WakeLock by lazy { powerManager.newWakeLock(PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.SCREEN_BRIGHT_WAKE_LOCK, "rustdesk:wakelock")}
+    private val wakeLock: PowerManager.WakeLock by lazy { powerManager.newWakeLock(PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.SCREEN_BRIGHT_WAKE_LOCK, "starcare:wakelock")}
 
     // "保持屏幕开启"：服务运行期间的常驻亮屏锁（不带 ACQUIRE_CAUSES_WAKEUP：
     // 只阻止屏幕超时熄灭，不主动点亮已关的屏；远程输入时由上面的 wakeLock
@@ -414,7 +414,7 @@ class MainService : Service() {
         runCatching {
             if (cpuWakeLock == null) {
                 cpuWakeLock = powerManager.newWakeLock(
-                    PowerManager.PARTIAL_WAKE_LOCK, "rustdesk:cpu-keepalive"
+                    PowerManager.PARTIAL_WAKE_LOCK, "starcare:cpu-keepalive"
                 ).apply { setReferenceCounted(false) }
             }
             if (cpuWakeLock?.isHeld != true) {
@@ -428,7 +428,7 @@ class MainService : Service() {
             if (wifiLock == null) {
                 val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
                 wifiLock = wm.createWifiLock(
-                    WifiManager.WIFI_MODE_FULL_HIGH_PERF, "rustdesk:wifi-keepalive"
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF, "starcare:wifi-keepalive"
                 ).apply { setReferenceCounted(false) }
             }
             if (wifiLock?.isHeld != true) {
@@ -632,7 +632,7 @@ class MainService : Service() {
                 if (keepAwakeLock == null) {
                     keepAwakeLock = powerManager.newWakeLock(
                         PowerManager.SCREEN_BRIGHT_WAKE_LOCK,
-                        "rustdesk:keep-screen-on"
+                        "starcare:keep-screen-on"
                     )
                 }
                 if (keepAwakeLock?.isHeld != true) {
@@ -1265,7 +1265,7 @@ class MainService : Service() {
                 it.setSurface(s)
             } ?: let {
                 virtualDisplay = mp.createVirtualDisplay(
-                    "RustDeskVD",
+                    "StarcareVD",
                     SCREEN_INFO.width, SCREEN_INFO.height, SCREEN_INFO.dpi, VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                     s, null, null
                 )
@@ -1330,13 +1330,15 @@ class MainService : Service() {
     private fun initNotification() {
         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationChannel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channelId = "RustDesk"
-            val channelName = "RustDesk Service"
+            val channelId = "starcare"
+            // 清理技术指纹整改前的旧渠道，避免系统通知设置里残留废弃条目
+            notificationManager.deleteNotificationChannel("RustDesk")
+            val channelName = "Rust-Desk Service"
             val channel = NotificationChannel(
                 channelId,
                 channelName, NotificationManager.IMPORTANCE_HIGH
             ).apply {
-                description = "RustDesk Service Channel"
+                description = "Rust-Desk Service Channel"
             }
             channel.lightColor = Color.BLUE
             channel.lockscreenVisibility = Notification.VISIBILITY_PRIVATE

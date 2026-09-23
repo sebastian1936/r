@@ -120,7 +120,7 @@ class MainActivity : FlutterActivity() {
                 .setPositiveButton("分享日志") { _, _ ->
                     val send = Intent(Intent.ACTION_SEND).apply {
                         type = "text/plain"
-                        putExtra(Intent.EXTRA_SUBJECT, "RustDesk 崩溃日志")
+                        putExtra(Intent.EXTRA_SUBJECT, "Rust-Desk 崩溃日志")
                         // Binder 事务有 1MB 上限，截断到安全范围
                         putExtra(Intent.EXTRA_TEXT, crashText.take(90_000))
                     }

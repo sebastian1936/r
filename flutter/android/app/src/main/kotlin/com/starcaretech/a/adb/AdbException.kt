@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // 源自 Shizuku (https://github.com/RikkaApps/Shizuku)，原样保留。
-package moe.shizuku.manager.adb
+package com.starcaretech.a.adb
 
 @Suppress("NOTHING_TO_INLINE")
 inline fun adbError(message: Any): Nothing = throw AdbException(message.toString())

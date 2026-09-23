@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // 源自 Shizuku (https://github.com/RikkaApps/Shizuku)，原样保留。
-package moe.shizuku.manager.adb
+package com.starcaretech.a.adb
 
-import moe.shizuku.manager.adb.AdbProtocol.A_AUTH
-import moe.shizuku.manager.adb.AdbProtocol.A_CLSE
-import moe.shizuku.manager.adb.AdbProtocol.A_CNXN
-import moe.shizuku.manager.adb.AdbProtocol.A_OKAY
-import moe.shizuku.manager.adb.AdbProtocol.A_OPEN
-import moe.shizuku.manager.adb.AdbProtocol.A_STLS
-import moe.shizuku.manager.adb.AdbProtocol.A_SYNC
-import moe.shizuku.manager.adb.AdbProtocol.A_WRTE
+import com.starcaretech.a.adb.AdbProtocol.A_AUTH
+import com.starcaretech.a.adb.AdbProtocol.A_CLSE
+import com.starcaretech.a.adb.AdbProtocol.A_CNXN
+import com.starcaretech.a.adb.AdbProtocol.A_OKAY
+import com.starcaretech.a.adb.AdbProtocol.A_OPEN
+import com.starcaretech.a.adb.AdbProtocol.A_STLS
+import com.starcaretech.a.adb.AdbProtocol.A_SYNC
+import com.starcaretech.a.adb.AdbProtocol.A_WRTE
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 

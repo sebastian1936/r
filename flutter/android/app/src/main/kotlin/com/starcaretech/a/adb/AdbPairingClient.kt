@@ -1,6 +1,5 @@
 package com.starcaretech.a.adb
 
-import moe.shizuku.manager.adb.PairingContext
 import org.conscrypt.Conscrypt
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
@@ -21,7 +20,7 @@ import java.nio.charset.StandardCharsets
  *  - 我方 PeerInfo: type=ADB_RSA_PUB_KEY(0)，data = 公钥串 + NUL（整段 8192 字节）
  *  - 设备回的 PeerInfo: type=ADB_DEVICE_GUID(1)，data = 设备 guid 字符串
  *
- * 密码学部分（SPAKE2 Curve25519 / HKDF / AES-128-GCM）由 libadb.so 内的 BoringSSL
+ * 密码学部分（SPAKE2 Curve25519 / HKDF / AES-128-GCM）由 libstaradb.so 内的 BoringSSL
  * 完成（[PairingContext]，源自 Shizuku），不再使用 JVM 层手写曲线运算。
  */
 object AdbPairingClient {

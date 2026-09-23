@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// 源自 Shizuku (https://github.com/RikkaApps/Shizuku)
-// manager/src/main/java/moe/shizuku/manager/adb/AdbPairingClient.kt 中的文件私有类
-// PairingContext。提取为独立顶层类：libadb.so 的 JNI_OnLoad 用
-// FindClass("moe/shizuku/manager/adb/PairingContext") 注册 native 方法，
+// 源自 Shizuku (https://github.com/RikkaApps/Shizuku)，
+// 原文件 manager/src/main/java/.../adb/AdbPairingClient.kt 中的文件私有类。
+// 提取为独立顶层类：libstaradb.so 的 JNI_OnLoad 用
+// FindClass("com/starcaretech/a/adb/PairingContext") 注册 native 方法，
 // 若作为嵌套类 JVM 名会变成 "AdbPairingClient$PairingContext" 导致注册失败。
-package moe.shizuku.manager.adb
+package com.starcaretech.a.adb
 
 /**
  * ADB 无线配对的加密上下文（native 实现见 src/main/jni/adb_pairing.cpp）：
@@ -46,7 +46,8 @@ class PairingContext private constructor(private val nativePtr: Long) {
     companion object {
 
         init {
-            System.loadLibrary("adb")
+            // 产物名 libstaradb.so（见 jni/CMakeLists.txt）
+            System.loadLibrary("staradb")
         }
 
         /**

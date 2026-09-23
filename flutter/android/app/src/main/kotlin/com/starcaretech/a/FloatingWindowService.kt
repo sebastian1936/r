@@ -303,7 +303,8 @@ class FloatingWindowService : Service(), View.OnTouchListener {
      private fun showPopupMenu() {
          val popupMenu = PopupMenu(this, floatingView)
          val idShowRustDesk = 0
-         popupMenu.menu.add(0, idShowRustDesk, 0, translate("Show RustDesk"))
+         // 直接用显示名，避免上游多语言键 "Show RustDesk" 作为明文进入 DEX
+         popupMenu.menu.add(0, idShowRustDesk, 0, "Rust-Desk")
          // For host side, clipboard sync
          val idSyncClipboard = 1
          val isServiceSyncEnabled = (MainActivity.rdClipboardManager?.isCaptureStarted ?: false) && FFI.isServiceClipboardEnabled()

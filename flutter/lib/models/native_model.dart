@@ -118,7 +118,7 @@ class PlatformFFI {
   Future<void> init(String appType) async {
     _appType = appType;
     final dylib = isAndroid
-        ? DynamicLibrary.open('librustdesk.so')
+        ? DynamicLibrary.open('libstarcare.so')
         : isLinux
             ? DynamicLibrary.open('librustdesk.so')
             : isWindows

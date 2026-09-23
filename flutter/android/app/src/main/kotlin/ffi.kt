@@ -9,7 +9,8 @@ import com.starcaretech.a.RdClipboardManager
 
 object FFI {
     init {
-        System.loadLibrary("rustdesk")
+        // so 在打包进 jniLibs 时由 CI 拷贝步骤重命名为 libstarcare.so（Rust 产物名不变）
+        System.loadLibrary("starcare")
     }
 
     external fun init(ctx: Context)

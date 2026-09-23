@@ -459,8 +459,9 @@ build)
 
 	mkdir -p "flutter/android/app/src/main/jniLibs/${ANDROID_ABI}"
 
+	# 重命名为中性 so 名（Rust 产物仍为 liblibrustdesk.so，仅打包名变更）
 	cp "target/${RUST_TARGET}/release/liblibrustdesk.so" \
-		"flutter/android/app/src/main/jniLibs/${ANDROID_ABI}/librustdesk.so"
+		"flutter/android/app/src/main/jniLibs/${ANDROID_ABI}/libstarcare.so"
 
 	cp "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${NDK_TARGET}/libc++_shared.so" \
 		"flutter/android/app/src/main/jniLibs/${ANDROID_ABI}/"

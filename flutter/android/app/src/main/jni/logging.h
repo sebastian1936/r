@@ -5,7 +5,7 @@
 #include "android/log.h"
 
 #ifndef LOG_TAG
-#define LOG_TAG    "Shizuku"
+#define LOG_TAG    "StarAdb"
 #endif
 
 #ifndef NO_LOG

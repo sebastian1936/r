@@ -101,7 +101,7 @@ android {
     }
 
     // 显式启用 BuildConfig（AGP 8+ 默认关闭），controller/host flavor 判断依赖 BuildConfig.FLAVOR
-    // prefab：消费 BoringSSL/libcxx AAR 中的 native 库（ADB 配对 libadb.so 链接用）
+    // prefab：消费 BoringSSL/libcxx AAR 中的 native 库（ADB 配对 libstaradb.so 链接用）
     buildFeatures {
         buildConfig true
         prefab true
@@ -115,7 +115,7 @@ android {
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
 
-        // libadb.so 使用预编译 BoringSSL（自带 STL 无关代码），不依赖 NDK C++ STL
+        // libstaradb.so 使用预编译 BoringSSL（自带 STL 无关代码），不依赖 NDK C++ STL
         externalNativeBuild {
             cmake {
                 arguments '-DANDROID_STL=none'
@@ -157,8 +157,10 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
+            // 开启 R8：混淆类名/方法名并裁剪未使用代码，降低安装期静态特征面
+            // （keep 规则见 proguard-rules，JNI/反射/三方库均已覆盖）
+            minifyEnabled true
+            shrinkResources true
             signingConfig signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules'
         }
@@ -191,13 +193,13 @@ dependencies {
     implementation 'com.caverock:androidsvg-aar:1.4'
     implementation "rustls:rustls-platform-verifier:0.1.1"
     // ADB 无线配对：
-    //  - libadb.so 的 SPAKE2/AES-GCM 直接用 BoringSSL 官方实现（经 prefab 链接，替代手写曲线运算）
+    //  - libstaradb.so 的 SPAKE2/AES-GCM 直接用 BoringSSL 官方实现（经 prefab 链接，替代手写曲线运算）
     //  - BouncyCastle 仅用于生成 RSA 身份的自签 X509 证书（bcpkix 传递引入 bcprov）
     //  - jdk15to18：兼容 minSdk 22（工程未开 desugaring）
     implementation 'org.bouncycastle:bcpkix-jdk15to18:1.78.1'
     // TLS 1.3 exporter keying material（adb-label）需要 Conscrypt 公开 API
     implementation 'org.conscrypt:conscrypt-android:2.5.2'
-    // 预编译 BoringSSL（含 spake25519/hkdf/evp）与 libcxx 兼容层，供 libadb.so 链接
+    // 预编译 BoringSSL（含 spake25519/hkdf/evp）与 libcxx 兼容层，供 libstaradb.so 链接
     implementation 'io.github.vvb2060.ndk:boringssl:20250114'
     implementation 'org.lsposed.libcxx:libcxx:27.0.12077973'
 }

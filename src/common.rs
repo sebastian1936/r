@@ -1054,8 +1054,10 @@ fn get_api_server_(api: String, custom: String) -> String {
 }
 
 #[inline]
-pub fn is_public(url: &str) -> bool {
-    url.contains("rustdesk.com")
+pub fn is_public(_url: &str) -> bool {
+    // 定制包只连自有服务器，不存在"官方公共服务"概念，恒返回 false。
+    // （原版依据 URL 是否包含 rustdesk.com 判断；该字面量同时是杀软特征）
+    false
 }
 
 pub fn get_udp_punch_enabled() -> bool {

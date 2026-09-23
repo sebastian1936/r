@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // 源自 Shizuku (https://github.com/RikkaApps/Shizuku)，原样保留。
-package moe.shizuku.manager.adb
+package com.starcaretech.a.adb
 
 object AdbProtocol {
 
