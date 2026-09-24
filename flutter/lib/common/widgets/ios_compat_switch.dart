@@ -26,7 +26,7 @@ class _IosCompatSwitchState extends State<IosCompatSwitch> {
         title: Text(target ? '开启 iOS 兼容模式？' : '关闭 iOS 兼容模式？'),
         content: Text(
           target
-              ? '切换后将立即断开当前所有远程连接，并切换到官方服务器：\n\n'
+              ? '开启后：\n\n'
                   '• 本机可被苹果 App Store 版 RustDesk（iPhone/iPad）发现和连接\n'
                   '• 其他加密版设备将无法看到本机，也无法连接本机\n'
                   '• 对方需使用官方 RustDesk，并填写同一官方服务器地址'
