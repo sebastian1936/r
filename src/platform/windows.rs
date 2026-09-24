@@ -1277,9 +1277,16 @@ pub fn copy_raw_cmd(src_raw: &str, _raw: &str, _path: &str) -> ResultType<String
 
 pub fn copy_exe_cmd(src_exe: &str, exe: &str, path: &str) -> ResultType<String> {
     let main_exe = copy_raw_cmd(src_exe, exe, path)?;
+    // XCOPY 整目录时保留源文件名。官方 RustDesk 靠 Windows 文件名大小写不敏感
+    // （rustdesk.exe ↔ RustDesk.exe）让安装后的规范名恰好存在；本客户端把
+    // APP_NAME 改成了带连字符的 "Rust-Desk"，自解压包内/重命名后的 exe 仍叫
+    // rustdesk.exe，仅靠 XCOPY 不会生成 Rust-Desk.exe——会导致 is_installed()
+    // 永远为 false、桌面快捷方式目标不存在、服务 binpath 找不到文件而启动失败。
+    // 因此 XCOPY 后再把当前 exe 显式复制为规范安装名，保证无论源文件叫什么都成立。
     Ok(format!(
         "
         {main_exe}
+        copy /Y \"{src_exe}\" \"{exe}\"
         copy /Y \"{ORIGIN_PROCESS_EXE}\" \"{path}\\{broker_exe}\"
         ",
         ORIGIN_PROCESS_EXE = win_topmost_window::ORIGIN_PROCESS_EXE,
