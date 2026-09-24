@@ -2178,10 +2178,12 @@ pub async fn test_ipv6() -> Option<tokio::task::JoinHandle<()>> {
     }))
 }
 
-pub async fn punch_udp(
+/// 已 connect 的 socket（IPv6 直连路径）使用的经典打洞循环：
+/// 周期发空包直到收到对端任意数据包
+pub async fn punch_udp_connected(
     socket: Arc<UdpSocket>,
     listen: bool,
-) -> ResultType<Option<bytes::BytesMut>> {
+) -> ResultType<Option<hbb_common::bytes::BytesMut>> {
     let mut retry_interval = Duration::from_millis(20);
     const MAX_INTERVAL: Duration = Duration::from_millis(200);
     const MAX_TIME: Duration = Duration::from_secs(20);
@@ -2191,20 +2193,15 @@ pub async fn punch_udp(
     let mut last_send_time = Instant::now();
     let tm = Instant::now();
     let mut data = [0u8; 1500];
-
     loop {
         tokio::select! {
             _ = hbb_common::sleep(retry_interval.as_secs_f32()) => {
                 if tm.elapsed() > MAX_TIME {
-                    bail!("UDP punch is timed out, stop sending packets after {:?} packets", packets_sent);
+                    bail!("UDP punch is timed out, stop sending packets after {} packets", packets_sent);
                 }
-                let elapsed = last_send_time.elapsed();
-
-                if elapsed >= retry_interval {
+                if last_send_time.elapsed() >= retry_interval {
                     socket.send(&[]).await.ok();
                     packets_sent += 1;
-
-                    // Exponentially increase interval to reduce network pressure
                     retry_interval = std::cmp::min(
                         Duration::from_millis((retry_interval.as_millis() as f64 * 1.5) as u64),
                         MAX_INTERVAL
@@ -2215,14 +2212,124 @@ pub async fn punch_udp(
             res = socket.recv(&mut data) => match res {
                 Err(e) => bail!("UDP punch failed, {packets_sent} packets sent: {e}"),
                 Ok(n) => {
+                    if listen && n == 0 {
+                        continue;
+                    }
+                    return Ok(if n > 0 {
+                        Some(hbb_common::bytes::BytesMut::from(&data[..n]))
+                    } else {
+                        None
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// 查询去往 remote 的路由主源 IPv4（UDP connect 只做路由选择，不实际发包）
+pub fn primary_local_ipv4(remote: &str) -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect(remote).ok()?;
+    match sock.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if !ip.is_unspecified() && !ip.is_loopback() => {
+            Some(std::net::IpAddr::V4(ip))
+        }
+        _ => None,
+    }
+}
+
+/// 构造本机 IPv4 局域网候选地址。socket 绑定 0.0.0.0:port 时内核允许从任意
+/// 本机 IP 的同一端口收发，因此主网卡 IP 拼同端口即可作为对端直连候选。
+pub fn local_candidates_v4(bound: SocketAddr, remote: &str) -> Vec<SocketAddr> {
+    if !bound.is_ipv4() {
+        return vec![];
+    }
+    let mut out = vec![];
+    if !bound.ip().is_unspecified() && !bound.ip().is_loopback() {
+        out.push(bound);
+    }
+    if let Some(ip) = primary_local_ipv4(remote) {
+        let a = SocketAddr::new(ip, bound.port());
+        if !out.contains(&a) {
+            out.push(a);
+        }
+    }
+    out
+}
+
+/// 多目标 UDP 打洞（对称 NAT 救援核心，参考 iroh/noq 的对端地址学习思路）。
+/// socket 不预先 connect；向 targets（hbbs 反射地址 + 对端内网候选）周期性发空
+/// 探测包；从首个来源 IP 命中 allowed_ips 的数据包学习对端 NAT 后的真实映射地址
+/// （对称 NAT 下对 hbbs 与对我的映射端口不同，必须按实际来源地址学习，不能只打
+/// hbbs 反射端口）。
+/// - listen=true（被控 B）：忽略空包，返回首个非空的 KCP 握手数据
+/// - listen=false（主控 A）：首个任意包即视为打通
+pub async fn punch_udp_candidates(
+    socket: Arc<UdpSocket>,
+    targets: &[SocketAddr],
+    allowed_ips: &[std::net::IpAddr],
+    listen: bool,
+) -> ResultType<(Option<hbb_common::bytes::BytesMut>, SocketAddr)> {
+    let mut retry_interval = Duration::from_millis(20);
+    const MAX_INTERVAL: Duration = Duration::from_millis(200);
+    const MAX_TIME: Duration = Duration::from_secs(20);
+    let mut packets_sent = 0;
+    // 目标去重、按 socket 协议族过滤、限量，避免候选过多造成 UDP 突发
+    let mut seen = std::collections::HashSet::new();
+    let is_v4 = socket.local_addr().map(|a| a.is_ipv4()).unwrap_or(true);
+    let targets: Vec<SocketAddr> = targets
+        .iter()
+        .copied()
+        .filter(|a| a.port() > 0 && a.is_ipv4() == is_v4 && seen.insert(*a))
+        .take(8)
+        .collect();
+    if targets.is_empty() {
+        bail!("no udp punch targets");
+    }
+    for t in &targets {
+        socket.send_to(&[], *t).await.ok();
+        packets_sent += 1;
+    }
+    let mut last_send_time = Instant::now();
+    let tm = Instant::now();
+    let mut data = [0u8; 1500];
+
+    loop {
+        tokio::select! {
+            _ = hbb_common::sleep(retry_interval.as_secs_f32()) => {
+                if tm.elapsed() > MAX_TIME {
+                    bail!("UDP punch is timed out, stop sending packets after {} packets", packets_sent);
+                }
+                if last_send_time.elapsed() >= retry_interval {
+                    for t in &targets {
+                        socket.send_to(&[], *t).await.ok();
+                        packets_sent += 1;
+                    }
+                    // Exponentially increase interval to reduce network pressure
+                    retry_interval = std::cmp::min(
+                        Duration::from_millis((retry_interval.as_millis() as f64 * 1.5) as u64),
+                        MAX_INTERVAL
+                    );
+                    last_send_time = Instant::now();
+                }
+            }
+            res = socket.recv_from(&mut data) => match res {
+                Err(e) => bail!("UDP punch failed, {packets_sent} packets sent: {e}"),
+                Ok((n, src)) => {
+                    // 只接受候选来源 IP（端口不限——对称 NAT 端口会变），
+                    // 防止公网第三方/噪声注入伪握手
+                    if !allowed_ips.is_empty() && !allowed_ips.contains(&src.ip()) {
+                        log::debug!("ignore punch packet from unexpected ip {src}");
+                        continue;
+                    }
                     // log::debug!("UDP punch succeeded after sending {} packets after {:?}", packets_sent, tm.elapsed());
                     if listen {
                         if n == 0 {
                             continue;
                         }
-                        return Ok(Some(bytes::BytesMut::from(&data[..n])));
+                        return Ok((Some(hbb_common::bytes::BytesMut::from(&data[..n])), src));
                     }
-                    return Ok(None);
+                    return Ok((None, src));
                 }
             }
         }

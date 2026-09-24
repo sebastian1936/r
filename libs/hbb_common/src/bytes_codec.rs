@@ -4,7 +4,54 @@ use tokio_util::codec::{Decoder, Encoder};
 // 引入加密库
 use chacha20::ChaCha20;
 use chacha20::cipher::{KeyIvInit, StreamCipher};
+use rand::Rng;
 use crate::config::Config;
+
+/// v2 混淆帧小帧填充桶：信令帧（注册/打洞/登录等 protobuf 小消息）尺寸固定，
+/// 是明显的流量指纹；按桶填充 + 随机抖动把帧长抹平。大帧（视频流）只加小抖动。
+const PAD_BUCKETS: [usize; 7] = [48, 96, 160, 256, 384, 640, 1024];
+
+fn obfs_padding(plain_len: usize) -> usize {
+    // inner = 4 字节长度 + payload
+    let inner_len = plain_len + 4;
+    for b in PAD_BUCKETS {
+        if inner_len < b {
+            let pad = b - inner_len;
+            // 只在代价可接受时按桶补齐，避免小消息被撑到 KB 级
+            if pad <= 200 {
+                return pad + (rand::random::<u8>() % 16) as usize;
+            }
+        }
+    }
+    (rand::random::<u8>() % 16) as usize
+}
+
+/// 单个 UDP 数据报封装：混淆模式按 v2 帧加密，明文模式原样透传。
+/// 用于不走 FramedSocket 的裸 UDP 信令（TestNat / PunchHoleSent），
+/// 否则这些明文 protobuf 数据报既是指纹，也会被混淆 hbbs 当坏包丢弃。
+pub fn wrap_datagram(msg: &[u8]) -> Vec<u8> {
+    match Config::get_obfuscate_key() {
+        None => msg.to_vec(),
+        Some(key) => {
+            let mut codec = BytesCodec::new_obfuscate(key);
+            let mut out = BytesMut::with_capacity(msg.len() + 32);
+            match codec.encode(Bytes::copy_from_slice(msg), &mut out) {
+                Ok(()) => out.to_vec(),
+                Err(_) => msg.to_vec(),
+            }
+        }
+    }
+}
+
+/// 单个 UDP 数据报解封（wrap_datagram 的逆过程）
+pub fn unwrap_datagram(buf: &[u8]) -> Option<Vec<u8>> {
+    let mut codec = match Config::get_obfuscate_key() {
+        None => return Some(buf.to_vec()),
+        Some(key) => BytesCodec::new_obfuscate(key),
+    };
+    let mut src = BytesMut::from(buf);
+    codec.decode(&mut src).ok().flatten().map(|f| f.to_vec())
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct BytesCodec {
@@ -128,11 +175,32 @@ impl Decoder for BytesCodec {
 
         match self.decode_data(n, src)? {
             Some(mut data) => {
-                // 只有调用 new_obfuscate 创建的实例才会解密
+                // v2 混淆帧：前 12 字节随机 nonce，其后为 ChaCha20(u32le 长度 || 明文 || 填充)。
+                // 旧版固定全 0 nonce 会导致所有帧密钥流相同（相同前缀密文可异或还原），
+                // 且帧长精确暴露 protobuf 消息尺寸。
                 if let Some(key) = self.obfuscate_key {
-                    let nonce = [0u8; 12];
+                    if data.len() < 12 + 4 {
+                        self.state = DecodeState::Head;
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "too short obfs frame",
+                        ));
+                    }
+                    let mut nonce = [0u8; 12];
+                    nonce.copy_from_slice(&data[..12]);
+                    let mut body = data.split_off(12);
                     let mut cipher = ChaCha20::new(&key.into(), &nonce.into());
-                    cipher.apply_keystream(&mut data);
+                    cipher.apply_keystream(&mut body);
+                    let real_len =
+                        u32::from_le_bytes(body[..4].try_into().unwrap_or_default()) as usize;
+                    if body.len() < 4 + real_len {
+                        self.state = DecodeState::Head;
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "bad obfs frame length",
+                        ));
+                    }
+                    data = BytesMut::copy_from_slice(&body[4..4 + real_len]);
                 }
 
                 self.state = DecodeState::Head;
@@ -154,15 +222,27 @@ impl Encoder<Bytes> for BytesCodec {
             return Ok(());
         }
 
-        // 拷贝数据到 payload，后续可能修改
-        let mut payload = data.to_vec();
-
-        // 如有加密密钥，则加密
-        if let Some(key) = self.obfuscate_key {
-            let nonce = [0u8; 12]; // 建议用唯一 nonce，demo用 all zero
+        // 混淆模式 v2：随机 12 字节 nonce + ChaCha20(u32le 长度 || payload || 随机填充)，
+        // nonce 随帧明文发送；明文模式（new()，官方兼容）保持原裸帧格式不变
+        let payload = if let Some(key) = self.obfuscate_key {
+            let mut nonce = [0u8; 12];
+            rand::thread_rng().fill(&mut nonce[..]);
+            let pad = obfs_padding(data.len());
+            let mut inner = Vec::with_capacity(4 + data.len() + pad);
+            inner.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            inner.extend_from_slice(&data);
+            let mut padbuf = vec![0u8; pad];
+            rand::thread_rng().fill(&mut padbuf[..]);
+            inner.extend_from_slice(&padbuf);
             let mut cipher = ChaCha20::new(&key.into(), &nonce.into());
-            cipher.apply_keystream(&mut payload);
-        }
+            cipher.apply_keystream(&mut inner);
+            let mut out = Vec::with_capacity(12 + inner.len());
+            out.extend_from_slice(&nonce);
+            out.extend_from_slice(&inner);
+            out
+        } else {
+            data.to_vec()
+        };
 
         let len = payload.len();
         if len <= 0x3F {

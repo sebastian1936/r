@@ -411,6 +411,8 @@ impl Client {
         let mut relay_server = "".to_owned();
         let mut peer_addr = Config::get_any_listen_addr(true);
         let mut peer_nat_type = NatType::UNKNOWN_NAT;
+        // B 经 PunchHoleResponse 透传来的局域网候选地址
+        let mut peer_candidates: Vec<SocketAddr> = Vec::new();
         let my_nat_type = crate::get_nat_type(100).await;
         let mut is_local = false;
         let mut feedback = 0;
@@ -447,6 +449,18 @@ impl Client {
             (None, None)
         };
         let udp_nat_port = udp.1.map(|x| *x.lock().unwrap()).unwrap_or(0);
+        // 本机局域网候选（打洞 socket 绑定端口 + 主网卡 IP），经 hbbs 透传给 B，
+        // 用于 hairpin 失效或同局域网多网卡场景直连
+        let my_udp_candidates: Vec<hbb_common::bytes::Bytes> = match udp.0.as_ref() {
+            Some(s) => match s.local_addr() {
+                Ok(bound) => crate::local_candidates_v4(bound, &rendezvous_server)
+                    .iter()
+                    .map(|a| hbb_common::bytes::Bytes::from(hbb_common::AddrMangle::encode(*a)))
+                    .collect(),
+                Err(_) => Vec::new(),
+            },
+            None => Vec::new(),
+        };
         let punch_type = if udp_nat_port > 0 { "UDP" } else { "TCP" };
         msg_out.set_punch_hole_request(PunchHoleRequest {
             id: peer.to_owned(),
@@ -458,6 +472,7 @@ impl Client {
             udp_port: udp_nat_port as _,
             force_relay: interface.is_force_relay(),
             socket_addr_v6: ipv6.1.unwrap_or_default(),
+            candidate_addrs: my_udp_candidates,
             ..Default::default()
         });
         for i in 1..=3 {
@@ -502,13 +517,18 @@ impl Client {
                             relay_server = ph.relay_server;
                             peer_addr = AddrMangle::decode(&ph.socket_addr);
                             feedback = ph.feedback;
-                            let s = udp.0.take();
-                            if ph.is_udp && s.is_some() {
-                                if let Some(s) = s {
-                                    allow_err!(s.connect(peer_addr).await);
-                                    udp.0 = Some(s);
-                                }
+                            // 不再提前 connect：对称 NAT 下 B 的真实映射端口要等收到
+                            // 探测包后按来源地址学习，由 udp_nat_connect 完成 connect
+                            if !ph.is_udp {
+                                udp.0.take();
                             }
+                            // B 的局域网候选，与 hbbs 反射地址一起作为 UDP 探测目标
+                            peer_candidates = ph
+                                .candidate_addrs
+                                .iter()
+                                .map(|b| AddrMangle::decode(b))
+                                .filter(|a| a.is_ipv4() && a.port() > 0)
+                                .collect();
                             let s = ipv6.0.take();
                             if !ph.socket_addr_v6.is_empty() && s.is_some() {
                                 let addr = AddrMangle::decode(&ph.socket_addr_v6);
@@ -535,8 +555,10 @@ impl Client {
                             let addr = AddrMangle::decode(&rr.socket_addr_v6);
                             if addr.port() > 0 {
                                 if s.connect(addr).await.is_ok() {
-                                    connect_futures
-                                        .push(udp_nat_connect(s, "IPv6", CONNECT_TIMEOUT).boxed());
+                                    connect_futures.push(
+                                        udp_nat_connect_connected(s, "IPv6", CONNECT_TIMEOUT)
+                                            .boxed(),
+                                    );
                                 }
                             }
                         }
@@ -614,6 +636,7 @@ impl Client {
                 udp.0,
                 ipv6.0,
                 punch_type,
+                peer_candidates,
             )
             .await?,
             (feedback, rendezvous_server),
@@ -640,6 +663,7 @@ impl Client {
         udp_socket_nat: Option<Arc<UdpSocket>>,
         udp_socket_v6: Option<Arc<UdpSocket>>,
         punch_type: &str,
+        udp_candidates: Vec<SocketAddr>,
     ) -> ResultType<(
         Stream,
         bool,
@@ -650,8 +674,13 @@ impl Client {
         let direct_failures = interface.get_lch().read().unwrap().direct_failures;
         let mut connect_timeout = 0;
         const MIN: u64 = 1000;
-        if is_local || peer_nat_type == NatType::SYMMETRIC {
+        // 对称 NAT 救援窗口：旧逻辑 1s 太短，对端地址学习 + KCP 握手通常需要 1~2s，
+        // 打不通时再由后续 request_relay 兜底
+        const SYMMETRIC_PUNCH_TIMEOUT: u64 = 3000;
+        if is_local {
             connect_timeout = MIN;
+        } else if peer_nat_type == NatType::SYMMETRIC {
+            connect_timeout = SYMMETRIC_PUNCH_TIMEOUT;
         } else {
             if relay_server.is_empty() {
                 connect_timeout = CONNECT_TIMEOUT;
@@ -667,7 +696,7 @@ impl Client {
                             connect_timeout = punch_time_used * 6;
                         }
                     } else if my_nat_type == NatType::SYMMETRIC as i32 {
-                        connect_timeout = MIN;
+                        connect_timeout = SYMMETRIC_PUNCH_TIMEOUT;
                     }
                 }
                 if connect_timeout == 0 {
@@ -692,10 +721,17 @@ impl Client {
             .boxed(),
         );
         if let Some(udp_socket_nat) = udp_socket_nat {
-            connect_futures.push(udp_nat_connect(udp_socket_nat, "UDP", connect_timeout).boxed());
+            // hbbs 反射地址 + B 的局域网候选并行探测，对端真实地址在函数内按来源学习
+            let mut udp_targets = vec![peer];
+            udp_targets.extend(udp_candidates.iter().copied());
+            connect_futures.push(
+                udp_nat_connect(udp_socket_nat, "UDP", connect_timeout, udp_targets).boxed(),
+            );
         }
         if let Some(udp_socket_v6) = udp_socket_v6 {
-            connect_futures.push(udp_nat_connect(udp_socket_v6, "IPv6", connect_timeout).boxed());
+            connect_futures.push(
+                udp_nat_connect_connected(udp_socket_v6, "IPv6", connect_timeout).boxed(),
+            );
         }
         // Run all connection attempts concurrently, return the first successful one
         let (mut conn, kcp, mut typ) = match select_ok(connect_futures).await {
@@ -4087,7 +4123,8 @@ async fn test_udp_uat(
     let mut packets_sent = 0;
 
     // Send initial burst to improve reliability
-    let data = msg_out.write_to_bytes()?;
+    // 混淆模式下裸 UDP 信令套混淆帧（明文模式 wrap 为透传，行为不变）
+    let data = hbb_common::bytes_codec::wrap_datagram(&msg_out.write_to_bytes()?);
     for _ in 0..2 {
         if let Err(e) = udp_socket.send_to(&data, server_addr).await {
             log::warn!("Failed to send initial UDP NAT test packet: {}", e);
@@ -4132,15 +4169,21 @@ async fn test_udp_uat(
             res = udp_socket.recv(&mut buf[..]) => {
                 match res {
                     Ok(n) => {
-                        match RendezvousMessage::parse_from_bytes(&buf[0..n]) {
-                            Ok(msg_in) => {
+                        // 混淆模式先解混淆帧，明文模式透传
+                        let plain = hbb_common::bytes_codec::unwrap_datagram(&buf[0..n]);
+                        let parsed = plain
+                            .as_deref()
+                            .map(RendezvousMessage::parse_from_bytes)
+                            .and_then(|r| r.ok());
+                        match parsed {
+                            Some(msg_in) => {
                                 if let Some(rendezvous_message::Union::TestNatResponse(response)) = msg_in.union {
                                     *udp_port.lock().unwrap() = response.port as u16;
                                     break;
                                 }
                             }
-                            Err(e) => {
-                                log::warn!("Failed to parse UDP NAT test response: {}", e);
+                            None => {
+                                log::debug!("Failed to parse UDP NAT test response");
                             }
                         }
                     }
@@ -4169,8 +4212,36 @@ async fn udp_nat_connect(
     socket: Arc<UdpSocket>,
     typ: &'static str,
     ms_timeout: u64,
+    targets: Vec<SocketAddr>,
 ) -> ResultType<(Stream, Option<KcpStream>, &'static str)> {
-    crate::punch_udp(socket.clone(), false)
+    let allowed: Vec<std::net::IpAddr> = targets.iter().map(|a| a.ip()).collect();
+    // 对称 NAT：从首个命中候选 IP 的来源包学习 B 的真实映射地址后再 connect
+    let (_, learned) = crate::punch_udp_candidates(socket.clone(), &targets, &allowed, false)
+        .await
+        .map_err(|err| {
+            log::debug!("{err}");
+            anyhow!(err)
+        })?;
+    socket.connect(learned).await.map_err(|err| {
+        log::debug!("connect learned udp addr failed: {err}");
+        anyhow!(err)
+    })?;
+    let res = KcpStream::connect(socket, Duration::from_millis(ms_timeout))
+        .await
+        .map_err(|err| {
+            log::debug!("Failed to connect KCP stream: {}", err);
+            anyhow!(err)
+        })?;
+    Ok((res.1, Some(res.0), typ))
+}
+
+#[inline]
+async fn udp_nat_connect_connected(
+    socket: Arc<UdpSocket>,
+    typ: &'static str,
+    ms_timeout: u64,
+) -> ResultType<(Stream, Option<KcpStream>, &'static str)> {
+    crate::punch_udp_connected(socket.clone(), false)
         .await
         .map_err(|err| {
             log::debug!("{err}");

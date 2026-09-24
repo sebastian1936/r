@@ -28,6 +28,8 @@ message PunchHoleRequest {
   bool force_relay = 8;
   int32 upnp_port = 9;
   bytes socket_addr_v6 = 10;
+  // A 的局域网候选地址（AddrMangle 编码），用于 hairpin 失败/多网卡场景直连
+  repeated bytes candidate_addrs = 11;
 }
 
 message ControlPermissions {
@@ -57,6 +59,8 @@ message PunchHole {
   int32 upnp_port = 6;
   bytes socket_addr_v6 = 7;
   ControlPermissions control_permissions = 8;
+  // A 的局域网候选地址，由 hbbs 透传给 B
+  repeated bytes candidate_addrs = 9;
 }
 
 message TestNatRequest {
@@ -83,6 +87,8 @@ message PunchHoleSent {
   string version = 5;
   int32 upnp_port = 6;
   bytes socket_addr_v6 = 7;
+  // B 的局域网候选地址，由 hbbs 经 PunchHoleResponse 透传给 A
+  repeated bytes candidate_addrs = 8;
 }
 
 message RegisterPk {
@@ -127,6 +133,8 @@ message PunchHoleResponse {
   bool is_udp = 9;
   int32 upnp_port = 10;
   bytes socket_addr_v6 = 11;
+  // B 的局域网候选地址
+  repeated bytes candidate_addrs = 12;
 }
 
 message ConfigUpdate {

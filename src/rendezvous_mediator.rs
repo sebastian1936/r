@@ -595,12 +595,10 @@ impl RendezvousMediator {
             socket_addr_v6 = start_ipv6(peer_addr_v6, peer_addr, server.clone()).await;
         }
         let relay_server = self.get_relay_server(ph.relay_server);
-        // for ensure, websocket go relay directly
-        if ph.nat_type.enum_value() == Ok(NatType::SYMMETRIC)
-            || Config::get_nat_type() == NatType::SYMMETRIC as i32
-            || relay
-            || (config::is_disable_tcp_listen() && ph.udp_port <= 0)
-        {
+        // 仅在无法直连的场景下直接走中继（ws/代理/强制中继/禁监听且无 UDP）。
+        // 对称 NAT 不再一刀切放弃：锥形+对称组合可通过对端真实地址学习打通，
+        // 真正打不通时 A 侧超时后会 RequestRelay，B 由 handle_request_relay 兜底。
+        if relay || (config::is_disable_tcp_listen() && ph.udp_port <= 0) {
             let uuid = Uuid::new_v4().to_string();
             return self
                 .create_relay(
@@ -627,7 +625,15 @@ impl RendezvousMediator {
         };
         if ph.udp_port > 0 {
             peer_addr.set_port(ph.udp_port as u16);
-            self.punch_udp_hole(peer_addr, server, msg_punch).await?;
+            // A 经 hbbs 透传来的局域网候选，与反射地址一起并行探测
+            let a_candidates: Vec<SocketAddr> = ph
+                .candidate_addrs
+                .iter()
+                .map(|b| hbb_common::AddrMangle::decode(b))
+                .filter(|a| a.is_ipv4() && a.port() > 0)
+                .collect();
+            self.punch_udp_hole(peer_addr, a_candidates, server, msg_punch)
+                .await?;
             return Ok(());
         }
         log::debug!("Punch tcp hole to {:?}", peer_addr);
@@ -660,12 +666,23 @@ impl RendezvousMediator {
     async fn punch_udp_hole(
         &self,
         peer_addr: SocketAddr,
+        peer_candidates: Vec<SocketAddr>,
         server: ServerPtr,
-        msg_punch: PunchHoleSent,
+        mut msg_punch: PunchHoleSent,
     ) -> ResultType<()> {
         let mut msg_out = Message::new();
-        msg_out.set_punch_hole_sent(msg_punch);
         let (socket, addr) = new_direct_udp_for(&self.host).await?;
+        // B 的局域网候选（打洞 socket 的绑定端口 + 主网卡 IP），
+        // 随 PunchHoleSent 经 hbbs 透传给 A，供 A 在 hairpin 失败时直连
+        let bound = socket
+            .local_addr()
+            .unwrap_or_else(|_| Config::get_any_listen_addr(true));
+        let my_candidates = crate::local_candidates_v4(bound, &self.host);
+        msg_punch.candidate_addrs = my_candidates
+            .iter()
+            .map(|a| ::bytes::Bytes::from(hbb_common::AddrMangle::encode(*a)))
+            .collect();
+        msg_out.set_punch_hole_sent(msg_punch);
         // --- 注入垃圾数据逻辑开始 ---
         // 生成 10 到 50 字节之间的随机长度噪音
         let padding_len = rand::thread_rng().gen_range(100..127);
@@ -676,7 +693,10 @@ impl RendezvousMediator {
         // 注意：请确保在 .proto 文件中已定义 bytes junk 字段并已编译
         msg_out.junk = ::bytes::Bytes::from(junk_vec);
         // --- 注入垃圾数据逻辑结束 ---
-        let data = msg_out.write_to_bytes()?;
+        let raw = msg_out.write_to_bytes()?;
+        // 混淆模式下裸 UDP 信令也必须套混淆帧：否则明文 protobuf 是明显特征，
+        // 且混淆 hbbs 的 codec 会按坏包丢弃这些数据报（UDP 打洞在混淆模式失效）
+        let data = hbb_common::bytes_codec::wrap_datagram(&raw);
         socket.send_to(&data, addr).await?;
         let socket_cloned = socket.clone();
         tokio::spawn(async move {
@@ -686,7 +706,10 @@ impl RendezvousMediator {
                 socket.send_to(&data, addr).await.ok();
             }
         });
-        udp_nat_listen(socket_cloned.clone(), peer_addr, peer_addr, server).await?;
+        // 反射地址 + A 的局域网候选一起探测；B 的真实地址由 listen 侧按来源学习
+        let mut targets = vec![peer_addr];
+        targets.extend(peer_candidates);
+        udp_nat_listen(socket_cloned.clone(), targets, peer_addr, server).await?;
         Ok(())
     }
 
@@ -883,7 +906,9 @@ async fn start_ipv6(
     if let Some((socket, local_addr_v6)) = crate::get_ipv6_socket().await {
         let server = server.clone();
         tokio::spawn(async move {
-            allow_err!(udp_nat_listen(socket.clone(), peer_addr_v6, peer_addr_v4, server).await);
+            allow_err!(
+                udp_nat_listen(socket.clone(), vec![peer_addr_v6], peer_addr_v4, server).await
+            );
         });
         return local_addr_v6;
     }
@@ -892,15 +917,19 @@ async fn start_ipv6(
 
 async fn udp_nat_listen(
     socket: Arc<tokio::net::UdpSocket>,
-    peer_addr: SocketAddr,
+    targets: Vec<SocketAddr>,
     peer_addr_v4: SocketAddr,
     server: ServerPtr,
 ) -> ResultType<()> {
     let tm = Instant::now();
     let socket_cloned = socket.clone();
     let func = async {
-        socket.connect(peer_addr).await?;
-        let res = crate::punch_udp(socket.clone(), true).await?;
+        let allowed: Vec<std::net::IpAddr> = targets.iter().map(|a| a.ip()).collect();
+        // 对称 NAT：对端实际映射端口可能不同于 hbbs 反射端口，
+        // 先按首个命中候选 IP 的来源包学习真实地址，再 connect 该地址
+        let (res, learned) =
+            crate::punch_udp_candidates(socket.clone(), &targets, &allowed, true).await?;
+        socket.connect(learned).await?;
         let stream = crate::kcp_stream::KcpStream::accept(
             socket,
             Duration::from_millis(CONNECT_TIMEOUT as _),
@@ -912,7 +941,7 @@ async fn udp_nat_listen(
     };
     func.await.map_err(|e: anyhow::Error| {
         anyhow::anyhow!(
-            "Stop listening on {:?} for remote {peer_addr} with KCP, {:?} elapsed: {e}",
+            "Stop listening on {:?} for remote {peer_addr_v4} with KCP, {:?} elapsed: {e}",
             socket_cloned.local_addr(),
             tm.elapsed()
         )
