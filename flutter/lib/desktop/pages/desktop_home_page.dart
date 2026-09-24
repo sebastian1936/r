@@ -478,6 +478,10 @@ class _DesktopHomePageState extends State<DesktopHomePage>
           await rustDeskWinManager.closeAllSubWindows();
           bind.mainUpdateMe();
         });
+      } else {
+        // 已安装：在原「接受控制」位置放同一个开关——接受中显示「停止接受控制」，
+        // 停止后显示「接受控制」。底层复用服务启停，但不向用户暴露"服务"概念。
+        return buildIncomingControlCard();
       }
     } else if (isMacOS) {
       final isOutgoingOnly = bind.isOutgoingOnly();
@@ -693,6 +697,73 @@ class _DesktopHomePageState extends State<DesktopHomePage>
             ),
           ),
       ],
+    );
+  }
+
+  // Windows 已安装后的「接受控制」总开关：本质是被控服务的启停，
+  // 但用用户能理解的语言呈现；svcStopped 由定时器每秒同步 stop-service 选项。
+  Widget buildIncomingControlCard() {
+    final accepting = !svcStopped.value;
+    final warnColor = const Color.fromARGB(255, 244, 114, 124);
+    final theme = Theme.of(context);
+    return Container(
+      margin: const EdgeInsets.only(top: 20),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: accepting
+            ? null
+            : LinearGradient(
+                begin: Alignment.centerLeft,
+                end: Alignment.centerRight,
+                colors: [
+                  Color.fromARGB(255, 226, 66, 188),
+                  warnColor,
+                ],
+              ),
+        color: accepting ? theme.cardColor : null,
+        borderRadius: BorderRadius.circular(8),
+        border: accepting ? Border.all(color: theme.dividerColor) : null,
+      ),
+      child: Column(
+          mainAxisAlignment: MainAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+                Center(
+                    child: Text(
+                  "接受远程控制",
+                  style: TextStyle(
+                      color: accepting
+                          ? theme.textTheme.titleMedium?.color
+                          : Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15),
+                ).marginOnly(bottom: 6)),
+                Text(
+                  accepting
+                      ? "本机当前可被远程控制。不需要时可停止接受控制，停止后其他设备将无法查看或操作本机，随时可以再次开启。"
+                      : "本机当前不会被远程控制。开启后，其他设备可通过本机 ID 远程控制这台电脑。",
+                  style: TextStyle(
+                      height: 1.5,
+                      color: accepting
+                          ? theme.textTheme.bodyMedium?.color
+                          : Colors.white,
+                      fontWeight: FontWeight.normal,
+                      fontSize: 13),
+                ).marginOnly(bottom: 20),
+                Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  FixedWidthButton(
+                    width: 170,
+                    padding: 8,
+                    isOutline: true,
+                    text: accepting ? "停止接受控制" : "接受控制",
+                    textColor: accepting ? warnColor : Colors.white,
+                    borderColor: accepting ? warnColor : Colors.white,
+                    textSize: 18,
+                    radius: 10,
+                    onTap: () => start_service(!accepting),
+                  )
+                ])
+              ]),
     );
   }
 
