@@ -192,7 +192,7 @@ impl Decoder for BytesCodec {
                     let mut cipher = ChaCha20::new(&key.into(), &nonce.into());
                     cipher.apply_keystream(&mut body);
                     let real_len =
-                        u32::from_le_bytes(body[..4].try_into().unwrap_or_default()) as usize;
+                        u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
                     if body.len() < 4 + real_len {
                         self.state = DecodeState::Head;
                         return Err(io::Error::new(
@@ -200,7 +200,7 @@ impl Decoder for BytesCodec {
                             "bad obfs frame length",
                         ));
                     }
-                    data = BytesMut::copy_from_slice(&body[4..4 + real_len]);
+                    data = BytesMut::from(&body[4..4 + real_len][..]);
                 }
 
                 self.state = DecodeState::Head;
