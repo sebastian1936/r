@@ -111,7 +111,10 @@ impl KcpStream {
                         break;
                     }
                     Some(data) = output.recv() => {
-                        if let Err(e) = udp.send(&data.inner()).await {
+                        // 出站统一封装：明文模式透传，混淆模式套 v2 帧，
+                        // 线上不再出现明文 KCP 头（cmd 0x81/0x82/0x83）
+                        let pkt = hbb_common::bytes_codec::wrap_p2p_datagram(data.inner());
+                        if let Err(e) = udp.send(&pkt).await {
                             log::debug!("KCP send error: {:?}", e);
                             break;
                         }
@@ -119,12 +122,21 @@ impl KcpStream {
                     result = udp.recv_from(&mut buf) => {
                         match result {
                             Ok((size, _)) => {
-                                if size < std::mem::size_of::<KcpPacketHeader>() {
-                                    continue;
+                                // 入站分类：探测包/坏包丢弃，KCP 包解封装后喂 endpoint
+                                use hbb_common::bytes_codec::{classify_p2p_datagram, P2pDatagram};
+                                match classify_p2p_datagram(&buf[..size]) {
+                                    P2pDatagram::Payload(pkt) => {
+                                        if pkt.len()
+                                            >= std::mem::size_of::<KcpPacketHeader>()
+                                        {
+                                            input
+                                                .send(BytesMut::from(pkt.as_slice()).into())
+                                                .await
+                                                .ok();
+                                        }
+                                    }
+                                    P2pDatagram::Probe | P2pDatagram::Invalid => {}
                                 }
-                                input
-                                    .send(BytesMut::from(&buf[..size]).into())
-                                    .await.ok();
                             }
                             Err(e) => {
                                 log::debug!("KCP recv_from error: {:?}", e);

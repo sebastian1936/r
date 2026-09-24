@@ -53,6 +53,61 @@ pub fn unwrap_datagram(buf: &[u8]) -> Option<Vec<u8>> {
     codec.decode(&mut src).ok().flatten().map(|f| f.to_vec())
 }
 
+/// P2P UDP 打洞探测包的内部标记（出现在解密后的明文里，线上抓到的始终是密文）。
+/// 旧实现双方互发 0 字节数据报，20ms 起的固定空包突发是明显的行为指纹；
+/// 混淆模式下改为带随机填充的探测包，明文模式仍返回空包保持官方兼容。
+const PUNCH_PROBE_MAGIC: &[u8] = b"RDHP1";
+
+/// 构造一个打洞探测数据报。
+/// - 混淆模式：magic + 8~39 字节随机填充，整体套 v2 混淆帧（长度/内容均随机化）
+/// - 明文模式：空 Vec，即官方 RustDesk 的 0 字节打洞包
+pub fn wrap_punch_probe() -> Vec<u8> {
+    if Config::get_obfuscate_key().is_none() {
+        return Vec::new();
+    }
+    let pad = 8 + (rand::random::<u8>() % 32) as usize;
+    let mut inner = Vec::with_capacity(PUNCH_PROBE_MAGIC.len() + pad);
+    inner.extend_from_slice(PUNCH_PROBE_MAGIC);
+    let mut noise = vec![0u8; pad];
+    rand::thread_rng().fill(&mut noise[..]);
+    inner.extend_from_slice(&noise);
+    wrap_datagram(&inner)
+}
+
+/// KCP 数据报出站封装：明文模式透传，混淆模式套 v2 帧，
+/// 消灭线上 KCP 明文头（cmd 0x81/0x82/0x83、24 字节固定结构）指纹
+pub fn wrap_p2p_datagram(pkt: &[u8]) -> Vec<u8> {
+    wrap_datagram(pkt)
+}
+
+/// 入站 P2P UDP 数据报分类结果
+pub enum P2pDatagram {
+    /// 对端打洞探测包，不喂 KCP
+    Probe,
+    /// KCP 数据包（已解混淆，明文模式为原包）
+    Payload(Vec<u8>),
+    /// 坏包/异模噪声/第三方注入，丢弃
+    Invalid,
+}
+
+/// 分类入站 P2P UDP 数据报（wrap_punch_probe / wrap_p2p_datagram 的逆过程）。
+/// 明文模式：空包=探测，非空=KCP，与官方行为一致；
+/// 混淆模式：解帧后按 magic 区分探测包与 KCP 包，解帧失败一律丢弃。
+pub fn classify_p2p_datagram(buf: &[u8]) -> P2pDatagram {
+    if Config::get_obfuscate_key().is_none() {
+        return if buf.is_empty() {
+            P2pDatagram::Probe
+        } else {
+            P2pDatagram::Payload(buf.to_vec())
+        };
+    }
+    match unwrap_datagram(buf) {
+        Some(plain) if plain.starts_with(PUNCH_PROBE_MAGIC) => P2pDatagram::Probe,
+        Some(plain) => P2pDatagram::Payload(plain),
+        None => P2pDatagram::Invalid,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BytesCodec {
     state: DecodeState,

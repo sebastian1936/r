@@ -2188,7 +2188,9 @@ pub async fn punch_udp_connected(
     const MAX_INTERVAL: Duration = Duration::from_millis(200);
     const MAX_TIME: Duration = Duration::from_secs(20);
     let mut packets_sent = 0;
-    socket.send(&[]).await.ok();
+    // 混淆模式为带随机填充的探测帧，明文模式为空包（官方兼容）
+    let probe = hbb_common::bytes_codec::wrap_punch_probe();
+    socket.send(&probe).await.ok();
     packets_sent += 1;
     let mut last_send_time = Instant::now();
     let tm = Instant::now();
@@ -2200,7 +2202,9 @@ pub async fn punch_udp_connected(
                     bail!("UDP punch is timed out, stop sending packets after {} packets", packets_sent);
                 }
                 if last_send_time.elapsed() >= retry_interval {
-                    socket.send(&[]).await.ok();
+                    // 每轮重新生成，避免探测包内容/长度固定形成新指纹
+                    let probe = hbb_common::bytes_codec::wrap_punch_probe();
+                    socket.send(&probe).await.ok();
                     packets_sent += 1;
                     retry_interval = std::cmp::min(
                         Duration::from_millis((retry_interval.as_millis() as f64 * 1.5) as u64),
@@ -2212,14 +2216,23 @@ pub async fn punch_udp_connected(
             res = socket.recv(&mut data) => match res {
                 Err(e) => bail!("UDP punch failed, {packets_sent} packets sent: {e}"),
                 Ok(n) => {
-                    if listen && n == 0 {
-                        continue;
+                    use hbb_common::bytes_codec::{classify_p2p_datagram, P2pDatagram};
+                    match classify_p2p_datagram(&data[..n]) {
+                        // 对端探测包：主控侧据此判定打通；被控侧继续等真正的 KCP 握手
+                        P2pDatagram::Probe => {
+                            if listen {
+                                continue;
+                            }
+                            return Ok(None);
+                        }
+                        P2pDatagram::Payload(plain) => {
+                            return Ok(Some(hbb_common::bytes::BytesMut::from(plain.as_slice())));
+                        }
+                        P2pDatagram::Invalid => {
+                            log::debug!("ignore invalid punch packet, {n} bytes");
+                            continue;
+                        }
                     }
-                    return Ok(if n > 0 {
-                        Some(hbb_common::bytes::BytesMut::from(&data[..n]))
-                    } else {
-                        None
-                    });
                 }
             }
         }
@@ -2286,8 +2299,10 @@ pub async fn punch_udp_candidates(
     if targets.is_empty() {
         bail!("no udp punch targets");
     }
+    // 混淆模式为带随机填充的探测帧，明文模式为空包（官方兼容）
+    let probe = hbb_common::bytes_codec::wrap_punch_probe();
     for t in &targets {
-        socket.send_to(&[], *t).await.ok();
+        socket.send_to(&probe, *t).await.ok();
         packets_sent += 1;
     }
     let mut last_send_time = Instant::now();
@@ -2301,8 +2316,10 @@ pub async fn punch_udp_candidates(
                     bail!("UDP punch is timed out, stop sending packets after {} packets", packets_sent);
                 }
                 if last_send_time.elapsed() >= retry_interval {
+                    // 每轮重新生成探测帧，内容/长度均随机，避免固定包形成新指纹
+                    let probe = hbb_common::bytes_codec::wrap_punch_probe();
                     for t in &targets {
-                        socket.send_to(&[], *t).await.ok();
+                        socket.send_to(&probe, *t).await.ok();
                         packets_sent += 1;
                     }
                     // Exponentially increase interval to reduce network pressure
@@ -2322,14 +2339,23 @@ pub async fn punch_udp_candidates(
                         log::debug!("ignore punch packet from unexpected ip {src}");
                         continue;
                     }
-                    // log::debug!("UDP punch succeeded after sending {} packets after {:?}", packets_sent, tm.elapsed());
-                    if listen {
-                        if n == 0 {
+                    use hbb_common::bytes_codec::{classify_p2p_datagram, P2pDatagram};
+                    match classify_p2p_datagram(&data[..n]) {
+                        // 对端探测包：主控侧据此判定打通；被控侧继续等真正的 KCP 握手
+                        P2pDatagram::Probe => {
+                            if listen {
+                                continue;
+                            }
+                            return Ok((None, src));
+                        }
+                        P2pDatagram::Payload(plain) => {
+                            return Ok((Some(hbb_common::bytes::BytesMut::from(plain.as_slice())), src));
+                        }
+                        P2pDatagram::Invalid => {
+                            log::debug!("ignore invalid punch packet from {src}, {n} bytes");
                             continue;
                         }
-                        return Ok((Some(hbb_common::bytes::BytesMut::from(&data[..n])), src));
                     }
-                    return Ok((None, src));
                 }
             }
         }

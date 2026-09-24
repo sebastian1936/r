@@ -177,6 +177,9 @@ impl RendezvousMediator {
         const MIN_REG_TIMEOUT: i64 = 3_000;
         const MAX_REG_TIMEOUT: i64 = 30_000;
         let mut reg_timeout = MIN_REG_TIMEOUT;
+        // 注册周期抖动：固定 15s 心跳是明显的时序指纹，每次收到响应后把下一周期
+        // 随机到 12.5~17.5s（服务端 30s 才判离线，余量充足）；首次注册不抖动
+        let mut reg_interval = REG_INTERVAL;
         const MAX_FAILS1: i64 = 2;
         const MAX_FAILS2: i64 = 4;
         const DNS_INTERVAL: i64 = 60_000;
@@ -191,6 +194,7 @@ impl RendezvousMediator {
                 last_register_resp = Some(Instant::now());
                 fails = 0;
                 reg_timeout = MIN_REG_TIMEOUT;
+                reg_interval = REG_INTERVAL + rand::thread_rng().gen_range(-2_500..=2_500);
                 let mut latency = last_register_sent
                     .map(|x| x.elapsed().as_micros() as i64)
                     .unwrap_or(0);
@@ -235,7 +239,7 @@ impl RendezvousMediator {
                         break;
                     }
                     let now = Some(Instant::now());
-                    let expired = last_register_resp.map(|x| x.elapsed().as_millis() as i64 >= REG_INTERVAL).unwrap_or(true);
+                    let expired = last_register_resp.map(|x| x.elapsed().as_millis() as i64 >= reg_interval).unwrap_or(true);
                     let timeout = last_register_sent.map(|x| x.elapsed().as_millis() as i64 >= reg_timeout).unwrap_or(false);
                     // temporarily disable exponential backoff for android before we add wakeup trigger to force connect in android
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -362,6 +366,8 @@ impl RendezvousMediator {
         let mut timer = crate::rustdesk_interval(interval(crate::TIMER_OUT));
         let mut last_register_sent: Option<Instant> = None;
         let mut last_recv_msg = Instant::now();
+        // register_pk 周期抖动（与 UDP 注册一致），首次立即发送不抖动
+        let mut reg_interval = REG_INTERVAL;
         // we won't support connecting to multiple rendzvous servers any more, so we can use a global variable here.
         Config::set_host_key_confirmed(&rz.host_prefix, false);
         loop {
@@ -395,9 +401,10 @@ impl RendezvousMediator {
                     }
                     if (!Config::get_key_confirmed() ||
                         !Config::get_host_key_confirmed(&rz.host_prefix)) &&
-                        last_register_sent.map(|x| x.elapsed().as_millis() as i64).unwrap_or(REG_INTERVAL) >= REG_INTERVAL {
+                        last_register_sent.map(|x| x.elapsed().as_millis() as i64).unwrap_or(REG_INTERVAL) >= reg_interval {
                         rz.register_pk(Sink::Stream(&mut conn)).await?;
                         last_register_sent = Some(Instant::now());
+                        reg_interval = REG_INTERVAL + rand::thread_rng().gen_range(-2_500..=2_500);
                     }
                 }
             }
