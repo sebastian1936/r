@@ -452,7 +452,9 @@ class _GeneralState extends State<_General> {
   }
 
   Widget service() {
-    if (bind.isOutgoingOnly()) {
+    // Windows 端服务随「接受控制」安装并常驻，不再提供界面级启停，
+    // 避免与「接受控制」形成两套开关（停止后主页又冒出"开启服务"）。
+    if (bind.isOutgoingOnly() || isWindows) {
       return const Offstage();
     }
 

@@ -61,8 +61,10 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
   @override
   Widget build(BuildContext context) {
     final isIncomingOnly = bind.isIncomingOnly();
+    // Windows 端服务的安装/启停统一由主页「接受控制」负责，
+    // 这里不再提供"开启服务"链接，避免出现两套入口。
     startServiceWidget() => Offstage(
-          offstage: !_svcStopped.value,
+          offstage: !_svcStopped.value || isWindows,
           child: InkWell(
                   onTap: () async {
                     await start_service(true);
