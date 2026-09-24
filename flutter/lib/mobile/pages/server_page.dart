@@ -1136,7 +1136,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
               ),
           ],
         ),
-        const SizedBox(height: 18),
+        const SizedBox(height: 40),
         // ③ 以下防诈骗相关提示统一放在页面底部
         // 防诈骗红色警告（图标 + 文案一行，圆角红底）
         Container(
