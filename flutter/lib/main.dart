@@ -44,14 +44,27 @@ Future<void> main(List<String> args) async {
   earlyAssert();
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 最早加载线路配置（缓存文件 → 内置 asset），后续 apiBase/首启写入依赖它
-  await EndpointStore.init();
+  // 全平台启动诊断日志（桌面端白屏时无控制台，只能落盘）
+  startupLog('进程启动 exe=${Platform.resolvedExecutable} args=$args');
+  try {
+    // 最早加载线路配置（缓存文件 → 内置 asset），后续 apiBase/首启写入依赖它
+    await EndpointStore.init();
+  } catch (e, s) {
+    startupLog('EndpointStore.init 失败：$e\n$s');
+    if (isDesktop) {
+      _installErrorGuard();
+      runDesktopFatalErrorApp(e, s, 'EndpointStore.init');
+      return;
+    }
+    rethrow;
+  }
 
   debugPrint("launch args: $args");
   kBootArgs = List.from(args);
 
+  // 桌面/移动都安装：build 异常红屏 + 异步异常落盘，release 白屏时可定位
+  _installErrorGuard();
   if (!isDesktop) {
-    _installMobileErrorGuard();
     runMobileApp();
     return;
   }
@@ -206,48 +219,91 @@ Future<void> applyForcedClientOptions() async {
 }
 
 void runMainApp(bool startService) async {
-  // register uni links
-  await initEnv(kAppTypeMain);
-  checkUpdate();
-  // trigger connection status updater
-  await bind.mainCheckConnectStatus();
-  if (startService) {
-    gFFI.serverModel.startService();
-    bind.pluginSyncUi(syncTo: kAppTypeMain);
-    bind.pluginListReload();
-  }
-  await Future.wait([gFFI.abModel.loadCache(), gFFI.groupModel.loadCache()]);
-  gFFI.userModel.refreshCurrentUser();
-  runApp(App());
-
-  bool? alwaysOnTop;
-  if (isDesktop) {
-    alwaysOnTop =
-        bind.mainGetBuildinOption(key: "main-window-always-on-top") == 'Y';
-  }
-
-  // Set window option.
-  WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
-      isMainWindow: true, alwaysOnTop: alwaysOnTop);
-  windowManager.waitUntilReadyToShow(windowOptions, () async {
-    // Restore the location of the main window before window hide or show.
-    await restoreWindowPosition(WindowType.Main);
-    // Check the startup argument, if we successfully handle the argument, we keep the main window hidden.
-    final handledByUniLinks = await initUniLinks();
-    debugPrint("handled by uni links: $handledByUniLinks");
-    if (handledByUniLinks || handleUriLink(cmdArgs: kBootArgs)) {
-      windowManager.hide();
-    } else {
-      windowManager.show();
-      windowManager.focus();
-      // Move registration of active main window here to prevent from async visible check.
-      rustDeskWinManager.registerActiveWindow(kWindowMainId);
-    }
-    windowManager.setOpacity(1);
-    windowManager.setTitle(getWindowName());
-    // Do not use `windowManager.setResizable()` here.
-    setResizable(!bind.isIncomingOnly());
+  // 桌面 release 双击启动没有控制台，runApp 前任何异常都只表现为白屏。
+  // 记录每一步，异常时渲染错误页并强制把窗口显示出来，另落盘日志。
+  var step = 'initEnv';
+  final watchdog = Timer(const Duration(seconds: 30), () {
+    const msg = '启动超过 30 秒未进入界面（卡住，非崩溃）';
+    startupLog('WATCHDOG: $msg，当前步骤：$step');
+    runDesktopFatalErrorApp(msg, StackTrace.current, step);
   });
+  try {
+    // register uni links
+    startupLog('runMainApp startService=$startService');
+    await initEnv(kAppTypeMain);
+    step = 'checkUpdate';
+    startupLog(step);
+    checkUpdate();
+    // trigger connection status updater
+    step = 'mainCheckConnectStatus';
+    startupLog(step);
+    await bind.mainCheckConnectStatus();
+    if (startService) {
+      step = 'serverModel.startService';
+      startupLog(step);
+      gFFI.serverModel.startService();
+      step = 'pluginSyncUi';
+      startupLog(step);
+      bind.pluginSyncUi(syncTo: kAppTypeMain);
+      step = 'pluginListReload';
+      startupLog(step);
+      bind.pluginListReload();
+    }
+    step = 'loadCache';
+    startupLog(step);
+    await Future.wait([gFFI.abModel.loadCache(), gFFI.groupModel.loadCache()]);
+    step = 'refreshCurrentUser';
+    gFFI.userModel.refreshCurrentUser();
+    step = 'runApp';
+    startupLog(step);
+    runApp(App());
+
+    bool? alwaysOnTop;
+    if (isDesktop) {
+      alwaysOnTop =
+          bind.mainGetBuildinOption(key: "main-window-always-on-top") == 'Y';
+    }
+
+    // Set window option.
+    WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
+        isMainWindow: true, alwaysOnTop: alwaysOnTop);
+    step = 'waitUntilReadyToShow';
+    startupLog(step);
+    windowManager.waitUntilReadyToShow(windowOptions, () async {
+      try {
+        // Restore the location of the main window before window hide or show.
+        step = 'restoreWindowPosition';
+        await restoreWindowPosition(WindowType.Main);
+        // Check the startup argument, if we successfully handle the argument, we keep the main window hidden.
+        step = 'initUniLinks';
+        final handledByUniLinks = await initUniLinks();
+        debugPrint("handled by uni links: $handledByUniLinks");
+        step = 'show/hide window';
+        if (handledByUniLinks || handleUriLink(cmdArgs: kBootArgs)) {
+          await windowManager.hide();
+        } else {
+          await windowManager.show();
+          await windowManager.focus();
+          // Move registration of active main window here to prevent from async visible check.
+          rustDeskWinManager.registerActiveWindow(kWindowMainId);
+        }
+        await windowManager.setOpacity(1);
+        await windowManager.setTitle(getWindowName());
+        // Do not use `windowManager.setResizable()` here.
+        setResizable(!bind.isIncomingOnly());
+        watchdog.cancel();
+        startupLog('主窗口启动完成');
+      } catch (e, s) {
+        watchdog.cancel();
+        startupLog('FATAL(window callback) at $step: $e\n$s');
+        runDesktopFatalErrorApp(e, s, step);
+      }
+    });
+  } catch (e, s) {
+    watchdog.cancel();
+    startupLog('FATAL at $step: $e\n$s');
+    runDesktopFatalErrorApp(e, s, step);
+  }
 }
 
 void runMobileApp() {
@@ -286,8 +342,8 @@ void runMobileApp() {
   });
 }
 
-/// release 下把 Dart 异常可视化（默认白屏无任何信息）。
-void _installMobileErrorGuard() {
+/// release 下把异常可视化/落盘（默认白屏无任何信息）。
+void _installErrorGuard() {
   // build 阶段抛异常：release 默认是空白灰块，改成可见的错误文本
   ErrorWidget.builder = (FlutterErrorDetails details) => Material(
         color: const Color(0xFF2B0000),
@@ -303,13 +359,85 @@ void _installMobileErrorGuard() {
       );
   FlutterError.onError = (details) {
     FlutterError.presentError(details);
+    startupLog('flutter-onError: ${details.exceptionAsString()}\n'
+        '${details.stack}');
     debugPrint('flutter-onError: ${details.exceptionAsString()}');
   };
   // 未被 zone 捕获的异步异常，仅记录不杀进程
   PlatformDispatcher.instance.onError = (error, stack) {
+    startupLog('platform-onError: $error\n$stack');
     debugPrint('platform-onError: $error\n$stack');
     return true;
   };
+}
+
+/// 启动诊断日志文件：Windows 下为 %TEMP%\starcare-startup.log。
+/// GUI release 程序没有控制台，所有启动异常只能靠这个文件回溯。
+String get startupLogPath =>
+    '${Directory.systemTemp.path}${Platform.pathSeparator}starcare-startup.log';
+
+void startupLog(String msg) {
+  try {
+    final line = '[${DateTime.now().toIso8601String()}] $msg';
+    File(startupLogPath).writeAsStringSync('$line\n',
+        mode: FileMode.append, flush: true);
+  } catch (_) {}
+}
+
+/// 桌面端启动异常/卡死的最终兜底页面：渲染错误信息，并强制把窗口显示出来。
+void runDesktopFatalErrorApp(Object error, StackTrace? stack, String step) {
+  runApp(MaterialApp(
+    debugShowCheckedModeBanner: false,
+    home: Scaffold(
+      backgroundColor: const Color(0xFF1B1B1B),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '启动异常（请截图反馈）',
+                style: TextStyle(
+                    color: Colors.redAccent,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '启动步骤：$step',
+                style: const TextStyle(
+                    color: Colors.amberAccent,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              SelectableText(
+                '日志文件：$startupLogPath',
+                style:
+                    const TextStyle(color: Colors.lightBlueAccent, fontSize: 12),
+              ),
+              const SizedBox(height: 12),
+              SelectableText(
+                '$error\n\n$stack',
+                style: const TextStyle(
+                    color: Colors.white70, fontSize: 12, height: 1.4),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  ));
+  // 正常路径的 waitUntilReadyToShow 可能根本没走到，窗口停在隐藏/透明状态，
+  // 这里独立确保错误页可见。
+  windowManager.ensureInitialized();
+  windowManager.waitUntilReadyToShow(
+      const WindowOptions(center: true), () async {
+    await windowManager.show();
+    await windowManager.setOpacity(1);
+    await windowManager.focus();
+  });
 }
 
 /// runApp 前启动链异常的最终兜底页面。
