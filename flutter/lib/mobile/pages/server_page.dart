@@ -1296,6 +1296,12 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
   String _brand = "other";
   String _brandLabel = "";
 
+  /// 回前台后的退避补查定时器。MIUI/部分 ROM 把"省电策略：无限制"等
+  /// 设置写回系统 doze 白名单（isIgnoringBatteryOptimizations）有延迟，
+  /// resumed 时只立即查一次会拿到旧状态——表现为"设置完返回列表不刷新，
+  /// 再点一次检查项（再次跳转+返回）才变绿"。
+  Timer? _resumeTimer;
+
   // key → (标题, 操作指引, 是否必选项)。文案只给操作步骤，不讲原理
   static const Map<String, List<dynamic>> _meta = {
     "developer_options": [
@@ -1393,18 +1399,51 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
 
   @override
   void dispose() {
+    _resumeTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // 从系统设置页返回时自动复查
-    if (state == AppLifecycleState.resumed) _refresh();
+    if (state == AppLifecycleState.resumed) {
+      // 从系统设置页返回：立即查一次，再按退避补查两次（不显示整列表
+      // loading，避免已渲染的清单闪烁），覆盖 ROM 状态写回延迟。
+      _scheduleResumeRefresh();
+    } else if (state == AppLifecycleState.paused) {
+      _resumeTimer?.cancel();
+    }
   }
 
-  _refresh() async {
-    setState(() => _loading = true);
+  /// 回前台后立即复查，并在 ~0.7s / ~1.8s 各补查一次；
+  /// 每次都用最新结果刷新，状态一旦写回就能自动变绿。
+  void _scheduleResumeRefresh() {
+    _resumeTimer?.cancel();
+    const delaysMs = [0, 700, 1800];
+    var round = 0;
+    void runRound() {
+      if (!mounted) return;
+      _refresh(silent: round > 0);
+      round++;
+      if (round < delaysMs.length) {
+        _resumeTimer = Timer(
+            Duration(milliseconds: delaysMs[round] - delaysMs[round - 1]),
+            runRound);
+      } else {
+        _resumeTimer = null;
+      }
+    }
+
+    runRound();
+  }
+
+  /// 自增序号：退避补查可能并发，只接受最新一次的结果，
+  /// 防止旧结果晚到把已变绿的状态覆盖回旧值。
+  int _refreshSeq = 0;
+
+  _refresh({bool silent = false}) async {
+    final seq = ++_refreshSeq;
+    if (!silent) setState(() => _loading = true);
     try {
       // 是否显示开发者模式/USB调试/无线调试/通知样式由原生侧按机型决定
       // （Android11+ 非鸿蒙：任何场景都显示——已配对后无线调试也可能被
@@ -1413,11 +1452,11 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
       final dynamic raw = await gFFI.invokeMethod(
           "adb_env_check",
           widget.reviewMode ? const {"mode": "review"} : null);
+      if (seq != _refreshSeq || !mounted) return;
       // 新格式 {brand, brand_label, items:[...]}；兼容旧 List 格式
       final items = raw is Map && raw["items"] is List
           ? raw["items"] as List
           : (raw is List ? raw : const []);
-      if (!mounted) return;
       setState(() {
         _items = items;
         if (raw is Map) {
@@ -1428,7 +1467,8 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
       });
       _maybeAutoContinue(items, allChecked: true);
     } catch (_) {
-      if (mounted) setState(() => _loading = false);
+      if (seq != _refreshSeq || !mounted) return;
+      setState(() => _loading = false);
       // 检查通道异常不阻断配对（与旧版预检查 catch 后直接配对一致）
       _maybeAutoContinue(const [], allChecked: false);
     }
