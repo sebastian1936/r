@@ -113,7 +113,7 @@ impl KcpStream {
                     Some(data) = output.recv() => {
                         // 出站统一封装：明文模式透传，混淆模式套 v2 帧，
                         // 线上不再出现明文 KCP 头（cmd 0x81/0x82/0x83）
-                        let pkt = hbb_common::bytes_codec::wrap_p2p_datagram(data.inner());
+                        let pkt = hbb_common::bytes_codec::wrap_p2p_datagram(&data.inner()[..]);
                         if let Err(e) = udp.send(&pkt).await {
                             log::debug!("KCP send error: {:?}", e);
                             break;
