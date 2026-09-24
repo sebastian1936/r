@@ -585,11 +585,18 @@ class _PermissionCheckerState extends State<PermissionChecker> {
     // "接受控制（谨防诈骗）"总开关（见 AdbAuthSection），不再单列；
     // Android 10 及以下、以及阉割了无线调试的鸿蒙 2/3/4 保留传统手动两行
     final unifiedControl = androidVersion >= 30 && !isHarmonyOs;
+    // 统一模式下不再用卡片包裹整块内容（开关/警告/权限检查堆在一张卡片里
+    // 显得拥挤），直接按页面流布局，仅保留与卡片一致的左右边距。
+    if (unifiedControl) {
+      return const Padding(
+        padding: EdgeInsets.fromLTRB(12, 10, 12, 0),
+        child: AdbAuthSection(),
+      );
+    }
     return PaddingCard(
-        // 安卓 11+ 卡片里只有"接受控制"总开关，不再显示"权限"标题
-        title: unifiedControl ? null : translate("Permissions"),
+        title: translate("Permissions"),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          if (!unifiedControl && serverModel.mediaOk)
+          if (serverModel.mediaOk)
             ElevatedButton.icon(
                     style: ButtonStyle(
                         backgroundColor:
@@ -598,28 +605,25 @@ class _PermissionCheckerState extends State<PermissionChecker> {
                     onPressed: serverModel.toggleService,
                     label: Text(translate("Stop service")))
                 .marginOnly(bottom: 8),
-          if (!unifiedControl)
-            PermissionRow(
-                translate("Screen Capture"),
-                serverModel.mediaOk,
-                !serverModel.mediaOk &&
-                        gFFI.userModel.userName.value.isEmpty &&
-                        bind.mainGetLocalOption(key: "show-scam-warning") !=
-                            "N"
-                    ? () => showScamWarning(context, serverModel)
-                    : serverModel.toggleService),
-          if (!unifiedControl)
-            PermissionRow(translate("Input Control"), serverModel.inputOk,
-                serverModel.toggleInput),
+          PermissionRow(
+              translate("Screen Capture"),
+              serverModel.mediaOk,
+              !serverModel.mediaOk &&
+                      gFFI.userModel.userName.value.isEmpty &&
+                      bind.mainGetLocalOption(key: "show-scam-warning") !=
+                          "N"
+                  ? () => showScamWarning(context, serverModel)
+                  : serverModel.toggleService),
+          PermissionRow(translate("Input Control"), serverModel.inputOk,
+              serverModel.toggleInput),
           // 文件传输/音频采集/剪贴板在总开关模式下随"接受控制"开关
           // 一起授权和启停，不再单列；传统模式（Android10 以下/鸿蒙）保留
-          if (!unifiedControl)
-            PermissionRow(translate("Transfer file"), serverModel.fileOk,
-                serverModel.toggleFile),
-          if (!unifiedControl && hasAudioPermission)
+          PermissionRow(translate("Transfer file"), serverModel.fileOk,
+              serverModel.toggleFile),
+          if (hasAudioPermission)
             PermissionRow(translate("Audio Capture"), serverModel.audioOk,
                 serverModel.toggleAudio),
-          if (!unifiedControl && !hasAudioPermission)
+          if (!hasAudioPermission)
             Row(children: [
               Icon(Icons.info_outline).marginOnly(right: 15),
               Expanded(
@@ -628,9 +632,8 @@ class _PermissionCheckerState extends State<PermissionChecker> {
                 style: const TextStyle(color: MyTheme.darkGray),
               ))
             ]),
-          if (!unifiedControl)
-            PermissionRow(translate("Enable clipboard"),
-                serverModel.clipboardOk, serverModel.toggleClipboard),
+          PermissionRow(translate("Enable clipboard"),
+              serverModel.clipboardOk, serverModel.toggleClipboard),
           const AdbAuthSection(),
         ]));
   }
@@ -1058,20 +1061,15 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     // 已完成防诈骗确认，用派生值兜底，避免"开关开着却显示未勾选"
     final scamAck = _scamAcknowledged || switchOn;
     final pairedBefore = _lastSnap["paired"] == true;
-    final String statusText = switchOn
-        ? "正在接受远程控制，关闭后他人无法查看和操作本机"
-        : (pairedBefore
-            ? "授权已就绪，打开开关即可接受远程控制"
-            : "首次开启按引导完成一次无线调试配对，仅需一次");
     final Color stateColor = switchOn ? Colors.green : Colors.grey;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // ① 状态头部：状态色底板 + 盾牌图标 + 标题/状态文案 + 总开关
+        // ① 状态头部：状态色底板 + 盾牌图标 + 标题 + 总开关（不放状态小字）
         Container(
           padding:
-              const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
           decoration: BoxDecoration(
             color: stateColor.withOpacity(switchOn ? 0.08 : 0.06),
             borderRadius: BorderRadius.circular(10),
@@ -1093,22 +1091,10 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
               ),
             ),
             const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text("接受控制",
-                      style: TextStyle(
-                          fontSize: 15, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 3),
-                  Text(
-                    statusText,
-                    style: TextStyle(
-                        fontSize: 12,
-                        color: switchOn ? Colors.green[700] : MyTheme.darkGray),
-                  ),
-                ],
-              ),
+            const Expanded(
+              child: Text("接受控制",
+                  style:
+                      TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
             ),
             Switch(
               value: switchOn,
@@ -1118,7 +1104,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
                   ? null
                   : (v) {
                       if (v == true && !scamAck) {
-                        showToast("请先确认上方的警告");
+                        showToast("请先勾选页面底部的知晓确认");
                         return;
                       }
                       _toggleControl(v == true);
@@ -1127,7 +1113,32 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           ]),
         ),
         const SizedBox(height: 10),
-        // ② 防诈骗红色警告（图标 + 文案一行，圆角红底）
+        // ② 权限检查入口：紧跟开关，随时可打开；未配对时附带配对诊断入口
+        Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            OutlinedButton.icon(
+                icon: const Icon(Icons.fact_check_outlined, size: 17),
+                style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    minimumSize: const Size(0, 34),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                onPressed: _openEnvReview,
+                label: const Text("权限检查（自启动/通知/后台/电池）",
+                    style: TextStyle(fontSize: 12.5))),
+            if (!switchOn && !pairedBefore)
+              GestureDetector(
+                onTap: _showDiag,
+                child: const Text("配对没成功？点此诊断",
+                    style: TextStyle(fontSize: 12, color: MyTheme.darkGray)),
+              ),
+          ],
+        ),
+        const SizedBox(height: 18),
+        // ③ 以下防诈骗相关提示统一放在页面底部
+        // 防诈骗红色警告（图标 + 文案一行，圆角红底）
         Container(
           width: double.maxFinite,
           padding: const EdgeInsets.all(10),
@@ -1164,7 +1175,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           ),
         ),
         const SizedBox(height: 6),
-        // ③ 知晓确认：勾选后才允许开启总开关；
+        // 知晓确认：勾选后才允许开启总开关；
         // 已在接受控制时保持勾选且不可取消
         InkWell(
           onTap: switchOn
@@ -1227,32 +1238,6 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
             ),
           );
         }),
-        const Divider(height: 20),
-        // ④ 辅助操作区：保活检查常驻；未配对时附带配对诊断入口
-        Wrap(
-          spacing: 8,
-          runSpacing: 4,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            OutlinedButton.icon(
-                icon: const Icon(Icons.fact_check_outlined, size: 17),
-                style: OutlinedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    minimumSize: const Size(0, 34),
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap),
-                onPressed: scamAck
-                    ? _openEnvReview
-                    : () => showToast("请先确认上方的警告"),
-                label: const Text("权限检查（自启动/通知/后台/电池）",
-                    style: TextStyle(fontSize: 12.5))),
-            if (!switchOn && !pairedBefore)
-              GestureDetector(
-                onTap: _showDiag,
-                child: const Text("配对没成功？点此诊断",
-                    style: TextStyle(fontSize: 12, color: MyTheme.darkGray)),
-              ),
-          ],
-        ),
       ],
     );
   }
