@@ -597,6 +597,16 @@ impl RendezvousMediator {
         }
         let peer_addr_v6 = hbb_common::AddrMangle::decode(&ph.socket_addr_v6);
         let relay = use_ws() || Config::is_proxy() || ph.force_relay;
+        log::info!(
+            "[PUNCH-DIAG] B handle_punch_hole: peer_v4={peer_addr}, peer_v6={peer_addr_v6}, a_udp_port={}, force_relay={}, use_ws={}, is_proxy={}, a_candidates={}, my_nat={:?}, obfs={}",
+            ph.udp_port,
+            ph.force_relay,
+            use_ws(),
+            Config::is_proxy(),
+            ph.candidate_addrs.len(),
+            Config::get_nat_type(),
+            hbb_common::config::Config::get_obfuscate_key().is_some()
+        );
         let mut socket_addr_v6 = Default::default();
         if peer_addr_v6.port() > 0 && !relay {
             socket_addr_v6 = start_ipv6(peer_addr_v6, peer_addr, server.clone()).await;
@@ -606,6 +616,7 @@ impl RendezvousMediator {
         // 对称 NAT 不再一刀切放弃：锥形+对称组合可通过对端真实地址学习打通，
         // 真正打不通时 A 侧超时后会 RequestRelay，B 由 handle_request_relay 兜底。
         if relay || (config::is_disable_tcp_listen() && ph.udp_port <= 0) {
+            log::info!("[PUNCH-DIAG] B direct-relay branch: relay={relay}, disable_tcp_listen={}, a_udp_port={}", config::is_disable_tcp_listen(), ph.udp_port);
             let uuid = Uuid::new_v4().to_string();
             return self
                 .create_relay(
@@ -639,10 +650,12 @@ impl RendezvousMediator {
                 .map(|b| hbb_common::AddrMangle::decode(b))
                 .filter(|a| a.is_ipv4() && a.port() > 0)
                 .collect();
+            log::info!("[PUNCH-DIAG] B udp-punch branch: target={peer_addr}, a_candidates={a_candidates:?}");
             self.punch_udp_hole(peer_addr, a_candidates, server, msg_punch)
                 .await?;
             return Ok(());
         }
+        log::info!("[PUNCH-DIAG] B tcp-punch branch (a_udp_port=0): target={peer_addr}");
         log::debug!("Punch tcp hole to {:?}", peer_addr);
         let mut socket = {
             let socket = connect_tcp(&*self.host, CONNECT_TIMEOUT).await?;

@@ -2187,9 +2187,17 @@ pub async fn punch_udp_connected(
     listen: bool,
     max_time: Duration,
 ) -> ResultType<Option<hbb_common::bytes::BytesMut>> {
+    let obfs = hbb_common::config::Config::get_obfuscate_key().is_some();
+    log::info!(
+        "[PUNCH-DIAG] connected start: listen={listen}, v6={}, obfs={obfs}, max_time={max_time:?}, local={:?}",
+        socket.local_addr().map(|a| a.is_ipv6()).unwrap_or(false),
+        socket.local_addr().ok()
+    );
     let mut retry_interval = Duration::from_millis(20);
     const MAX_INTERVAL: Duration = Duration::from_millis(200);
     let mut packets_sent = 0;
+    let mut invalid_cnt: u64 = 0;
+    let mut invalid_first: Option<(usize, Vec<u8>)> = None;
     // 混淆模式为带随机填充的探测帧，明文模式为空包（官方兼容）
     let probe = hbb_common::bytes_codec::wrap_punch_probe();
     socket.send(&probe).await.ok();
@@ -2201,6 +2209,10 @@ pub async fn punch_udp_connected(
         tokio::select! {
             _ = hbb_common::sleep(retry_interval.as_secs_f32()) => {
                 if tm.elapsed() > max_time {
+                    log::info!(
+                        "[PUNCH-DIAG] connected timeout: listen={listen}, sent={packets_sent}, invalid={invalid_cnt}, first={invalid_first:?}, elapsed={:?}",
+                        tm.elapsed()
+                    );
                     bail!("UDP punch is timed out, stop sending packets after {} packets", packets_sent);
                 }
                 if last_send_time.elapsed() >= retry_interval {
@@ -2222,16 +2234,27 @@ pub async fn punch_udp_connected(
                     match classify_p2p_datagram(&data[..n]) {
                         // 对端探测包：主控侧据此判定打通；被控侧继续等真正的 KCP 握手
                         P2pDatagram::Probe => {
+                            log::info!(
+                                "[PUNCH-DIAG] connected got probe, listen={listen}, {n} bytes, elapsed={:?}",
+                                tm.elapsed()
+                            );
                             if listen {
                                 continue;
                             }
                             return Ok(None);
                         }
                         P2pDatagram::Payload(plain) => {
+                            log::info!(
+                                "[PUNCH-DIAG] connected got payload, {n} bytes, elapsed={:?}",
+                                tm.elapsed()
+                            );
                             return Ok(Some(hbb_common::bytes::BytesMut::from(plain.as_slice())));
                         }
                         P2pDatagram::Invalid => {
-                            log::debug!("ignore invalid punch packet, {n} bytes");
+                            invalid_cnt += 1;
+                            if invalid_first.is_none() {
+                                invalid_first = Some((n, data[..n.min(16)].to_vec()));
+                            }
                             continue;
                         }
                     }
@@ -2304,8 +2327,15 @@ pub async fn punch_udp_candidates(
     if targets.is_empty() {
         bail!("no udp punch targets");
     }
+    let obfs = hbb_common::config::Config::get_obfuscate_key().is_some();
+    log::info!(
+        "[PUNCH-DIAG] candidates start: listen={listen}, v4={is_v4}, obfs={obfs}, targets={targets:?}, allowed={allowed_ips:?}, max_time={max_time:?}"
+    );
     // 被控侧运行期学到的对端真实映射地址（主控对称 NAT 救援）
     let mut learned: Vec<SocketAddr> = Vec::new();
+    let mut invalid_cnt: u64 = 0;
+    let mut invalid_first: Option<(SocketAddr, usize, Vec<u8>)> = None;
+    let mut bad_ip_cnt: u64 = 0;
     // 混淆模式为带随机填充的探测帧，明文模式为空包（官方兼容）
     let probe = hbb_common::bytes_codec::wrap_punch_probe();
     for t in &targets {
@@ -2320,6 +2350,10 @@ pub async fn punch_udp_candidates(
         tokio::select! {
             _ = hbb_common::sleep(retry_interval.as_secs_f32()) => {
                 if tm.elapsed() > max_time {
+                    log::info!(
+                        "[PUNCH-DIAG] candidates timeout: listen={listen}, sent={packets_sent}, learned={learned:?}, invalid={invalid_cnt}, bad_ip={bad_ip_cnt}, first={invalid_first:?}, elapsed={:?}",
+                        tm.elapsed()
+                    );
                     bail!("UDP punch is timed out, stop sending packets after {} packets", packets_sent);
                 }
                 if last_send_time.elapsed() >= retry_interval {
@@ -2343,7 +2377,10 @@ pub async fn punch_udp_candidates(
                     // 只接受候选来源 IP（端口不限——对称 NAT 端口会变），
                     // 防止公网第三方/噪声注入伪握手
                     if !allowed_ips.is_empty() && !allowed_ips.contains(&src.ip()) {
-                        log::debug!("ignore punch packet from unexpected ip {src}");
+                        bad_ip_cnt += 1;
+                        if bad_ip_cnt <= 3 {
+                            log::info!("[PUNCH-DIAG] candidates packet from unexpected ip {src}, {n} bytes");
+                        }
                         continue;
                     }
                     use hbb_common::bytes_codec::{classify_p2p_datagram, P2pDatagram};
@@ -2359,20 +2396,25 @@ pub async fn punch_udp_candidates(
                                     && !learned.contains(&src)
                                 {
                                     learned.push(src);
-                                    log::debug!("punch listen: learned peer probe from {src}");
+                                    log::info!("[PUNCH-DIAG] candidates B learned peer probe from {src}, reply+probe, elapsed={:?}", tm.elapsed());
                                     let back = hbb_common::bytes_codec::wrap_punch_probe();
                                     socket.send_to(&back, src).await.ok();
                                     packets_sent += 1;
                                 }
                                 continue;
                             }
+                            log::info!("[PUNCH-DIAG] candidates A got probe from {src}, elapsed={:?}", tm.elapsed());
                             return Ok((None, src));
                         }
                         P2pDatagram::Payload(plain) => {
+                            log::info!("[PUNCH-DIAG] candidates got payload from {src}, {n} bytes, elapsed={:?}", tm.elapsed());
                             return Ok((Some(hbb_common::bytes::BytesMut::from(plain.as_slice())), src));
                         }
                         P2pDatagram::Invalid => {
-                            log::debug!("ignore invalid punch packet from {src}, {n} bytes");
+                            invalid_cnt += 1;
+                            if invalid_first.is_none() {
+                                invalid_first = Some((src, n, data[..n.min(16)].to_vec()));
+                            }
                             continue;
                         }
                     }
