@@ -684,6 +684,13 @@ impl Client {
         // 对称 NAT 救援窗口：旧逻辑 1s 太短，对端地址学习 + KCP 握手通常需要 1~2s，
         // 打不通时再由后续 request_relay 兜底
         const SYMMETRIC_PUNCH_TIMEOUT: u64 = 3000;
+        // NAT 类型未知时的直连窗口：探测失败大多是服务端 21114 探测端口未暴露，
+        // 未知类型在统计上绝大多数是锥型 NAT；短窗口直连，失败快速转中继，
+        // 避免旧逻辑 punch_time_used×6（该值含 3~9s 等待对端应答）拖到 20s+
+        const UNKNOWN_NAT_PUNCH_TIMEOUT: u64 = 4000;
+        // 任何情况下直连竞速的硬上限：对端慢应答 + 历史失败重试时，
+        // punch_time_used 可能很大，乘积会到 30~50s
+        const PUNCH_TIMEOUT_HARD_CAP: u64 = 8000;
         if is_local {
             connect_timeout = MIN;
         } else if peer_nat_type == NatType::SYMMETRIC {
@@ -692,23 +699,29 @@ impl Client {
             if relay_server.is_empty() {
                 connect_timeout = CONNECT_TIMEOUT;
             } else {
+                // 我方 NAT 类型未知时先快速补测（hbbs 21114 端口缺失时常驻 UNKNOWN）
+                let mut my_nat_type = my_nat_type;
+                if my_nat_type == NatType::UNKNOWN_NAT as i32 {
+                    my_nat_type = crate::get_nat_type(100).await;
+                }
                 if peer_nat_type == NatType::ASYMMETRIC {
-                    let mut my_nat_type = my_nat_type;
-                    if my_nat_type == NatType::UNKNOWN_NAT as i32 {
-                        my_nat_type = crate::get_nat_type(100).await;
-                    }
                     if my_nat_type == NatType::ASYMMETRIC as i32 {
                         connect_timeout = CONNECT_TIMEOUT;
                         if direct_failures > 0 {
-                            connect_timeout = punch_time_used * 6;
+                            connect_timeout = (punch_time_used * 6).min(CONNECT_TIMEOUT);
                         }
                     } else if my_nat_type == NatType::SYMMETRIC as i32 {
                         connect_timeout = SYMMETRIC_PUNCH_TIMEOUT;
                     }
                 }
                 if connect_timeout == 0 {
-                    let n = if direct_failures > 0 { 3 } else { 6 };
-                    connect_timeout = punch_time_used * (n as u64);
+                    // peer 或 my 为 UNKNOWN：按锥型 NAT 短窗口尝试，
+                    // 不再用含等待时间的 punch_time_used×6
+                    connect_timeout = if direct_failures > 0 {
+                        (punch_time_used * 3).min(PUNCH_TIMEOUT_HARD_CAP)
+                    } else {
+                        UNKNOWN_NAT_PUNCH_TIMEOUT
+                    };
                 }
             }
             if connect_timeout < MIN {

@@ -713,7 +713,10 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         //    不申请任何权限。
         var inputOk = false;
         String? failMode;
+        String? failDetail;
         while (mounted) {
+          failMode = null;
+          failDetail = null;
           // 3.1) 显示不可取消的恢复中加载框（替代一闪而过的 toast）
           BuildContext? loadingCtx;
           StateSetter? loadingSetState;
@@ -771,9 +774,14 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
             failMode = (r is Map && r["mode"] is String)
                 ? r["mode"] as String
                 : null;
-          } catch (_) {
+            failDetail = (r is Map && r["detail"] is String)
+                ? r["detail"] as String
+                : null;
+          } catch (e) {
             slowTimer.cancel();
             inputOk = false;
+            failMode = "flutter_invoke_error";
+            failDetail = e.toString();
           }
           // 无论页面是否还在，都关掉加载框（其 context 独立于 State.context）
           if (loadingCtx != null && loadingCtx!.mounted) {
@@ -791,8 +799,10 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           final action = await showDialog<String>(
             context: context,
             barrierDismissible: false,
-            builder: (_) =>
-                _EnvCheckDialog(retryMode: true, failMode: failMode),
+            builder: (_) => _EnvCheckDialog(
+                retryMode: true,
+                failMode: failMode,
+                failDetail: failDetail),
           );
           if (action == "repair") {
             // 配对失效：释放忙碌锁后进配对流程（独立对话框）
@@ -1252,6 +1262,7 @@ class _EnvCheckDialog extends StatefulWidget {
       this.reviewMode = false,
       this.retryMode = false,
       this.failMode,
+      this.failDetail,
       this.autoContinue = false})
       : super(key: key);
 
@@ -1265,6 +1276,9 @@ class _EnvCheckDialog extends StatefulWidget {
   /// wireless_debug_off / shell_no_service / shell_rejected /
   /// shell_put_denied / shell_verify_failed / shell_connect_error
   final String? failMode;
+
+  /// 原生返回的细节（如 mDNS 失败/连接被拒等），诊断用，直接显示在弹窗中
+  final String? failDetail;
 
   /// true=配对前入口：检查在窗内执行（避免点开关后无反馈等待数秒），
   /// 首刷完成后若所有项目均已开启，窗口自动关闭并返回 true 直接配对
@@ -1670,9 +1684,26 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
                         .withOpacity(0.1),
                     borderRadius: BorderRadius.circular(6),
                   ),
-                  child: Text(
-                    _retryHint,
-                    style: const TextStyle(fontSize: 12, height: 1.5),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _retryHint,
+                        style: const TextStyle(fontSize: 12, height: 1.5),
+                      ),
+                      if (widget.failMode != null ||
+                          widget.failDetail != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: SelectableText(
+                            "诊断码：${widget.failMode ?? "-"}${widget.failDetail != null ? " / ${widget.failDetail}" : ""}",
+                            style: const TextStyle(
+                                fontSize: 10,
+                                color: Colors.black45,
+                                fontFamily: "monospace"),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
               if (widget.reviewMode)
