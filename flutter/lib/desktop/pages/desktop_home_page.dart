@@ -466,7 +466,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
       if (!bind.mainIsInstalled()) {
         return buildInstallCard(
             "接受远程控制",
-            "当前仅可主动控制其他设备。开启后，其他设备可通过本机 ID 远程控制这台电脑，需要安装系统服务。",
+            "开启后，他人可通过本机 ID 控制这台电脑（需安装服务）。",
             "接受控制", () async {
           await rustDeskWinManager.closeAllSubWindows();
           bind.mainGotoInstall();
@@ -633,20 +633,10 @@ class _DesktopHomePageState extends State<DesktopHomePage>
                                     color: Colors.white,
                                     fontWeight: FontWeight.bold,
                                     fontSize: 15),
-                              ).marginOnly(bottom: 6)),
+                              ).marginOnly(bottom: 14)),
                             ]
                           : <Widget>[]) +
-                      <Widget>[
-                        if (content.isNotEmpty)
-                          Text(
-                            translate(content),
-                            style: TextStyle(
-                                height: 1.5,
-                                color: Colors.white,
-                                fontWeight: FontWeight.normal,
-                                fontSize: 13),
-                          ).marginOnly(bottom: 20)
-                      ] +
+                      <Widget>[] +
                       (btnText.isNotEmpty
                           ? <Widget>[
                               Row(
@@ -666,6 +656,22 @@ class _DesktopHomePageState extends State<DesktopHomePage>
                                   ])
                             ]
                           : <Widget>[]) +
+                      <Widget>[
+                        if (content.isNotEmpty)
+                          Padding(
+                              padding: EdgeInsets.only(
+                                  top: btnText.isNotEmpty ? 12 : 0),
+                              child: Center(
+                                  child: Text(
+                                translate(content),
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                    height: 1.5,
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.normal,
+                                    fontSize: 13),
+                              )))
+                      ] +
                       (help != null
                           ? <Widget>[
                               Center(
@@ -737,19 +743,8 @@ class _DesktopHomePageState extends State<DesktopHomePage>
                           : Colors.white,
                       fontWeight: FontWeight.bold,
                       fontSize: 15),
-                ).marginOnly(bottom: 6)),
-                Text(
-                  accepting
-                      ? "本机当前可被远程控制。不需要时可停止接受控制，停止后其他设备将无法查看或操作本机，随时可以再次开启。"
-                      : "本机当前不会被远程控制。开启后，其他设备可通过本机 ID 远程控制这台电脑。",
-                  style: TextStyle(
-                      height: 1.5,
-                      color: accepting
-                          ? theme.textTheme.bodyMedium?.color
-                          : Colors.white,
-                      fontWeight: FontWeight.normal,
-                      fontSize: 13),
-                ).marginOnly(bottom: 20),
+                ).marginOnly(bottom: 14)),
+                // 按钮置于说明文字之前：低分辨率窗口下无需滚动即可看到并点击
                 Row(mainAxisAlignment: MainAxisAlignment.center, children: [
                   FixedWidthButton(
                     width: 170,
@@ -762,7 +757,23 @@ class _DesktopHomePageState extends State<DesktopHomePage>
                     radius: 10,
                     onTap: () => start_service(!accepting),
                   )
-                ])
+                ]),
+                Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Center(
+                        child: Text(
+                      accepting
+                          ? "本机可被远程控制，停止后他人将无法连接。"
+                          : "开启后，他人可通过本机 ID 远程控制这台电脑。",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                          height: 1.5,
+                          color: accepting
+                              ? theme.textTheme.bodyMedium?.color
+                              : Colors.white,
+                          fontWeight: FontWeight.normal,
+                          fontSize: 13),
+                    )))
               ]),
     );
   }
