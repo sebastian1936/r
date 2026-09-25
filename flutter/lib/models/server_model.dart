@@ -789,9 +789,20 @@ class ServerModel with ChangeNotifier {
   scrollToBottom() {
     if (isDesktop) return;
     Future.delayed(Duration(milliseconds: 200), () {
-      controller.animateTo(controller.position.maxScrollExtent,
-          duration: Duration(milliseconds: 200),
-          curve: Curves.fastLinearToSlowEaseIn);
+      // 冷启动后若从未切到「被控」tab（ServerPage 未构建），或 App 处于
+      // 后台服务模式，滚动列表并未挂载，controller 没有任何 position。
+      // release 下 ScrollController.position 等价于 positions.single，
+      // 空集合会抛 Bad state: No element，且该异常发生在异步回调中、
+      // 逃逸出 addConnection 的 try-catch，会被启动 zone 兜底成红屏页，
+      // 把首次被控的「接受/拒绝」弹窗冲掉。未挂载时直接跳过即可。
+      if (!controller.hasClients) return;
+      try {
+        controller.animateTo(controller.position.maxScrollExtent,
+            duration: Duration(milliseconds: 200),
+            curve: Curves.fastLinearToSlowEaseIn);
+      } catch (_) {
+        // 200ms 内页面刚好切走/卸载的竞态，忽略即可
+      }
     });
   }
 

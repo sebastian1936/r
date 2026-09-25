@@ -310,6 +310,9 @@ void runMobileApp() {
   // 整个移动端启动链放进 zone：runApp 之前任何 await 抛异常在 release 下
   // 都表现为永久白屏，这里兜底渲染错误页，无 adb 也能截图定位。
   var step = 'main()';
+  // runApp 是否已成功：启动链异常要红屏兜底；进入运行期后的单个异步
+  // 回调异常只记录，不能冲掉整个 UI（否则一个无害异常也会强制用户重启）
+  var appRunning = false;
   String stepLabel() =>
       mobileStartupStep.isEmpty ? step : '$step > $mobileStartupStep';
   final watchdog = Timer(const Duration(seconds: 15), () {
@@ -335,9 +338,17 @@ void runMobileApp() {
     step = 'runApp';
     watchdog.cancel();
     runApp(App());
+    appRunning = true;
     await initUniLinks();
   }, (error, stack) {
     watchdog.cancel();
+    if (appRunning) {
+      // 运行期：单个异步回调异常（如某个延迟回调竞态）不应冲掉整个界面，
+      // 与 PlatformDispatcher.onError「仅记录不杀进程」策略一致
+      startupLog('runtime zone error: $error\n$stack');
+      debugPrint('runtime zone error: $error');
+      return;
+    }
     runMobileFatalErrorApp(error, stack, stepLabel());
   });
 }
