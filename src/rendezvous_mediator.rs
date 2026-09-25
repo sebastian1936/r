@@ -914,12 +914,45 @@ async fn start_ipv6(
         let server = server.clone();
         tokio::spawn(async move {
             allow_err!(
-                udp_nat_listen(socket.clone(), vec![peer_addr_v6], peer_addr_v4, server).await
+                udp_nat_listen_v6(socket.clone(), peer_addr_v6, peer_addr_v4, server).await
             );
         });
         return local_addr_v6;
     }
     Default::default()
+}
+
+/// IPv6 被控监听：公网 v6 端到端无 NAT，保持旧版「先 connect 再打洞」的稳定路径，
+/// 不走 v4 对称 NAT 的多目标来源学习（学习对 v6 无收益，且 Windows 上
+/// 「先收发再 connect」的状态切换顺序 + 来源白名单会误伤前缀改写/隐私地址场景）。
+async fn udp_nat_listen_v6(
+    socket: Arc<tokio::net::UdpSocket>,
+    peer_addr: SocketAddr,
+    peer_addr_v4: SocketAddr,
+    server: ServerPtr,
+) -> ResultType<()> {
+    let tm = Instant::now();
+    let socket_cloned = socket.clone();
+    let func = async {
+        socket.connect(peer_addr).await?;
+        let res = crate::punch_udp_connected(socket.clone(), true).await?;
+        let stream = crate::kcp_stream::KcpStream::accept(
+            socket,
+            Duration::from_millis(CONNECT_TIMEOUT as _),
+            res,
+        )
+        .await?;
+        crate::server::create_tcp_connection(server, stream.1, peer_addr_v4, true).await?;
+        Ok(())
+    };
+    func.await.map_err(|e: anyhow::Error| {
+        anyhow::anyhow!(
+            "Stop listening on {:?} for remote {peer_addr} with KCP, {:?} elapsed: {e}",
+            socket_cloned.local_addr(),
+            tm.elapsed()
+        )
+    })?;
+    Ok(())
 }
 
 async fn udp_nat_listen(
