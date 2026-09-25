@@ -641,8 +641,9 @@ object AdbAuthManager {
 
     private fun discoverConnect(context: Context, scanTimeoutMs: Long = 15_000L): AdbDiscovery.DiscoveredService? {
         // 0) 先探活上次成功用过的端口：部分 ROM 重开无线调试会复用同一端口，
-        //    命中可跳过 NsdManager 冷启动的数秒延迟（不命中代价仅一次 bind）
-        AdbDiscovery.lastConnectPort?.let { p ->
+        //    命中可跳过 NsdManager 冷启动的数秒延迟（不命中代价仅一次 bind）。
+        //    端口已持久化：App 被划掉重开、无线调试未重启时直接命中，无需 mDNS
+        AdbDiscovery.cachedPort(context)?.let { p ->
             if (AdbDiscovery.isLoopbackPortListening(p)) {
                 Log.i(TAG, "discoverConnect：命中缓存端口 :$p，直接使用")
                 return AdbDiscovery.DiscoveredService("cached", "127.0.0.1", p, emptyMap())
@@ -654,7 +655,7 @@ object AdbAuthManager {
         // NsdManager 冷启动本身就要几秒，连续窗口比"多次短窗重启扫描"命中率高。
         val s = AdbDiscovery.findFirst(context, AdbDiscovery.TYPE_CONNECT, timeoutMs = scanTimeoutMs)
         if (s != null) {
-            AdbDiscovery.rememberConnectPort(s.port)
+            AdbDiscovery.rememberConnectPort(context, s.port)
             return AdbDiscovery.DiscoveredService(s.serviceName, "127.0.0.1", s.port, s.attributes)
         }
         // 兜底：部分 ROM（或旧版无线调试）监听固定 5555，同样要求端口真的在监听

@@ -12,6 +12,8 @@
     <!-- 锁屏后持有 WifiLock 防止 WiFi 进入省电/断连导致被控离线 -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- 无线调试 mDNS 发现：部分 ROM 未持多播锁会过滤入站 mDNS 响应（normal 权限） -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <!-- Doze 下精确周期唤醒保活（API31+，可被用户撤销，代码有非精确兜底） -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

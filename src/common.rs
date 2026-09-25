@@ -2179,14 +2179,16 @@ pub async fn test_ipv6() -> Option<tokio::task::JoinHandle<()>> {
 }
 
 /// 已 connect 的 socket（IPv6 直连路径）使用的经典打洞循环：
-/// 周期发空包直到收到对端任意数据包
+/// 周期发空包直到收到对端任意数据包。
+/// max_time 由调用方按竞速超时传入：主控侧应与 connect_timeout 一致，
+/// 打不通时快速失败转中继，不能固定跑满 20s 拖慢降级。
 pub async fn punch_udp_connected(
     socket: Arc<UdpSocket>,
     listen: bool,
+    max_time: Duration,
 ) -> ResultType<Option<hbb_common::bytes::BytesMut>> {
     let mut retry_interval = Duration::from_millis(20);
     const MAX_INTERVAL: Duration = Duration::from_millis(200);
-    const MAX_TIME: Duration = Duration::from_secs(20);
     let mut packets_sent = 0;
     // 混淆模式为带随机填充的探测帧，明文模式为空包（官方兼容）
     let probe = hbb_common::bytes_codec::wrap_punch_probe();
@@ -2198,7 +2200,7 @@ pub async fn punch_udp_connected(
     loop {
         tokio::select! {
             _ = hbb_common::sleep(retry_interval.as_secs_f32()) => {
-                if tm.elapsed() > MAX_TIME {
+                if tm.elapsed() > max_time {
                     bail!("UDP punch is timed out, stop sending packets after {} packets", packets_sent);
                 }
                 if last_send_time.elapsed() >= retry_interval {
@@ -2275,17 +2277,20 @@ pub fn local_candidates_v4(bound: SocketAddr, remote: &str) -> Vec<SocketAddr> {
 /// 探测包；从首个来源 IP 命中 allowed_ips 的数据包学习对端 NAT 后的真实映射地址
 /// （对称 NAT 下对 hbbs 与对我的映射端口不同，必须按实际来源地址学习，不能只打
 /// hbbs 反射端口）。
-/// - listen=true（被控 B）：忽略空包，返回首个非空的 KCP 握手数据
+/// - listen=true（被控 B）：忽略空包，返回首个非空的 KCP 握手数据；
+///   期间若收到命中来源白名单的探测包，会把该来源加入周期目标并立即回敬
+///   一个探测——主控侧若为对称 NAT，其 hbbs 反射端口与发往被控的映射端口
+///   不同，只打反射端口永远打不通，必须按真实来源回敬才能让主控先打通
 /// - listen=false（主控 A）：首个任意包即视为打通
 pub async fn punch_udp_candidates(
     socket: Arc<UdpSocket>,
     targets: &[SocketAddr],
     allowed_ips: &[std::net::IpAddr],
     listen: bool,
+    max_time: Duration,
 ) -> ResultType<(Option<hbb_common::bytes::BytesMut>, SocketAddr)> {
     let mut retry_interval = Duration::from_millis(20);
     const MAX_INTERVAL: Duration = Duration::from_millis(200);
-    const MAX_TIME: Duration = Duration::from_secs(20);
     let mut packets_sent = 0;
     // 目标去重、按 socket 协议族过滤、限量，避免候选过多造成 UDP 突发
     let mut seen = std::collections::HashSet::new();
@@ -2299,6 +2304,8 @@ pub async fn punch_udp_candidates(
     if targets.is_empty() {
         bail!("no udp punch targets");
     }
+    // 被控侧运行期学到的对端真实映射地址（主控对称 NAT 救援）
+    let mut learned: Vec<SocketAddr> = Vec::new();
     // 混淆模式为带随机填充的探测帧，明文模式为空包（官方兼容）
     let probe = hbb_common::bytes_codec::wrap_punch_probe();
     for t in &targets {
@@ -2312,13 +2319,13 @@ pub async fn punch_udp_candidates(
     loop {
         tokio::select! {
             _ = hbb_common::sleep(retry_interval.as_secs_f32()) => {
-                if tm.elapsed() > MAX_TIME {
+                if tm.elapsed() > max_time {
                     bail!("UDP punch is timed out, stop sending packets after {} packets", packets_sent);
                 }
                 if last_send_time.elapsed() >= retry_interval {
                     // 每轮重新生成探测帧，内容/长度均随机，避免固定包形成新指纹
                     let probe = hbb_common::bytes_codec::wrap_punch_probe();
-                    for t in &targets {
+                    for t in targets.iter().chain(learned.iter()) {
                         socket.send_to(&probe, *t).await.ok();
                         packets_sent += 1;
                     }
@@ -2341,9 +2348,22 @@ pub async fn punch_udp_candidates(
                     }
                     use hbb_common::bytes_codec::{classify_p2p_datagram, P2pDatagram};
                     match classify_p2p_datagram(&data[..n]) {
-                        // 对端探测包：主控侧据此判定打通；被控侧继续等真正的 KCP 握手
+                        // 对端探测包：主控侧据此判定打通；被控侧把真实来源学为
+                        // 新目标并立即回敬探测（对称 NAT 主控的反射端口打不中，
+                        // 只有回到它发包的真实映射地址，主控才能先打通并发 KCP SYN）
                         P2pDatagram::Probe => {
                             if listen {
+                                if src.is_ipv4() == is_v4
+                                    && learned.len() < 8
+                                    && !targets.contains(&src)
+                                    && !learned.contains(&src)
+                                {
+                                    learned.push(src);
+                                    log::debug!("punch listen: learned peer probe from {src}");
+                                    let back = hbb_common::bytes_codec::wrap_punch_probe();
+                                    socket.send_to(&back, src).await.ok();
+                                    packets_sent += 1;
+                                }
                                 continue;
                             }
                             return Ok((None, src));

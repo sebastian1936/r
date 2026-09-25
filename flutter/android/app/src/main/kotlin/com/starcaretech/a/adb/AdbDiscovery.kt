@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
@@ -34,18 +35,45 @@ object AdbDiscovery {
     const val TYPE_CONNECT = "_adb-tls-connect._tcp"
 
     /**
-     * 最近一次成功发现的 connect 端口（进程内缓存）。
+     * 最近一次成功发现的 connect 端口。
      * adbd 重开无线调试后端口通常会变，但部分 ROM 会复用；
      * 重连时先探活这个端口（一次 bind 探测，毫秒级），命中可直接跳过
      * 冷启动 NsdManager 数秒的发现延迟。仅缓存"当时确实在监听"的端口，
      * 使用前一律重新 bind 探活，陈旧记录不会被使用。
+     *
+     * 同时持久化到 SharedPreferences：App 被从最近任务划掉/进程被杀后，
+     * 无线调试往往根本没重启、端口不变，新进程可直接命中旧端口，绕开
+     * 国产 ROM 上 NsdManager 冷启动发现不到常驻 connect 服务的顽疾
+     * （pairing 服务靠注册时的主动 announce 总能收到，connect 服务只回应
+     * 主动 query，部分 ROM 的 mdns 栈对 query 响应很差）。
      */
-    @Volatile
-    var lastConnectPort: Int? = null
-        private set
+    private const val PREFS = "adb_auth"
+    private const val KEY_LAST_CONNECT_PORT = "last_connect_port"
 
-    fun rememberConnectPort(port: Int) {
-        if (port > 0) lastConnectPort = port
+    @Volatile
+    private var memPort: Int? = null
+
+    /** 取缓存端口（内存优先，其次持久化存储）；使用前必须重新 bind 探活 */
+    fun cachedPort(context: Context): Int? {
+        memPort?.let { return it }
+        val app = context.applicationContext
+        return runCatching {
+            val sp = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val p = sp.getInt(KEY_LAST_CONNECT_PORT, 0)
+            if (p > 0) p else null
+        }.getOrNull()?.also { memPort = it }
+    }
+
+    fun rememberConnectPort(context: Context, port: Int) {
+        if (port <= 0) return
+        memPort = port
+        runCatching {
+            context.applicationContext
+                .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putInt(KEY_LAST_CONNECT_PORT, port)
+                .apply()
+        }
     }
 
     class DiscoveredService(
@@ -93,12 +121,12 @@ object AdbDiscovery {
      * @return 可用端口；未发现返回 null
      */
     fun quickProbeConnectPort(context: Context, timeoutMs: Long = 3_500L): Int? {
-        lastConnectPort?.let { p ->
+        cachedPort(context)?.let { p ->
             if (isLoopbackPortListening(p)) return p
         }
         val s = findFirst(context, TYPE_CONNECT, timeoutMs = timeoutMs)
         if (s != null) {
-            rememberConnectPort(s.port)
+            rememberConnectPort(context, s.port)
             return s.port
         }
         return if (isLoopbackPortListening(5555)) 5555 else null
@@ -138,6 +166,17 @@ object AdbDiscovery {
         var found: DiscoveredService? = null
         val latch = CountDownLatch(1)
         val lock = Any()
+        // 部分 ROM 的 WiFi 驱动在 App 未持多播锁时过滤入站 mDNS 多播包，
+        // 导致 NsdManager 发了 query 却收不到常驻 connect 服务的响应。
+        // 扫描期间持锁（normal 权限，安装即授予），结束立即释放
+        val multicastLock = runCatching {
+            val wifi = context.applicationContext
+                .getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            wifi?.createMulticastLock("rustdesk_adb_mdns")?.apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }.getOrNull()
 
         val discoveryListener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(regType: String?) {}
@@ -176,6 +215,7 @@ object AdbDiscovery {
         } finally {
             runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
             runCatching { thread.quitSafely() }
+            runCatching { if (multicastLock?.isHeld == true) multicastLock.release() }
         }
         return synchronized(lock) { found }
     }

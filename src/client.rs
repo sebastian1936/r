@@ -4215,8 +4215,17 @@ async fn udp_nat_connect(
     targets: Vec<SocketAddr>,
 ) -> ResultType<(Stream, Option<KcpStream>, &'static str)> {
     let allowed: Vec<std::net::IpAddr> = targets.iter().map(|a| a.ip()).collect();
-    // 对称 NAT：从首个命中候选 IP 的来源包学习 B 的真实映射地址后再 connect
-    let (_, learned) = crate::punch_udp_candidates(socket.clone(), &targets, &allowed, false)
+    // 对称 NAT：从首个命中候选 IP 的来源包学习 B 的真实映射地址后再 connect。
+    // 打洞窗口必须受竞速超时约束（旧实现内部固定 20s，打不通时要白等 20s
+    // 才转中继），与后续 KCP 握手共享 ms_timeout 预算
+    let (_, learned) =
+        crate::punch_udp_candidates(
+            socket.clone(),
+            &targets,
+            &allowed,
+            false,
+            Duration::from_millis(ms_timeout),
+        )
         .await
         .map_err(|err| {
             log::debug!("{err}");
@@ -4241,12 +4250,16 @@ async fn udp_nat_connect_connected(
     typ: &'static str,
     ms_timeout: u64,
 ) -> ResultType<(Stream, Option<KcpStream>, &'static str)> {
-    crate::punch_udp_connected(socket.clone(), false)
-        .await
-        .map_err(|err| {
-            log::debug!("{err}");
-            anyhow!(err)
-        })?;
+    crate::punch_udp_connected(
+        socket.clone(),
+        false,
+        Duration::from_millis(ms_timeout),
+    )
+    .await
+    .map_err(|err| {
+        log::debug!("{err}");
+        anyhow!(err)
+    })?;
     let res = KcpStream::connect(socket, Duration::from_millis(ms_timeout))
         .await
         .map_err(|err| {

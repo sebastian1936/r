@@ -935,7 +935,12 @@ async fn udp_nat_listen_v6(
     let socket_cloned = socket.clone();
     let func = async {
         socket.connect(peer_addr).await?;
-        let res = crate::punch_udp_connected(socket.clone(), true).await?;
+        let res = crate::punch_udp_connected(
+            socket.clone(),
+            true,
+            std::time::Duration::from_secs(20),
+        )
+        .await?;
         let stream = crate::kcp_stream::KcpStream::accept(
             socket,
             Duration::from_millis(CONNECT_TIMEOUT as _),
@@ -967,8 +972,14 @@ async fn udp_nat_listen(
         let allowed: Vec<std::net::IpAddr> = targets.iter().map(|a| a.ip()).collect();
         // 对称 NAT：对端实际映射端口可能不同于 hbbs 反射端口，
         // 先按首个命中候选 IP 的来源包学习真实地址，再 connect 该地址
-        let (res, learned) =
-            crate::punch_udp_candidates(socket.clone(), &targets, &allowed, true).await?;
+        let (res, learned) = crate::punch_udp_candidates(
+            socket.clone(),
+            &targets,
+            &allowed,
+            true,
+            std::time::Duration::from_secs(20),
+        )
+        .await?;
         socket.connect(learned).await?;
         let stream = crate::kcp_stream::KcpStream::accept(
             socket,
