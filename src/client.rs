@@ -485,9 +485,12 @@ impl Client {
             );
             socket.send(&msg_out).await?;
             // below timeout should not bigger than hbbs's connection timeout.
+            // 正常 hbbs 对在线/离线/ID 不存在都会在 1s 内回应；
+            // 3 轮超时依次 2s/4s/6s（合计约 12s），避免服务端/前置代理静默时长时间转圈。
             if let Some(msg_in) =
-                crate::get_next_nonkeyexchange_msg(&mut socket, Some(i * 3000)).await
+                crate::get_next_nonkeyexchange_msg(&mut socket, Some(i * 2000)).await
             {
+                log::info!("#{i} rendezvous reply: {:?}", msg_in.union);
                 match msg_in.union {
                     Some(rendezvous_message::Union::PunchHoleResponse(ph)) => {
                         if ph.socket_addr.is_empty() {
@@ -615,7 +618,11 @@ impl Client {
         }
         drop(socket);
         if peer_addr.port() == 0 {
-            bail!("Failed to connect via rendezvous server");
+            // 3 轮重发均无任何应答。在线/离线/ID 不存在时 hbbs 都会立即回
+            // PunchHoleResponse；收不到通常意味着前置代理没把 TCP 转发到 hbbs、
+            // hbbs 版本过旧，或 hbbs 处理卡住。给出可操作的明确提示。
+            log::error!("no rendezvous reply after 3 punch attempts, peer={peer}");
+            bail!("Peer is offline or rendezvous service is not responding");
         }
         let time_used = start.elapsed().as_millis() as u64;
         log::info!(

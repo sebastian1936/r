@@ -1533,14 +1533,24 @@ pub async fn get_next_nonkeyexchange_msg(
     let timeout = timeout.unwrap_or(READ_TIMEOUT);
     for _ in 0..2 {
         if let Some(Ok(bytes)) = conn.next_timeout(timeout).await {
-            if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
-                match &msg_in.union {
+            match RendezvousMessage::parse_from_bytes(&bytes) {
+                Ok(msg_in) => match &msg_in.union {
                     Some(rendezvous_message::Union::KeyExchange(_)) => {
                         continue;
                     }
                     _ => {
                         return Some(msg_in);
                     }
+                },
+                Err(e) => {
+                    // 收到了字节但解不成信令报文：记录证据，便于区分
+                    // “服务端没回包”与“回包格式/混淆层不一致”。
+                    let n = bytes.len().min(32);
+                    log::warn!(
+                        "failed to parse rendezvous msg ({} bytes): {e}, head: {:02x?}",
+                        bytes.len(),
+                        &bytes[..n]
+                    );
                 }
             }
         }
