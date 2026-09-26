@@ -155,9 +155,16 @@ class HttpFallback {
 
   static bool? _forceHttp;
 
-  /// 编译期 http 包恒为 true；运行期自动回退只看持久化 option。
+  /// 老旧 Windows（Win7/8/8.1/Server 2008R2/2012/2012R2）。
+  /// 由 main() 在任何网络请求前置位：这些系统上 Flutter 3.24 引擎的 Dart
+  /// TLS(BoringSSL) 发起首个 HTTPS 会直接 native 崩溃(0x40000015)，
+  /// try-catch 拦不住，"先试 https"会把进程打死。置位后全程 http、
+  /// 永不重探 https（见 [_probeDue]）。
+  static bool legacyOs = false;
+
+  /// 编译期 http 包恒为 true；旧系统恒为 true；其余看持久化 option。
   static bool get forceHttp {
-    if (kUseHttpApi) return true;
+    if (kUseHttpApi || legacyOs) return true;
     _forceHttp ??= bind.mainGetOptionSync(key: optionForceHttp) == 'Y';
     return _forceHttp!;
   }
@@ -252,7 +259,8 @@ class HttpFallback {
   }
 
   static bool get _probeDue {
-    if (!forceHttp || kUseHttpApi) return false;
+    // 旧系统上 https 探测本身会打死进程，永不重探。
+    if (!forceHttp || kUseHttpApi || legacyOs) return false;
     final at =
         int.tryParse(bind.mainGetOptionSync(key: optionForceHttpAt)) ?? 0;
     return DateTime.now().millisecondsSinceEpoch - at >
@@ -364,7 +372,8 @@ class EndpointStore {
     final ep = active;
     await _setIfChanged('custom-rendezvous-server', ep.id);
     await _setIfChanged('relay-server', ep.relay);
-    await _setIfChanged('api-server', ep.api);
+    // api-server 同步走 http 回退改写：旧系统 Rust 侧(reqwest)也不得碰 https。
+    await _setIfChanged('api-server', HttpFallback.resolve(ep.api));
     await _setIfChanged('key', ep.key);
     // 未设置过模式时默认混淆，默认值以诊断日志留证。
     final mode = bind.mainGetOptionSync(key: kTrafficObfuscateOption);

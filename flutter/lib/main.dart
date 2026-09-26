@@ -46,6 +46,19 @@ Future<void> main(List<String> args) async {
 
   // 全平台启动诊断日志（桌面端白屏时无控制台，只能落盘）
   startupLog('进程启动 exe=${Platform.resolvedExecutable} args=$args');
+  // 必须在任何网络请求之前完成：Win7/8/8.1 上 Flutter 3.24 引擎的 Dart TLS
+  // 栈发起首个 HTTPS 请求会直接 native 崩溃(0x40000015)，try-catch 无法拦截，
+  // "https 失败再回退"来不及生效。判定为旧系统后全程只走 http、永不重探 https。
+  if (Platform.isWindows) {
+    try {
+      final build = getWindowsTargetBuildNumber();
+      HttpFallback.legacyOs =
+          getWindowsTarget(build).index < WindowsTarget.w10.index;
+      startupLog('Windows legacyOs=${HttpFallback.legacyOs} build=$build');
+    } catch (e) {
+      startupLog('Windows 版本判定失败：$e');
+    }
+  }
   try {
     // 最早加载线路配置（缓存文件 → 内置 asset），后续 apiBase/首启写入依赖它
     await EndpointStore.init();
