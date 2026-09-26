@@ -488,7 +488,9 @@ object AdbAuthManager {
     private fun buildRomSecurityHint(rawError: String): String {
         Log.w(TAG, "ROM 安全开关未开，原始错误：\n$rawError")
         return "配对成功，但系统禁止 ADB 授权。请到「开发者选项」打开对应开关后重试：\n" +
-            "· 小米 / 红米：USB 调试（安全设置）\n" +
+            "· 小米 / 红米（澎湃OS/MIUI）：打开「USB 调试（安全设置）」（与「USB 调试」是两个开关）。" +
+            "该开关需联网到小米服务器校验：必须插 SIM、关 Wi-Fi 用移动数据、并已登录小米账号；" +
+            "若开关已显示开启仍报此错，请关掉它、用流量重新打开后立刻重试\n" +
             "· OPPO / 一加 / realme：USB 调试（安全设置），或关闭「权限监控」\n" +
             "· vivo / iQOO：USB 模拟点击\n" +
             "· 华为 / 荣耀：仅充电模式下允许 ADB 调试\n" +
