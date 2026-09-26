@@ -1630,7 +1630,10 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
               ],
             ),
           ),
-          if (status != "ok")
+          // 小米 adb_master：安全开关状态系统不可读，总开关绿勾不代表
+          // 安全开关已开，保留「去确认」按钮直达开发者选项页。
+          if (status != "ok" ||
+              (key == "adb_master" && _brand == "xiaomi"))
             TextButton(
               style: TextButton.styleFrom(
                 padding:
