@@ -541,9 +541,8 @@ impl Client {
                             }
                             log::info!("{} Hole Punched {} = {}", punch_type, peer, peer_addr);
                             log::info!(
-                                "[PUNCH-DIAG] A punch resp: b_addr={peer_addr}, b_is_udp={}, b_nat={peer_nat_type:?}, my_nat={nat_type:?}, my_udp_port={udp_nat_port}, force_relay={}, relay_server={relay_server}, b_candidates={}, has_b_v6={}",
+                                "[PUNCH-DIAG] A punch resp: b_addr={peer_addr}, b_is_udp={}, b_nat={peer_nat_type:?}, my_nat={nat_type:?}, my_udp_port={udp_nat_port}, relay_server={relay_server}, b_candidates={}, has_b_v6={}",
                                 ph.is_udp,
-                                ph.force_relay,
                                 peer_candidates.len(),
                                 !ph.socket_addr_v6.is_empty()
                             );
