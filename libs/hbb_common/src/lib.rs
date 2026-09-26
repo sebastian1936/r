@@ -389,23 +389,69 @@ pub fn init_log(_is_async: bool, _name: &str) -> Option<flexi_logger::LoggerHand
                 path.push(_name);
             }
             use flexi_logger::*;
-            if let Ok(x) = Logger::try_with_env_or_str("debug,reqwest=warn,rustls=warn,webrtc-sctp=warn,webrtc=warn") {
-                logger_holder = x
-                    .log_to_file(FileSpec::default().directory(path))
-                    .write_mode(if _is_async {
-                        WriteMode::Async
-                    } else {
-                        WriteMode::Direct
-                    })
-                    .format(opt_format)
-                    .rotate(
-                        Criterion::Age(Age::Day),
-                        Naming::Timestamps,
-                        Cleanup::KeepLogFiles(31),
-                    )
-                    .start()
-                    .ok();
-            }
+            const LOG_LEVEL: &str =
+                "debug,reqwest=warn,rustls=warn,webrtc-sctp=warn,webrtc=warn";
+            let start_file_logger = |dir: &std::path::Path| -> Option<LoggerHandle> {
+                let mut dir = dir.to_path_buf();
+                let _ = std::fs::create_dir_all(&dir);
+                if !_name.is_empty() {
+                    dir.push(_name);
+                }
+                Logger::try_with_env_or_str(LOG_LEVEL).ok().and_then(|x| {
+                    x.log_to_file(FileSpec::default().directory(&dir))
+                        .write_mode(if _is_async {
+                            WriteMode::Async
+                        } else {
+                            WriteMode::Direct
+                        })
+                        .format(opt_format)
+                        .rotate(
+                            Criterion::Age(Age::Day),
+                            Naming::Timestamps,
+                            Cleanup::KeepLogFiles(31),
+                        )
+                        .start()
+                        .ok()
+                })
+            };
+            // 首选外部存储根（文件管理器可见）。Android 10 scoped storage、
+            // 或启动时存储权限尚未授予（init_log 的 Once 之后不会重试）等场景下
+            // 可能失败，此时兜底到 app 私有目录（免权限，必然可写），
+            // 避免“日志目录存在但永远没有日志文件”。
+            logger_holder = start_file_logger(&path).or_else(|| {
+                #[cfg(target_os = "android")]
+                {
+                    // 外部私有目录 Android/data/<pkg>/files/log：
+                    // 无需任何存储权限（Android 10 scoped storage 也可写），
+                    // 且系统文件管理器可见。包名从 APP_DIR
+                    // （/data/user/0/<pkg>/files）反推；失败再退回 APP_DIR/log。
+                    let app_dir = config::Config::path("");
+                    let pkg = app_dir
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .map(|s| s.to_os_string());
+                    let mut fallback = match pkg {
+                        Some(pkg) => {
+                            let mut p =
+                                std::path::PathBuf::from(config::Config::get_home());
+                            p.push("Android");
+                            p.push("data");
+                            p.push(pkg);
+                            p.push("files");
+                            p
+
+                        }
+                        None => app_dir,
+                    };
+                    fallback.push("log");
+                    eprintln!(
+                        "[init_log] external log dir {path:?} unavailable, fallback to {fallback:?}"
+                    );
+                    start_file_logger(&fallback)
+                }
+                #[cfg(not(target_os = "android"))]
+                None
+            });
         }
     });
     logger_holder

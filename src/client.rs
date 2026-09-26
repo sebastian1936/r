@@ -771,9 +771,10 @@ impl Client {
         };
 
         let mut direct = !conn.is_err();
-        // 中继路径在重试循环内完成密钥握手，结果由此带出；直连路径为 None，
-        // 走下方原有的 secure_connection 逻辑
-        let mut secured_pk: Option<Vec<u8>> = None;
+        // 中继路径在重试循环内完成密钥握手，Some 表示已在中继循环中握手
+        // （内层 Option 是 secure_connection 的真实返回值，本身可能为 None）；
+        // None 表示走的直连路径，由下方原有逻辑再握手
+        let mut secured: Option<Option<Vec<u8>>> = None;
         if conn.is_err() {
             log::info!(
                 "[PUNCH-DIAG] A all direct futures failed in {:?}, fallback_relay={}",
@@ -786,7 +787,7 @@ impl Client {
                 // 弱网（跨境中继/被控端 Doze）下 B 可能迟迟不加入房间：
                 // 每轮只等 RELAY_READY_TIMEOUT_MS，超时后用新 uuid 重开房间重试，
                 // 避免单轮干等 18s
-                let mut last_err: Option<anyhow::Error> = None;
+                let mut last_err: Option<String> = None;
                 let mut relay_ok = false;
                 for attempt in 1..=RELAY_PAIR_MAX_ATTEMPTS {
                     let relay_conn = Self::request_relay(
@@ -806,7 +807,7 @@ impl Client {
                                 "[RELAY-RETRY] attempt {attempt}/{} request_relay failed: {e}",
                                 RELAY_PAIR_MAX_ATTEMPTS
                             );
-                            last_err = Some(e);
+                            last_err = Some(e.to_string());
                             continue;
                         }
                     };
@@ -821,7 +822,7 @@ impl Client {
                     {
                         Ok(pk) => {
                             conn = Ok(relay_conn);
-                            secured_pk = pk;
+                            secured = Some(pk);
                             relay_ok = true;
                             break;
                         }
@@ -832,7 +833,7 @@ impl Client {
                                 "[RELAY-RETRY] attempt {attempt}/{} peer not ready in relay room: {e}",
                                 RELAY_PAIR_MAX_ATTEMPTS
                             );
-                            last_err = Some(e);
+                            last_err = Some(e.to_string());
                         }
                     }
                 }
@@ -841,9 +842,7 @@ impl Client {
                     interface.update_direct(Some(false));
                     bail!(
                         "Failed to connect via relay server: {}",
-                        last_err
-                            .map(|e| e.to_string())
-                            .unwrap_or_else(|| "unknown".to_owned())
+                        last_err.unwrap_or_else(|| "unknown".to_owned())
                     );
                 }
                 typ = "Relay";
@@ -858,7 +857,7 @@ impl Client {
             start.elapsed(),
             punch_type
         );
-        let pk: Option<Vec<u8>> = match secured_pk {
+        let pk: Option<Vec<u8>> = match secured {
             Some(pk) => pk,
             None => {
                 let res = Self::secure_connection(
