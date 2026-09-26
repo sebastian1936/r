@@ -593,8 +593,14 @@ impl Client {
                         let mut conn = conn?;
                         feedback = rr.feedback;
                         log::info!("{:?} used to establish {typ} connection", start.elapsed());
-                        let pk =
-                            Self::secure_connection(&peer, signed_id_pk, &key, &mut conn).await?;
+                        let pk = Self::secure_connection(
+                            &peer,
+                            signed_id_pk,
+                            &key,
+                            &mut conn,
+                            READ_TIMEOUT,
+                        )
+                        .await?;
                         return Ok((
                             (conn, typ == "IPv6", pk, kcp, typ),
                             (feedback, rendezvous_server),
@@ -690,6 +696,12 @@ impl Client {
         // 任何情况下直连竞速的硬上限：对端慢应答 + 历史失败重试时，
         // punch_time_used 可能很大，乘积会到 30~50s
         const PUNCH_TIMEOUT_HARD_CAP: u64 = 8000;
+        // 中继房间内等待对端加入的单轮超时与换房间次数。
+        // 被控端加入 hbbr 走的是它自己的本地网络（跨境链路/MIUI Doze 都可能
+        // 丢 SYN），旧逻辑单轮干等 READ_TIMEOUT(18s)，偶发丢包时体感
+        // “卡二三十秒”；缩短为 7s 并用新 uuid 重开房间最多 3 轮。
+        const RELAY_READY_TIMEOUT_MS: u64 = 7_000;
+        const RELAY_PAIR_MAX_ATTEMPTS: u32 = 3;
         if is_local {
             connect_timeout = MIN;
         } else if peer_nat_type == NatType::SYMMETRIC {
@@ -759,6 +771,9 @@ impl Client {
         };
 
         let mut direct = !conn.is_err();
+        // 中继路径在重试循环内完成密钥握手，结果由此带出；直连路径为 None，
+        // 走下方原有的 secure_connection 逻辑
+        let mut secured_pk: Option<Vec<u8>> = None;
         if conn.is_err() {
             log::info!(
                 "[PUNCH-DIAG] A all direct futures failed in {:?}, fallback_relay={}",
@@ -768,20 +783,68 @@ impl Client {
         }
         if interface.is_force_relay() || conn.is_err() {
             if !relay_server.is_empty() {
-                conn = Self::request_relay(
-                    peer_id,
-                    relay_server.to_owned(),
-                    rendezvous_server,
-                    !signed_id_pk.is_empty(),
-                    key,
-                    token,
-                    conn_type,
-                )
-                .await;
-                if let Err(e) = conn {
+                // 弱网（跨境中继/被控端 Doze）下 B 可能迟迟不加入房间：
+                // 每轮只等 RELAY_READY_TIMEOUT_MS，超时后用新 uuid 重开房间重试，
+                // 避免单轮干等 18s
+                let mut last_err: Option<anyhow::Error> = None;
+                let mut relay_ok = false;
+                for attempt in 1..=RELAY_PAIR_MAX_ATTEMPTS {
+                    let relay_conn = Self::request_relay(
+                        peer_id,
+                        relay_server.to_owned(),
+                        rendezvous_server,
+                        !signed_id_pk.is_empty(),
+                        key,
+                        token,
+                        conn_type,
+                    )
+                    .await;
+                    let mut relay_conn = match relay_conn {
+                        Ok(c) => c,
+                        Err(e) => {
+                            log::warn!(
+                                "[RELAY-RETRY] attempt {attempt}/{} request_relay failed: {e}",
+                                RELAY_PAIR_MAX_ATTEMPTS
+                            );
+                            last_err = Some(e);
+                            continue;
+                        }
+                    };
+                    match Self::secure_connection(
+                        peer_id,
+                        signed_id_pk.clone(),
+                        key,
+                        &mut relay_conn,
+                        RELAY_READY_TIMEOUT_MS,
+                    )
+                    .await
+                    {
+                        Ok(pk) => {
+                            conn = Ok(relay_conn);
+                            secured_pk = pk;
+                            relay_ok = true;
+                            break;
+                        }
+                        Err(e) => {
+                            // relay_conn 随本轮结束 drop，旧房间连接关闭；
+                            // 下一轮 request_relay 用新 uuid 开新房间并重新通知 B
+                            log::warn!(
+                                "[RELAY-RETRY] attempt {attempt}/{} peer not ready in relay room: {e}",
+                                RELAY_PAIR_MAX_ATTEMPTS
+                            );
+                            last_err = Some(e);
+                        }
+                    }
+                }
+                if !relay_ok {
                     // this direct is mainly used by on_establish_connection_error, so we update it here before bail
                     interface.update_direct(Some(false));
-                    bail!("Failed to connect via relay server: {}", e);
+                    bail!(
+                        "Failed to connect via relay server: {}",
+                        last_err
+                            .map(|e| e.to_string())
+                            .unwrap_or_else(|| "unknown".to_owned())
+                    );
                 }
                 typ = "Relay";
                 direct = false;
@@ -795,13 +858,25 @@ impl Client {
             start.elapsed(),
             punch_type
         );
-        let res = Self::secure_connection(peer_id, signed_id_pk, key, &mut conn).await;
-        let pk: Option<Vec<u8>> = match res {
-            Ok(pk) => pk,
-            Err(e) => {
-                // this direct is mainly used by on_establish_connection_error, so we update it here before bail
-                interface.update_direct(Some(direct));
-                bail!(e);
+        let pk: Option<Vec<u8>> = match secured_pk {
+            Some(pk) => pk,
+            None => {
+                let res = Self::secure_connection(
+                    peer_id,
+                    signed_id_pk,
+                    key,
+                    &mut conn,
+                    READ_TIMEOUT,
+                )
+                .await;
+                match res {
+                    Ok(pk) => pk,
+                    Err(e) => {
+                        // this direct is mainly used by on_establish_connection_error, so we update it here before bail
+                        interface.update_direct(Some(direct));
+                        bail!(e);
+                    }
+                }
             }
         };
         log::debug!("{} punch secure_connection ok", punch_type);
@@ -814,6 +889,7 @@ impl Client {
         signed_id_pk: Vec<u8>,
         key: &str,
         conn: &mut Stream,
+        first_msg_timeout_ms: u64,
     ) -> ResultType<Option<Vec<u8>>> {
         let rs_pk = get_rs_pk(if key.is_empty() {
             config::RS_PUB_KEY
@@ -843,7 +919,7 @@ impl Client {
                 return Ok(option_pk);
             }
         };
-        match timeout(READ_TIMEOUT, conn.next()).await? {
+        match timeout(first_msg_timeout_ms, conn.next()).await? {
             Some(res) => {
                 let bytes = res?;
                 if let Ok(msg_in) = Message::parse_from_bytes(&bytes) {
