@@ -178,13 +178,47 @@ object AdbDiscovery {
             }
         }.getOrNull()
 
+        // NsdManager.discoverServices 在以下场景会瞬时启动失败（错误码
+        // ERROR_MAX_LIMIT=4 / ERROR_INTERNAL_ERROR=0）：App 被从最近任务
+        // 划掉后同进程 Activity 重建、上一轮发现的 stop 尚未完成、国产 ROM
+        // 后台限制。旧逻辑一旦 onStartDiscoveryFailed 立即放弃整轮扫描，
+        // 表现为 mDNS 秒回"未发现服务"（shell_no_service），用户即使停在
+        // 无线调试页、服务确实在广播也连不上。改为短退避重启，最多 3 次。
+        var discoveryActive = false
+        var startRetries = 0
+        val maxStartRetries = 3
+
         val discoveryListener = object : NsdManager.DiscoveryListener {
-            override fun onDiscoveryStarted(regType: String?) {}
+            override fun onDiscoveryStarted(regType: String?) {
+                discoveryActive = true
+            }
             override fun onStartDiscoveryFailed(serviceType: String?, errorCode: Int) {
-                latch.countDown()
+                discoveryActive = false
+                Log.w(TAG, "discoverServices 启动失败 code=$errorCode，retries=$startRetries/$maxStartRetries")
+                if (latch.count > 0 && startRetries < maxStartRetries) {
+                    startRetries++
+                    handler.postDelayed({
+                        if (latch.count > 0) {
+                            runCatching {
+                                nsdManager.discoverServices(
+                                    serviceType ?: TYPE_CONNECT,
+                                    NsdManager.PROTOCOL_DNS_SD,
+                                    this
+                                )
+                            }.onFailure {
+                                // post 内同步抛出（如 listener 已被占用）也走重试节奏
+                                onStartDiscoveryFailed(serviceType, -1)
+                            }
+                        }
+                    }, 800)
+                } else {
+                    latch.countDown()
+                }
             }
             override fun onServiceLost(serviceInfo: NsdServiceInfo?) {}
-            override fun onDiscoveryStopped(serviceType: String?) {}
+            override fun onDiscoveryStopped(serviceType: String?) {
+                discoveryActive = false
+            }
             override fun onStopDiscoveryFailed(serviceType: String?, errorCode: Int) {}
             override fun onServiceFound(serviceInfo: NsdServiceInfo?) {
                 if (serviceInfo == null) return
@@ -210,11 +244,23 @@ object AdbDiscovery {
         }
 
         try {
-            handler.post { nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, discoveryListener) }
+            handler.post {
+                runCatching {
+                    nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
+                }.onFailure {
+                    discoveryListener.onStartDiscoveryFailed(serviceType, -1)
+                }
+            }
             latch.await(timeoutMs, TimeUnit.MILLISECONDS)
         } finally {
-            runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
-            runCatching { thread.quitSafely() }
+            // stop/quit 必须投递到发起 discoverServices 的同一 Looper，
+            // 避免跨线程 stop 与下一轮 start 竞态
+            handler.post {
+                if (discoveryActive) {
+                    runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
+                }
+                thread.quitSafely()
+            }
             runCatching { if (multicastLock?.isHeld == true) multicastLock.release() }
         }
         return synchronized(lock) { found }
