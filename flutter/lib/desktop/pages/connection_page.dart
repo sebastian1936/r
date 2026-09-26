@@ -114,12 +114,14 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
               width: 8,
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(4),
-                color: _svcStopped.value ||
-                        stateGlobal.svcStatus.value == SvcStatus.connecting
-                    ? kColorWarn
-                    : (stateGlobal.svcStatus.value == SvcStatus.ready
-                        ? Color.fromARGB(255, 50, 190, 166)
-                        : Color.fromARGB(255, 224, 79, 95)),
+                color: _controllerOnly
+                    ? const Color(0xFF9E9E9E)
+                    : _svcStopped.value ||
+                            stateGlobal.svcStatus.value == SvcStatus.connecting
+                        ? kColorWarn
+                        : (stateGlobal.svcStatus.value == SvcStatus.ready
+                            ? Color.fromARGB(255, 50, 190, 166)
+                            : Color.fromARGB(255, 224, 79, 95)),
               ),
             ).marginSymmetric(horizontal: em),
             Container(
@@ -150,16 +152,24 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
     ).paddingOnly(right: isIncomingOnly ? 8 : 0);
   }
 
+  /// Windows 未安装时为纯主控模式：无 service、不注册信令，
+  /// status_num 恒为初始值 0(connecting)，不能显示"正在接入网络"。
+  bool get _controllerOnly =>
+      isWindows && !bind.mainIsInstalled() && !bind.isDisableInstallation();
+
   _buildConnStatusMsg() {
     widget.onSvcStatusChanged?.call();
+    final msg = _controllerOnly
+        ? "主控模式：可主动连接其他设备；需要本机被控制时，请点上方「接受控制」安装"
+        : _svcStopped.value
+            ? translate("Service is not running")
+            : stateGlobal.svcStatus.value == SvcStatus.connecting
+                ? translate("connecting_status")
+                : stateGlobal.svcStatus.value == SvcStatus.notReady
+                    ? translate("not_ready_status")
+                    : translate('Ready');
     return Text(
-      _svcStopped.value
-          ? translate("Service is not running")
-          : stateGlobal.svcStatus.value == SvcStatus.connecting
-              ? translate("connecting_status")
-              : stateGlobal.svcStatus.value == SvcStatus.notReady
-                  ? translate("not_ready_status")
-                  : translate('Ready'),
+      msg,
       style: TextStyle(fontSize: em),
     );
   }
