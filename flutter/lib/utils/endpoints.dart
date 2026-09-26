@@ -22,6 +22,54 @@ import '../models/platform_model.dart';
 /// Y = 混淆模式（默认），N = 官方明文模式（兼容 iOS App Store 官方客户端）。
 const String kTrafficObfuscateOption = 'traffic-obfuscate';
 
+// ===== 线路诊断日志（定位"装机后到底用了哪条线路/COS 为何没拉到"）=====
+// Android 写到 getExternalStorageDirectory()/endpoint_diag.log，
+// 文件管理器可见：Android/data/<包名>/files/endpoint_diag.log；
+// 其他平台写到系统临时目录。不依赖 logcat，用户可直接取回。
+File? _epDiagFile;
+
+/// 把异常拆成有证据价值的描述：DNS 失败 / 超时 / TLS 握手失败都能区分。
+String epErrDesc(Object e) {
+  if (e is SocketException) {
+    final oe = e.osError;
+    return 'SocketException msg="${e.message}"'
+        '${oe != null ? ' osError=${oe.errorCode}:${oe.message}' : ''}'
+        ' addr=${e.address?.address}:${e.port}';
+  }
+  if (e is TimeoutException) {
+    return 'TimeoutException(after ${e.duration})';
+  }
+  if (e is HandshakeException) {
+    return 'HandshakeException type=${e.type} msg="${e.message}"';
+  }
+  return '${e.runtimeType}: $e';
+}
+
+void epDiag(String msg) {
+  final line = '[${DateTime.now().toIso8601String()}] $msg';
+  debugPrint(line);
+  final f = _epDiagFile;
+  if (f == null) return;
+  try {
+    // 超过 1MB 直接截断重写，避免无限增长。
+    final mode = f.lengthSync() > 1024 * 1024 ? FileMode.write : FileMode.append;
+    f.writeAsStringSync('$line\n', mode: mode, flush: true);
+  } catch (_) {}
+}
+
+Future<void> epDiagInit() async {
+  Directory? dir;
+  try {
+    if (Platform.isAndroid) dir = await getExternalStorageDirectory();
+  } catch (e) {
+    debugPrint('ep-diag external dir failed: $e');
+  }
+  dir ??= Directory.systemTemp;
+  _epDiagFile =
+      File('${dir.path}${Platform.pathSeparator}endpoint_diag.log');
+  epDiag('=== endpoint diag session start; file=${_epDiagFile!.path} ===');
+}
+
 class EndpointInfo {
   /// ID/信令服务器，含端口
   final String id;
@@ -144,19 +192,40 @@ class HttpFallback {
 
   /// 以 https 先发，失败自动重试 http；url 非 https 时直通。
   /// 调用方只需保证 [run] 对传入的 Uri 各执行一次完整请求。
+  /// [diagTag] 非空时把每次尝试的真实结果（状态码/耗时/底层错误）写入诊断日志。
   static Future<http.Response> send(
     Uri url,
-    Future<http.Response> Function(Uri) run,
-  ) async {
+    Future<http.Response> Function(Uri) run, {
+    String? diagTag,
+  }) async {
+    Future<http.Response> tagged(Uri u, String attempt) async {
+      final t0 = DateTime.now();
+      try {
+        final r = await run(u);
+        if (diagTag != null) {
+          final ms = DateTime.now().difference(t0).inMilliseconds;
+          epDiag('$diagTag $attempt -> ${r.statusCode} '
+              '${r.bodyBytes.length}B ${ms}ms url=$u');
+        }
+        return r;
+      } catch (e) {
+        if (diagTag != null) {
+          final ms = DateTime.now().difference(t0).inMilliseconds;
+          epDiag('$diagTag $attempt FAIL ${ms}ms url=$u :: ${epErrDesc(e)}');
+        }
+        rethrow;
+      }
+    }
+
     if (!url.isScheme('https')) {
-      return run(url);
+      return tagged(url, 'http(direct)');
     }
     // 已切 http：未到重探周期直接走 http；到周期则先用 https 探一次。
     if (forceHttp && !_probeDue) {
-      return run(Uri.parse(toHttpAlt(url.toString())));
+      return tagged(Uri.parse(toHttpAlt(url.toString())), 'http(cached)');
     }
     try {
-      final resp = await run(url);
+      final resp = await tagged(url, 'https');
       if (forceHttp) {
         // 重探 https 成功，清除回退标记，后续恢复 https。
         _forceHttp = false;
@@ -178,7 +247,7 @@ class HttpFallback {
             key: optionForceHttpAt,
             value: DateTime.now().millisecondsSinceEpoch.toString());
       }
-      return run(Uri.parse(toHttpAlt(url.toString())));
+      return tagged(Uri.parse(toHttpAlt(url.toString())), 'http(fallback)');
     }
   }
 
@@ -248,25 +317,45 @@ class EndpointStore {
 
   /// 启动早期同步准备：优先可写缓存，失败回退安装包内置 asset。
   static Future<void> init() async {
+    await epDiagInit();
+    epDiag('init begin; asset=$_assetName');
+    var source = '';
     try {
       final f = await _cacheFile();
-      if (await f.exists()) {
-        final cfg = EndpointsConfig.tryParse(await f.readAsString());
+      final exists = await f.exists();
+      epDiag('cache file=${f.path} exists=$exists');
+      if (exists) {
+        final raw = await f.readAsString();
+        final cfg = EndpointsConfig.tryParse(raw);
+        epDiag('cache parse ${cfg != null ? 'OK' : 'FAILED'} bytes=${raw.length}');
         if (cfg != null) {
           _current = cfg;
-          return;
+          source = 'cache';
         }
       }
     } catch (e) {
-      debugPrint('endpoints read cache failed: $e');
+      epDiag('cache read EXC ${epErrDesc(e)}');
     }
-    try {
-      final raw = await rootBundle.loadString(_assetName);
-      _current = EndpointsConfig.tryParse(raw);
-    } catch (e) {
-      debugPrint('endpoints read asset failed: $e');
+    if (_current == null) {
+      try {
+        final raw = await rootBundle.loadString(_assetName);
+        final cfg = EndpointsConfig.tryParse(raw);
+        epDiag('asset load OK bytes=${raw.length} parse=${cfg != null}');
+        if (cfg != null) {
+          _current = cfg;
+          source = 'asset';
+        }
+      } catch (e) {
+        // Flutter 里 asset 未打包统一抛 Unable to load asset，这是关键证据。
+        epDiag('asset load EXC ${e.runtimeType}: $e');
+      }
     }
-    _current ??= _fallback;
+    if (_current == null) {
+      _current = _fallback;
+      source = 'hardcode-fallback';
+    }
+    epDiag('init done source=$source '
+        'obfs.id=${_current!.obfs.id} official.id=${_current!.official.id}');
   }
 
   /// 按文件内容把当前模式的服务器 option 写进 Rust 配置（值没变不写，避免无谓重连）。
@@ -277,11 +366,13 @@ class EndpointStore {
     await _setIfChanged('relay-server', ep.relay);
     await _setIfChanged('api-server', ep.api);
     await _setIfChanged('key', ep.key);
-    // 未设置过模式时默认混淆，兼容旧版本行为。
+    // 未设置过模式时默认混淆，默认值以诊断日志留证。
     final mode = bind.mainGetOptionSync(key: kTrafficObfuscateOption);
     if (mode.isEmpty) {
       await bind.mainSetOption(key: kTrafficObfuscateOption, value: 'Y');
     }
+    epDiag('applyActive officialMode=$officialMode '
+        'id=${ep.id} api=${ep.api} relay="${ep.relay}"');
   }
 
   static Future<void> _setIfChanged(String key, String value) async {
@@ -314,7 +405,8 @@ class EndpointStore {
   /// 系统会推迟触发，亮屏/唤醒后补一次。
   static void startPeriodicSync() {
     _syncTimer?.cancel();
-    _syncTimer = Timer.periodic(syncInterval, (_) => refreshFromCos());
+    _syncTimer =
+        Timer.periodic(syncInterval, (_) => refreshFromCos(reason: 'periodic'));
   }
 
   /// 信令连接状态变化回调（由主窗口监听 serverModel.connectStatus 驱动）。
@@ -334,7 +426,7 @@ class EndpointStore {
     }
     if (status != -1 || _fallbackTimer != null) return;
     debugPrint('endpoints: rendezvous unreachable, fetch COS now');
-    refreshFromCos();
+    refreshFromCos(reason: 'rendezvous-unreachable');
     _scheduleFallback();
   }
 
@@ -346,7 +438,7 @@ class EndpointStore {
     _fallbackRound++;
     _fallbackTimer?.cancel();
     _fallbackTimer = Timer(delay, () async {
-      await refreshFromCos();
+      await refreshFromCos(reason: 'backoff-$_fallbackRound');
       // 期间若已恢复在线，onConnectStatusChanged 会把 timer 置空，
       // 不再安排下一轮；否则继续退避（封顶后停留在 5 分钟）。
       if (_fallbackTimer != null) {
@@ -358,28 +450,37 @@ class EndpointStore {
   /// 从 COS 拉取一次；5s 超时、静默失败，校验不过保留本地。
   /// 内容与本地缓存完全一致时直接返回：不写盘、不重对齐 option，
   /// 周期性轮询的绝大多数请求都走这条最省路径。
-  static Future<void> refreshFromCos() async {
-    if (_refreshing) return;
+  static Future<void> refreshFromCos({String reason = ''}) async {
+    if (_refreshing) {
+      epDiag('cos fetch skipped(already-running) reason=$reason');
+      return;
+    }
     _refreshing = true;
     try {
       // COS 同样 https 优先；老系统 TLS 失败自动改 http（站点两种 scheme 都支持）。
       final uri = Uri.parse('$kNodeConfigUrl$_cosPath');
+      epDiag('cos fetch begin reason="$reason" url=$uri '
+          'forceHttp=${HttpFallback.forceHttp}');
+      final t0 = DateTime.now();
       final resp = await HttpFallback.send(
         uri,
         (u) => http.get(u).timeout(const Duration(seconds: 5)),
+        diagTag: 'cos',
       );
+      final ms = DateTime.now().difference(t0).inMilliseconds;
       if (resp.statusCode != 200) {
-        debugPrint('endpoints cos status: ${resp.statusCode}');
+        epDiag('cos fetch non-200 status=${resp.statusCode} ${ms}ms');
         return;
       }
       final body = utf8.decode(resp.bodyBytes);
       final cfg = EndpointsConfig.tryParse(body);
       if (cfg == null) {
-        debugPrint('endpoints remote invalid, keep local');
+        epDiag('cos fetch body-invalid bytes=${body.length}');
         return;
       }
       final f = await _cacheFile();
       if (await f.exists() && await f.readAsString() == body) {
+        epDiag('cos fetch unchanged bytes=${body.length} ${ms}ms');
         return;
       }
       // 原子写：临时文件 + rename
@@ -387,10 +488,17 @@ class EndpointStore {
       await tmp.writeAsBytes(resp.bodyBytes, flush: true);
       await tmp.rename(f.path);
       _current = cfg;
+      epDiag('cos fetch applied new-config ${ms}ms '
+          'obfs.id=${cfg.obfs.id} official.id=${cfg.official.id}');
       // 远端配置改了地址，按当前模式重新对齐 option（值没变不会重连）
       await applyActive();
-    } catch (e) {
-      debugPrint('endpoints cos update failed: $e');
+    } catch (e, s) {
+      // 记录完整异常类型 + 栈顶，区分 DNS 失败 / 超时 / TLS / 连接被拒。
+      final stackHead = const LineSplitter()
+          .convert(s.toString())
+          .take(3)
+          .join(' | ');
+      epDiag('cos fetch EXC ${epErrDesc(e)} stack=$stackHead');
     } finally {
       _refreshing = false;
     }

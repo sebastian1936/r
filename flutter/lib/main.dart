@@ -169,7 +169,7 @@ Future<void> initEnv(String appType) async {
     await applyForcedClientOptions();
     // 每次启动都从 COS 同步一次最新线路（内容未变不写盘、不重连）
     mobileStartupStep = 'refreshFromCos';
-    EndpointStore.refreshFromCos();
+    EndpointStore.refreshFromCos(reason: 'startup');
     // 低频保底同步；主力触发是"连不上信令服务器"（下面的状态监听），
     // 正常在线时不产生 COS 请求
     mobileStartupStep = 'startPeriodicSync';
