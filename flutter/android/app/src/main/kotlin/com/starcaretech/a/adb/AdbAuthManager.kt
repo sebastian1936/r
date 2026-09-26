@@ -308,13 +308,20 @@ object AdbAuthManager {
               fi
             done
             IFS="${'$'}saved_ifs"
-            if [ "${'$'}found" = "1" ] && [ "${'$'}force" != "1" ]; then
-              nval="${'$'}old"
-            else
-              nval="${'$'}{nval:+${'$'}nval:}${'$'}target"
+            final="${'$'}nval"
+            if [ "${'$'}found" != "1" ] || [ "${'$'}force" = "1" ]; then
+              final="${'$'}{nval:+${'$'}nval:}${'$'}target"
             fi
             settings put secure accessibility_enabled 1
-            settings put secure enabled_accessibility_services "${'$'}nval"
+            if [ "${'$'}force" = "1" ] && [ "${'$'}found" = "1" ]; then
+              # 组件已在名单却未绑定时：必须先提交"移除"、等系统完成解绑、
+              # 再提交"加回"。若在内存拼好只写一次最终值（与原值相同），
+              # Settings 观察者判定无变化，AccessibilityManagerService
+              # 不会重新绑定——这正是划掉重开后 shell_ok 但服务不起的根因。
+              settings put secure enabled_accessibility_services "${'$'}nval"
+              sleep 1
+            fi
+            settings put secure enabled_accessibility_services "${'$'}final"
             $keepAliveExemptions
             echo $MARKER
             settings get secure enabled_accessibility_services
