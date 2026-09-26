@@ -396,17 +396,17 @@ class EndpointStore {
     }
   }
 
-  /// asset 损坏时的最终兜底（正常不会走到）
+  /// asset 缺失/损坏时的最终兜底（正常不会走到）；值与 COS 保持一致
   static const EndpointsConfig _fallback = EndpointsConfig(
     v: 1,
     obfs: EndpointInfo(
-      id: 'obfs.nemocc.top:21116',
+      id: '111.229.43.215:16606',
       relay: '',
       api: 'https://api.nemocc.top:41112',
       key: 'k3lsu+CTLs4OhFpq5Lh38Uvo2m8Cyb1jLz6gTCAnyCw=',
     ),
     official: EndpointInfo(
-      id: 'ios.nemocc.top:21116',
+      id: 'hk.nemoco.top:60016',
       relay: '',
       api: 'https://api.nemocc.top:41112',
       key: 'k3lsu+CTLs4OhFpq5Lh38Uvo2m8Cyb1jLz6gTCAnyCw=',
