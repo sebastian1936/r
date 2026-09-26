@@ -1293,7 +1293,6 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
   List<dynamic> _items = const [];
   bool _loading = true;
   String _brand = "other";
-  String _brandLabel = "";
 
   /// 回前台后的退避补查定时器。MIUI/部分 ROM 把"省电策略：无限制"等
   /// 设置写回系统 doze 白名单（isIgnoringBatteryOptimizations）有延迟，
@@ -1460,7 +1459,6 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
         _items = items;
         if (raw is Map) {
           _brand = (raw["brand"] ?? "other") as String;
-          _brandLabel = (raw["brand_label"] ?? "") as String;
         }
         _loading = false;
       });
@@ -1567,7 +1565,7 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
   Widget _buildRow(String key) {
     final meta = _meta[key];
     if (meta == null) return const SizedBox.shrink();
-    final title = meta[0] as String;
+    var title = meta[0] as String;
     var desc = meta[1] as String;
     // 开发者选项入口各品牌路径不同，按识别到的品牌给准确路径
     if (key == "developer_options") {
@@ -1577,6 +1575,19 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
             "huawei": "没开：设置 → 关于手机，连续点「版本号」7 次",
           }[_brand] ??
           "没开：设置 → 关于手机，连续点「版本号」7 次";
+    }
+    // 小米/红米：USB 调试总开关之外，必须再开「USB 调试（安全设置）」，
+    // 否则配对成功也无法授权。该开关需小米服务器在线校验，顺序上要先
+    // 关 Wi-Fi 用流量打开它，再连回 Wi-Fi 开无线调试（无线调试必须 Wi-Fi）。
+    if (key == "adb_master" && _brand == "xiaomi") {
+      // 系统只能读到 USB 调试总开关状态，读不到安全开关；标题点明有
+      // 两个开关，防止总开关已开（绿勾）时用户以为本项已全部完成。
+      title = "USB 调试（小米还要打开「安全设置」）";
+      desc = "开发者选项里要打开两个独立开关：「USB 调试」和"
+          "「USB 调试（安全设置）」。开安全设置时必须插 SIM、关 Wi-Fi "
+          "用移动数据、并已登录小米账号（需联网到小米服务器校验，仅连 "
+          "Wi-Fi 时开关会显示开启但实际不生效）；开完后再连回 Wi-Fi。"
+          "若开关已显示开启但配对时仍提示未授权，请关掉它、用流量重新打开";
     }
     final required_ = meta[2] as bool;
     final status = _statusOf(key);
@@ -1658,20 +1669,6 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (_brandLabel.isNotEmpty)
-                Container(
-                  width: double.maxFinite,
-                  margin: const EdgeInsets.only(bottom: 8),
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: Theme.of(context).colorScheme.primaryContainer,
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    "当前机型：$_brandLabel\n以下只显示与你这台手机相关的设置项",
-                    style: const TextStyle(fontSize: 12, height: 1.5),
-                  ),
-                ),
               if (widget.retryMode)
                 Container(
                   width: double.maxFinite,
