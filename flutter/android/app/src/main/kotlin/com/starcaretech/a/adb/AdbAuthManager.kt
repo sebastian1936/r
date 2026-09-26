@@ -7,6 +7,10 @@ import android.provider.Settings
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.starcaretech.a.InputService
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * ADB 自授权门面：配对 → pm grant → 验证 →（可选）无障碍自愈。
@@ -47,6 +51,10 @@ object AdbAuthManager {
      * 只恢复开关显示而不绑定的情况也靠这段轮询识别出来。
      */
     private const val AWAIT_BIND_MS = 5_000L
+
+    /** 授权失败诊断文件名（位于 App files 目录，可直接从 Android/data 取出） */
+    private const val DIAG_FILE = "adb_auth_diag.log"
+    private const val DIAG_MAX_BYTES = 256 * 1024L
 
     /** 轮询等待 InputService 完成 onServiceConnected（只能在后台线程调用） */
     private fun awaitBound(timeoutMs: Long): Boolean {
@@ -121,17 +129,35 @@ object AdbAuthManager {
      */
     fun pairAndGrant(context: Context, pairingCode: String, pairingHost: String = "127.0.0.1", pairingPort: Int): GrantResult {
         val identity = AdbKeyStore.getOrCreate(context)
+        diag(context, buildString {
+            appendLine("pairAndGrant start pairingPort=$pairingPort")
+            appendLine("brand=${Build.BRAND} manufacturer=${Build.MANUFACTURER} model=${Build.MODEL} device=${Build.DEVICE}")
+            appendLine("android=${Build.VERSION.RELEASE} sdk=${Build.VERSION.SDK_INT} incr=${Build.VERSION.INCREMENTAL}")
+            appendLine("display=${Build.DISPLAY}")
+            runCatching {
+                val clz = Class.forName("android.os.SystemProperties")
+                val m = clz.getMethod("get", String::class.java)
+                listOf(
+                    "ro.mi.os.version.name", "ro.mi.os.version.code",
+                    "ro.miui.ui.version.name", "ro.miui.ui.version.code",
+                    "ro.build.version.incremental"
+                ).forEach { appendLine("$it=${m.invoke(null, it)}") }
+            }
+            appendLine("before: wss=${isWriteSecureSettingsGranted(context)} listed=${isAccessibilityListed(context)} running=${InputService.isOpen}")
+        })
 
         // 1. 配对（成功后设备保存我们的公钥，并开放 TLS connect 服务）
         val guid = try {
             AdbPairingClient.pair(identity, pairingHost, pairingPort, pairingCode)
         } catch (e: Exception) {
             Log.w(TAG, "配对失败", e)
+            diag(context, "pair failed: ${e.chainText()}")
             throw AuthException(
                 "配对失败：请确认 6 位配对码正确、配对页仍在显示后重试\n${e.chainText()}",
                 e
             )
         }
+        diag(context, "pair ok guid=$guid")
 
         // 配对刚完成，connect 服务可能还没就绪，等一下再连
         Thread.sleep(2000)
@@ -142,6 +168,7 @@ object AdbAuthManager {
             "pm grant ${context.packageName} $PERM_WRITE_SECURE_SETTINGS"
         }
         if (!grantRun.connected) {
+            diag(context, "pm grant connect failed:\n${grantRun.attempts.joinToString("\n")}")
             throw AuthException(
                 "配对成功，但无法连接无线调试服务。请保持「无线调试」开启后重试。\n\n" +
                 grantRun.attempts.joinToString("\n\n"),
@@ -150,6 +177,7 @@ object AdbAuthManager {
         }
 
         val grantOut = grantRun.output.trim()
+        diag(context, "pm grant raw output(${grantOut.length}): ${grantOut.ifEmpty { "<empty>" }}")
         if (grantOut.isEmpty()) {
             // 3a. 标准路径：验证 WRITE_SECURE_SETTINGS 落库
             var granted = isWriteSecureSettingsGranted(context)
@@ -163,6 +191,7 @@ object AdbAuthManager {
             if (granted) {
                 saveResult(context, guid, "pm_grant")
                 Log.i(TAG, "ADB 自授权完成（pm grant）guid=$guid")
+                diag(context, "success mode=pm_grant")
                 return GrantResult(guid, shellDirect = false)
             }
             // 输出为空但权限没落下：落到兜底再试一次
@@ -182,18 +211,39 @@ object AdbAuthManager {
         if (directResult.ok) {
             saveResult(context, guid, "shell_direct")
             Log.i(TAG, "ADB 授权完成（shell 直写兼容模式）guid=$guid")
+            diag(context, "success mode=shell_direct\n${directResult.detail}")
             return GrantResult(guid, shellDirect = true)
         }
 
-        // 4. 两条路都失败：按特征给出对应操作提示（原始错误只进日志）
-        Log.w(TAG, "授权失败，pm grant 输出：$grantOut")
-        val romHint = when {
-            grantOut.contains("GRANT_RUNTIME_PERMISSIONS") -> buildRomSecurityHint(grantOut)
+        // 4. 两条路都失败：结合 pm grant 输出与 shell 直写的真实失败阶段给提示
+        Log.w(TAG, "授权失败，pm grant 输出：$grantOut；shell 直写 stage=${directResult.stage} detail=${directResult.detail}")
+        diag(
+            context,
+            "FAIL pm_grant_out=${grantOut.ifEmpty { "<empty>" }}\n" +
+            "shell_direct stage=${directResult.stage}\n${directResult.detail}"
+        )
+        val romSwitchBlocked =
+            grantOut.contains("GRANT_RUNTIME_PERMISSIONS") || directResult.stage == "put_denied"
+        val baseHint = when {
+            romSwitchBlocked -> buildRomSecurityHint(grantOut.ifEmpty { directResult.detail })
+            directResult.stage == "verify_failed" ->
+                "配对成功，授权命令也已执行，但系统没有生效（名单被回滚）。\n" +
+                "这通常被「手机管家 / 安全中心」的权限保护拦截：\n" +
+                "· 重启手机后，先打开一次本应用再重试配对\n" +
+                "· 小米机型可在手机管家中关闭「应用行为记录/安全扫描」类拦截后重试"
+            directResult.stage == "rejected" ->
+                "配对成功，但系统拒绝了 ADB 连接（配对钥匙可能已失效）。\n" +
+                "请在「无线调试」页删除已配对设备，关闭再打开无线调试后重新配对。"
+            directResult.stage == "no_service" ->
+                "配对成功，但没有找到无线调试的连接服务。\n请保持「无线调试」页面停留在前台，再点重试。"
             grantOut.isEmpty() ->
                 "授权未生效，请关闭「无线调试」后重新打开，再重新配对；仍失败请重启手机后重试"
             else -> "授权失败，请重试。\n$grantOut"
         }
-        throw AuthException(romHint)
+        val diagTrailer =
+            "\n\n技术信息 [${directResult.stage}]：${directResult.detail.take(200).ifEmpty { grantOut.take(200) }}" +
+            "\n诊断日志：Android/data/${context.packageName}/files/adb_auth_diag.log"
+        throw AuthException(baseHint + diagTrailer)
     }
 
     /**
@@ -293,6 +343,7 @@ object AdbAuthManager {
             appendLine("settings put global wifi_sleep_policy 2 2>/dev/null")
         }.trimIndent()
         val script = """
+            echo "ROM: mios=${'$'}(getprop ro.mi.os.version.name) miui=${'$'}(getprop ro.miui.ui.version.name) sdk=${'$'}(getprop ro.build.version.sdk) uid=${'$'}(id 2>/dev/null)"
             old=${'$'}(settings get secure enabled_accessibility_services)
             target='$comp'
             force='$forceFlag'
@@ -321,7 +372,8 @@ object AdbAuthManager {
               settings put secure enabled_accessibility_services "${'$'}nval"
               sleep 1
             fi
-            settings put secure enabled_accessibility_services "${'$'}final"
+            settings put secure enabled_accessibility_services "${'$'}final" 2>&1
+            echo "PUT_EXIT=${'$'}?"
             $keepAliveExemptions
             echo $MARKER
             settings get secure enabled_accessibility_services
@@ -345,7 +397,9 @@ object AdbAuthManager {
             return DirectResult(false, stage, joined.take(800))
         }
         val out = run.output
-        if (out.contains("SecurityException") || out.contains("Permission denial")) {
+        // 某些 ROM（如澎湃 OS）拒绝时不一定吐 SecurityException，靠退出码兜底识别
+        val putExitNonZero = Regex("PUT_EXIT=([1-9]\\d*|\\d{2,})").containsMatchIn(out)
+        if (putExitNonZero || out.contains("SecurityException") || out.contains("Permission denial")) {
             Log.w(TAG, "shell 直写被系统拒绝：$out")
             return DirectResult(false, "put_denied", out.take(800))
         }
@@ -439,6 +493,19 @@ object AdbAuthManager {
             "· vivo / iQOO：USB 模拟点击\n" +
             "· 华为 / 荣耀：仅充电模式下允许 ADB 调试\n" +
             "· 其他品牌：在开发者选项中找「安全 / 权限 / 模拟点击」类开关"
+    }
+
+    /** 授权过程诊断落盘：filesDir/adb_auth_diag.log（用户可从
+     *  Android/data/<pkg>/files/ 取出，无需 logcat）。单文件超 256KB 自动重开。 */
+    private fun diag(context: Context, text: String) {
+        try {
+            val f = File(context.filesDir, DIAG_FILE)
+            if (f.exists() && f.length() > DIAG_MAX_BYTES) runCatching { f.delete() }
+            val ts = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+            f.appendText("===== $ts =====\n$text\n\n")
+        } catch (e: Exception) {
+            Log.w(TAG, "diag 落盘失败", e)
+        }
     }
 
     /** 自动扫描配对服务再走完整流程（需要用户停在配对码页面） */
