@@ -106,7 +106,8 @@ class ServerModel with ChangeNotifier {
     return _verificationMethod;
   }
 
-  String get approveMode => _approveMode;
+  /// 未设置（空值）时与 Rust 新默认一致：只允许密码连接（点击访问默认关闭）。
+  String get approveMode => _approveMode.isEmpty ? 'password' : _approveMode;
 
   setVerificationMethod(String method) async {
     await bind.mainSetOption(key: kOptionVerificationMethod, value: method);

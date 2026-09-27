@@ -1137,7 +1137,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
           final modeKeys = <String>[
             'password',
             'click',
-            defaultOptionApproveMode
+            'both',
           ];
           final modeValues = [
             translate('Accept sessions via password'),
@@ -1146,7 +1146,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
           ];
           var modeInitialKey = model.approveMode;
           if (!modeKeys.contains(modeInitialKey)) {
-            modeInitialKey = defaultOptionApproveMode;
+            modeInitialKey = 'password';
           }
           final usePassword = model.approveMode != 'click';
 

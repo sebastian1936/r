@@ -2224,7 +2224,16 @@ impl Connection {
                     self.send_login_error(err_msg).await;
                 }
             } else if lr.password.is_empty() {
-                if err_msg.is_empty() {
+                if password::approve_mode() == ApproveMode::Password {
+                    // 纯密码模式：不弹"接受/拒绝"人工放行框。空密码直接拒绝，
+                    // 同样计入失败次数，走穷举限流（check_failure）。
+                    let (failure, res) = self.check_failure(0).await;
+                    if res {
+                        self.update_failure(failure, false, 0);
+                        self.send_login_error(crate::client::LOGIN_MSG_PASSWORD_WRONG)
+                            .await;
+                    }
+                } else if err_msg.is_empty() {
                     self.try_start_cm(lr.my_id, lr.my_name, false);
                 } else {
                     self.send_login_error(
@@ -2242,7 +2251,10 @@ impl Connection {
                     if err_msg.is_empty() {
                         self.send_login_error(crate::client::LOGIN_MSG_PASSWORD_WRONG)
                             .await;
-                        self.try_start_cm(lr.my_id, lr.my_name, false);
+                        // 纯密码模式不允许人工放行错误密码；click/both 保留弹窗兜底。
+                        if password::approve_mode() != ApproveMode::Password {
+                            self.try_start_cm(lr.my_id, lr.my_name, false);
+                        }
                     } else {
                         self.send_login_error(
                             crate::client::LOGIN_MSG_DESKTOP_SESSION_NOT_READY_PASSWORD_WRONG,

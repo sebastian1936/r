@@ -80,8 +80,13 @@ pub fn approve_mode() -> ApproveMode {
         ApproveMode::Password
     } else if mode == "click" {
         ApproveMode::Click
-    } else {
+    } else if mode == "both" || mode == "password-click" {
+        // 用户在菜单显式选择"密码或点击访问"
         ApproveMode::Both
+    } else {
+        // 默认只允许密码连接（一次性/固定密码），关闭点击接受，
+        // 防止陌生人发起连接后诱导被控端用户手滑点"接受"（反诈）。
+        ApproveMode::Password
     }
 }
 

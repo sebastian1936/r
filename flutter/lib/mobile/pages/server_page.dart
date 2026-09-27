@@ -160,7 +160,8 @@ class _DropDownAction extends StatelessWidget {
             } else if (value == "Click") {
               gFFI.serverModel.setApproveMode('click');
             } else {
-              gFFI.serverModel.setApproveMode(defaultOptionApproveMode);
+              // 显式 both：空值在 Rust 侧新默认下等价于 password
+              gFFI.serverModel.setApproveMode('both');
             }
           }
         })
@@ -550,6 +551,15 @@ class ServerInfo extends StatelessWidget {
               !showOneTime
                   ? SizedBox.shrink()
                   : Row(children: [
+                      // 固定密码启用时，在一次性密码旁提供直达入口，
+                      // 总有用户问"固定密码在哪设置"。
+                      if (serverModel.verificationMethod !=
+                          kUseTemporaryPassword)
+                        IconButton(
+                            visualDensity: VisualDensity.compact,
+                            tooltip: translate('Set permanent password'),
+                            icon: const Icon(Icons.key),
+                            onPressed: () => setPasswordDialog()),
                       IconButton(
                           visualDensity: VisualDensity.compact,
                           icon: const Icon(Icons.refresh),
