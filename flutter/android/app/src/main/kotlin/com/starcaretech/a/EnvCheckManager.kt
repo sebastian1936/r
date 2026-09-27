@@ -46,6 +46,9 @@ object EnvCheckManager {
             isMiui -> "xiaomi"
             isSamsung -> "samsung"
             com.starcaretech.a.adb.HarmonyOsDetector.isHarmonyOs -> "huawei"
+            isHonor -> "honor"
+            isOppo -> "oppo"
+            isVivo -> "vivo"
             else -> "other"
         }
     }
@@ -54,7 +57,10 @@ object EnvCheckManager {
         when (brandKey) {
             "xiaomi" -> "小米 / 红米（MIUI / HyperOS）"
             "samsung" -> "三星（One UI）"
-            "huawei" -> "华为 / 荣耀（鸿蒙）"
+            "huawei" -> "华为（鸿蒙 / EMUI）"
+            "honor" -> "荣耀（MagicOS）"
+            "oppo" -> "OPPO / 一加 / realme（ColorOS）"
+            "vivo" -> "vivo / iQOO（OriginOS）"
             else -> (Build.MANUFACTURER ?: "其他") + "（标准安卓）"
         }
     }
@@ -358,6 +364,21 @@ object EnvCheckManager {
     val isSamsung: Boolean by lazy {
         Build.MANUFACTURER?.equals("samsung", ignoreCase = true) == true
     }
+
+    /** 厂商或品牌名命中任一关键字即视为该阵营（大小写不敏感） */
+    private fun brandMatches(vararg keys: String): Boolean = keys.any { k ->
+        Build.MANUFACTURER?.lowercase()?.contains(k) == true ||
+            Build.BRAND?.lowercase()?.contains(k) == true
+    }
+
+    // OPPO / 一加（OnePlus）/ realme 同为 ColorOS 系，开发者选项路径一致
+    val isOppo: Boolean by lazy { brandMatches("oppo", "oneplus", "realme") }
+
+    // vivo / iQOO 同为 OriginOS/Funtouch 系
+    val isVivo: Boolean by lazy { brandMatches("vivo", "iqoo") }
+
+    // 荣耀独立后的 MagicOS 机型（分家前的老荣耀仍是鸿蒙，已在上面归 huawei）
+    val isHonor: Boolean by lazy { brandMatches("honor") }
 
     /**
      * 打开各检查项对应的设置页。返回 true 表示成功拉起了某个页面。
