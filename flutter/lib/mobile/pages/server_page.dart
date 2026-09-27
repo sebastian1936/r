@@ -812,6 +812,24 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           if (loadingCtx != null && loadingCtx!.mounted) {
             Navigator.of(loadingCtx!).pop();
           }
+          // 竞态兜底：任务被划掉后重开时，系统可能在 App 等待窗口结束后
+          // 才完成自动重绑——即"App 收到失败、权限实际已恢复"。失败后
+          // 再给系统 1.5s 复核真实运行状态，确已绑定就按成功继续，避免
+          // 误把用户拉进配对流程或一直转圈
+          if (!inputOk) {
+            await Future.delayed(const Duration(milliseconds: 1500));
+            try {
+              final dynamic st2 = await gFFI
+                  .invokeMethod("adb_auth_status", null)
+                  .timeout(const Duration(seconds: 5));
+              if (st2 is Map) {
+                final dynamic snap2 = st2["snap"];
+                if (snap2 is Map && snap2["a11y_running"] == true) {
+                  inputOk = true;
+                }
+              }
+            } catch (_) {}
+          }
           if (inputOk || !mounted) break;
 
           // 本地直写失败/记录异常：直接走配对流程兜底

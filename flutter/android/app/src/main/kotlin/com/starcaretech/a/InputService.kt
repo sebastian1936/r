@@ -66,6 +66,9 @@ private const val SERVICE_WATCHDOG_INTERVAL_MS = 60_000L
 class InputService : AccessibilityService() {
 
     companion object {
+        // 主线程 onServiceConnected/onDestroy 写，AdbAuthManager 后台线程
+        // awaitBound 轮询读：必须 volatile 保证跨线程立即可见
+        @Volatile
         var ctx: InputService? = null
         val isOpen: Boolean
             get() = ctx != null

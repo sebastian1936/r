@@ -52,6 +52,15 @@ object AdbAuthManager {
      */
     private const val AWAIT_BIND_MS = 5_000L
 
+    /**
+     * 名单已在、但本进程尚未收到服务绑定时，先静等系统自然重绑的窗口。
+     * 典型场景：任务被划掉后 MIUI 连进程一起杀掉，重开 App 是新进程——
+     * AccessibilityManagerService 会在进程重启后异步自动重绑名单中的服务，
+     * 时机数百 ms 到数秒不等。此时若立刻 remove/add 名单，反而会把系统
+     * 在途的绑定打断或被框架去重，表现为"App 判失败、系统稍后却绑定成功"。
+     */
+    private const val AWAIT_NATURAL_BIND_MS = 2_500L
+
     /** 授权失败诊断文件名（位于 App files 目录，可直接从 Android/data 取出） */
     private const val DIAG_FILE = "adb_auth_diag.log"
     private const val DIAG_MAX_BYTES = 256 * 1024L
@@ -552,6 +561,15 @@ object AdbAuthManager {
         if (InputService.isOpen) return EnableResult(true, "already")
 
         val listed = isAccessibilityListed(context)
+
+        // 1.5) 名单在但本进程未绑定：进程刚被系统/用户杀掉后重开的典型信号。
+        //   系统通常正在异步自动重绑本服务，先静等一个短窗口——绑上就直接成功，
+        //   零写入；绝不在这个窗口里改写名单，以免打断系统在途的绑定。
+        //   等不到再走下面的强制重绑 / shell 重连。
+        if (listed && awaitBound(AWAIT_NATURAL_BIND_MS)) {
+            Log.i(TAG, "enableInput：等待系统自然重绑成功，无需改写名单")
+            return EnableResult(true, "already")
+        }
 
         // 2) App 自身有 WRITE_SECURE_SETTINGS：本地写 secure settings，离线、瞬时
         if (isWriteSecureSettingsGranted(context)) {
