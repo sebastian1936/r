@@ -506,13 +506,47 @@ object AdbAuthManager {
             "· 其他品牌：在开发者选项中找「安全 / 权限 / 模拟点击」类开关"
     }
 
-    /** 授权过程诊断落盘：filesDir/adb_auth_diag.log（用户可从
-     *  Android/data/<pkg>/files/ 取出，无需 logcat）。单文件超 256KB 自动重开。
-     *  每行带 PID 与开机相对毫秒：App 被划掉后若进程被杀重开，PID 会变，
-     *  可据此还原"系统重绑 vs App 写名单"的真实先后，不做推测。 */
+    /**
+     * 诊断日志文件：优先应用专属外部目录 getExternalFilesDir，
+     * 即 /storage/emulated/0/Android/data/<pkg>/files/adb_auth_diag.log，
+     * 用户用系统文件管理器即可取出（写入不需要任何存储权限）。
+     * 外部存储不可用时退回内部 filesDir（文件管理器不可见）。
+     */
+    private fun diagFile(context: Context): File {
+        val ext = context.getExternalFilesDir(null)
+        return if (ext != null) File(ext, DIAG_FILE)
+        else File(context.filesDir, DIAG_FILE)
+    }
+
+    /** 旧版误写到内部 filesDir 的日志：升级后首次写入前一次性搬到外部
+     *  目录，保住升级前（如转圈 bug 现场）已产生的记录。进程内只跑一次。 */
+    @Volatile
+    private var legacyMigrated = false
+
+    private fun migrateLegacyDiagOnce(context: Context, target: File) {
+        if (legacyMigrated) return
+        synchronized(this) {
+            if (legacyMigrated) return
+            legacyMigrated = true
+            try {
+                val legacy = File(context.filesDir, DIAG_FILE)
+                if (legacy.exists() && legacy.length() > 0 &&
+                    !(target.exists() && target.length() > 0)
+                ) {
+                    legacy.copyTo(target, overwrite = false)
+                    Log.i(TAG, "已迁移旧诊断日志到外部目录 ${target.absolutePath}")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "迁移旧诊断日志失败", e)
+            }
+        }
+    }
+
     private fun diag(context: Context, text: String) {
         try {
-            val f = File(context.filesDir, DIAG_FILE)
+            val f = diagFile(context)
+            runCatching { f.parentFile?.mkdirs() }
+            migrateLegacyDiagOnce(context, f)
             if (f.exists() && f.length() > DIAG_MAX_BYTES) runCatching { f.delete() }
             val ts = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
             val pid = android.os.Process.myPid()
