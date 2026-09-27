@@ -699,6 +699,12 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     } catch (_) {}
   }
 
+  /// 截断长文本到 n 字符（Dart String 无 take，substring 需防越界）
+  String _clamp(String? s, int n) {
+    if (s == null) return "";
+    return s.length <= n ? s : s.substring(0, n);
+  }
+
   /// "接受控制"总开关。
   /// 开：只做三件必要的事——确认配对记录、恢复无障碍、启动服务（系统
   ///    录屏确认框是录屏授权唯一无法绕过的手动确认）。全程不弹任何其他
@@ -818,7 +824,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
             _adiag(
                 "enable_input#return ok=$inputOk mode=$failMode "
                 "cost=${swEnable.elapsedMilliseconds}ms "
-                "detail=${(failDetail ?? '').take(200)}");
+                "detail=${_clamp(failDetail, 200)}");
           } catch (e) {
             slowTimer.cancel();
             inputOk = false;
