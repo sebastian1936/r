@@ -507,17 +507,25 @@ object AdbAuthManager {
     }
 
     /** 授权过程诊断落盘：filesDir/adb_auth_diag.log（用户可从
-     *  Android/data/<pkg>/files/ 取出，无需 logcat）。单文件超 256KB 自动重开。 */
+     *  Android/data/<pkg>/files/ 取出，无需 logcat）。单文件超 256KB 自动重开。
+     *  每行带 PID 与开机相对毫秒：App 被划掉后若进程被杀重开，PID 会变，
+     *  可据此还原"系统重绑 vs App 写名单"的真实先后，不做推测。 */
     private fun diag(context: Context, text: String) {
         try {
             val f = File(context.filesDir, DIAG_FILE)
             if (f.exists() && f.length() > DIAG_MAX_BYTES) runCatching { f.delete() }
             val ts = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
-            f.appendText("===== $ts =====\n$text\n\n")
+            val pid = android.os.Process.myPid()
+            val up = android.os.SystemClock.elapsedRealtime()
+            f.appendText("===== $ts pid=$pid up=${up}ms =====\n$text\n\n")
         } catch (e: Exception) {
             Log.w(TAG, "diag 落盘失败", e)
         }
     }
+
+    /** 供 InputService / MainActivity 等外部类追加同一份诊断时间线 */
+    @JvmStatic
+    fun trace(context: Context, text: String) = diag(context, text)
 
     /** 自动扫描配对服务再走完整流程（需要用户停在配对码页面） */
     fun pairAndGrantAuto(context: Context, pairingCode: String): GrantResult {
@@ -556,9 +564,42 @@ object AdbAuthManager {
      *  3. 曾配对成功（shell_direct 模式）→ 连本机 adbd 直写（需无线调试开着）
      *  4. 从未配对 / 无线调试关闭连不上 → 返回失败，调用方回退系统设置引导
      */
+    /** awaitBound + 耗时落盘，还原绑定到底发生在哪个动作之后 */
+    private fun awaitBoundTimed(context: Context, timeoutMs: Long, label: String): Boolean {
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        val ok = awaitBound(timeoutMs)
+        diag(
+            context,
+            "awaitBound[$label] ok=$ok cost=${android.os.SystemClock.elapsedRealtime() - t0}ms " +
+                "timeout=${timeoutMs}ms isOpenNow=${InputService.isOpen}"
+        )
+        return ok
+    }
+
     fun enableInput(context: Context): EnableResult {
+        val tStart = android.os.SystemClock.elapsedRealtime()
+        val listRaw = try {
+            Settings.Secure.getString(
+                context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            )
+        } catch (e: Exception) {
+            "<read error: ${e.message}>"
+        }
+        val grantMode = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString("grant_mode", null)
+        diag(
+            context,
+            "enableInput#begin isOpen=${InputService.isOpen} listed=${isAccessibilityListed(context)} " +
+                "wss=${isWriteSecureSettingsGranted(context)} grantMode=$grantMode " +
+                "sdk=${Build.VERSION.SDK_INT} rom=${Build.MANUFACTURER}/${Build.MODEL} " +
+                "miuiVer=${getSystemProperty("ro.mi.ui.version.name")} hyperVer=${getSystemProperty("ro.mi.os.version.name")}\n" +
+                "名单原文: '$listRaw'"
+        )
         // 1) 已运行
-        if (InputService.isOpen) return EnableResult(true, "already")
+        if (InputService.isOpen) {
+            diag(context, "enableInput#end=already(isOpen at entry) cost=${android.os.SystemClock.elapsedRealtime() - tStart}ms")
+            return EnableResult(true, "already")
+        }
 
         val listed = isAccessibilityListed(context)
 
@@ -566,58 +607,86 @@ object AdbAuthManager {
         //   系统通常正在异步自动重绑本服务，先静等一个短窗口——绑上就直接成功，
         //   零写入；绝不在这个窗口里改写名单，以免打断系统在途的绑定。
         //   等不到再走下面的强制重绑 / shell 重连。
-        if (listed && awaitBound(AWAIT_NATURAL_BIND_MS)) {
-            Log.i(TAG, "enableInput：等待系统自然重绑成功，无需改写名单")
-            return EnableResult(true, "already")
+        if (listed) {
+            if (awaitBoundTimed(context, AWAIT_NATURAL_BIND_MS, "natural")) {
+                Log.i(TAG, "enableInput：等待系统自然重绑成功，无需改写名单")
+                diag(context, "enableInput#end=already(natural bind) cost=${android.os.SystemClock.elapsedRealtime() - tStart}ms")
+                return EnableResult(true, "already")
+            }
+        } else {
+            diag(context, "名单中无本服务，跳过自然等待")
         }
 
         // 2) App 自身有 WRITE_SECURE_SETTINGS：本地写 secure settings，离线、瞬时
         if (isWriteSecureSettingsGranted(context)) {
             // 名单在但服务没起来：先移除再加回触发系统重绑；不在名单：普通追加
-            val firstOk = if (listed) {
+            val firstOp: String
+            val firstOk: Boolean
+            if (listed) {
+                firstOp = "forceRebind"
                 Log.i(TAG, "enableInput：名单在但未绑定，强制重绑")
-                forceRebindAccessibility(context)
+                firstOk = forceRebindAccessibility(context)
             } else {
-                repairAccessibility(context)
+                firstOp = "repair(append)"
+                firstOk = repairAccessibility(context)
             }
-            if (firstOk && awaitBound(AWAIT_BIND_MS)) {
+            diag(context, "本地路径 firstOp=$firstOp writeOk=$firstOk")
+            if (firstOk && awaitBoundTimed(context, AWAIT_BIND_MS, "local-first:$firstOp")) {
+                diag(context, "enableInput#end=ok(local-first) cost=${android.os.SystemClock.elapsedRealtime() - tStart}ms")
                 return EnableResult(true, "local")
             }
             // 名单写入成功但系统迟迟不绑定（实测 MIUI Android12 在 disableSelf
             // 之后普通追加只恢复开关显示）：无条件再做一次"移除→加回"强制重绑
             Log.w(TAG, "enableInput：本地写名单后 ${AWAIT_BIND_MS}ms 未绑定，强制重绑重试")
-            val rebound = forceRebindAccessibility(context) && awaitBound(AWAIT_BIND_MS)
+            diag(context, "本地路径首次未绑定，执行 forceRebind 第二轮")
+            val rebound = forceRebindAccessibility(context) &&
+                awaitBoundTimed(context, AWAIT_BIND_MS, "local-rebind")
+            diag(
+                context,
+                "enableInput#end=${if (rebound) "ok(local-rebind)" else "FAIL(local_failed)"} " +
+                    "cost=${android.os.SystemClock.elapsedRealtime() - tStart}ms"
+            )
             return if (rebound) EnableResult(true, "local")
             else EnableResult(false, "local_failed")
         }
 
         // 3) 没本地权限：必须配对过，且此刻无线调试开着才能连 adbd
-        val mode = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString("grant_mode", null)
+        val mode = grantMode
         if (mode == null) {
+            diag(context, "enableInput#end=FAIL(not_paired) 无 grant_mode")
             return EnableResult(false, "not_paired")
         }
         // 3.1) 快速预检：无线调试总开关明确关闭时 shell 必连不上。
         //   直接秒回失败（否则要等 mDNS 扫满 15 秒，用户体感"一直打不开"），
         //   UI 收到后立刻弹清单引导用户去开发者选项重新打开无线调试。
         //   读状态异常（个别 ROM 键不可读）时不短路，走完整扫描兜底。
-        if (!isWirelessDebugEnabled(context)) {
+        val tProbe = android.os.SystemClock.elapsedRealtime()
+        val wirelessOn = isWirelessDebugEnabled(context)
+        diag(context, "shell 路径预检 wirelessDebug=$wirelessOn cost=${android.os.SystemClock.elapsedRealtime() - tProbe}ms")
+        if (!wirelessOn) {
             Log.i(TAG, "enableInput：无线调试未开启，跳过 shell 重连")
+            diag(context, "enableInput#end=FAIL(wireless_debug_off) cost=${android.os.SystemClock.elapsedRealtime() - tStart}ms")
             return EnableResult(false, "wireless_debug_off")
         }
         return try {
             val identity = AdbKeyStore.getOrCreate(context)
             // 名单在但没绑定 → force 强制重绑；不在名单 → 普通追加
             var r = shellDirectEnableAccessibility(context, identity, force = listed)
-            if (r.ok && awaitBound(AWAIT_BIND_MS)) {
+            diag(context, "shell 首次执行 ok=${r.ok} stage=${r.stage} detail=${r.detail.take(300)}")
+            if (r.ok && awaitBoundTimed(context, AWAIT_BIND_MS, "shell-first")) {
+                diag(context, "enableInput#end=ok(shell-first) cost=${android.os.SystemClock.elapsedRealtime() - tStart}ms")
                 EnableResult(true, "shell")
             } else if (r.ok) {
                 // 同本地路径：名单已写入但系统不绑定，force 重写一轮强制触发重绑
                 Log.w(TAG, "enableInput：shell 写名单后 ${AWAIT_BIND_MS}ms 未绑定，force 重写重试")
+                diag(context, "shell 首次写名单后未绑定，force 第二轮")
                 r = shellDirectEnableAccessibility(context, identity, force = true)
-                if (r.ok && awaitBound(AWAIT_BIND_MS)) {
+                diag(context, "shell 第二轮执行 ok=${r.ok} stage=${r.stage} detail=${r.detail.take(300)}")
+                if (r.ok && awaitBoundTimed(context, AWAIT_BIND_MS, "shell-rebind")) {
+                    diag(context, "enableInput#end=ok(shell-rebind) cost=${android.os.SystemClock.elapsedRealtime() - tStart}ms")
                     EnableResult(true, "shell")
                 } else {
+                    diag(context, "enableInput#end=FAIL(shell_${r.stage}) cost=${android.os.SystemClock.elapsedRealtime() - tStart}ms")
                     EnableResult(false, "shell_${r.stage}", r.detail)
                 }
             } else {
@@ -625,12 +694,23 @@ object AdbAuthManager {
                 // shell_rejected：配对失效（引导重新配对）
                 // shell_put_denied：ROM 安全开关（引导 USB 调试安全设置）
                 // shell_verify_failed / shell_connect_error：重试+技术详情
+                diag(context, "enableInput#end=FAIL(shell_${r.stage}) cost=${android.os.SystemClock.elapsedRealtime() - tStart}ms")
                 EnableResult(false, "shell_${r.stage}", r.detail)
             }
         } catch (e: Exception) {
             Log.w(TAG, "enableInput shell 路径异常", e)
+            diag(context, "enableInput#end=FAIL(shell_connect_error) 异常=${e.chainText()} cost=${android.os.SystemClock.elapsedRealtime() - tStart}ms")
             EnableResult(false, "shell_connect_error", e.chainText())
         }
+    }
+
+    /** 读系统属性（诊断用，反射隐藏 API，读不到返回"?"） */
+    private fun getSystemProperty(key: String): String = try {
+        val cls = Class.forName("android.os.SystemProperties")
+        val m = cls.getMethod("get", String::class.java, String::class.java)
+        m.invoke(null, key, "?") as? String ?: "?"
+    } catch (e: Throwable) {
+        "<na>"
     }
 
     /**
@@ -662,7 +742,9 @@ object AdbAuthManager {
                 true
             }
             if (changed) {
-                writeAccessibilityList(cr, services)
+                writeAccessibilityList(context, cr, services)
+            } else {
+                diag(context, "repairAccessibility：名单已含组件全名，无需写入")
             }
             Log.i(TAG, "无障碍自愈${if (changed) "已执行" else "无需变更"}")
             true
@@ -690,13 +772,16 @@ object AdbAuthManager {
             val others = current.split(':').filter { it.isNotEmpty() && it != component }
 
             // 1) 移除我方组件并提交，触发系统解绑
-            writeAccessibilityList(cr, others)
+            val removeOk = writeAccessibilityList(context, cr, others)
             Log.i(TAG, "强制重绑：已从无障碍名单移除 InputService")
             // 2) 等待 AccessibilityManagerService 处理变更（不能太短，否则两次写入可能被合并）
             Thread.sleep(800)
             // 3) 加回，触发系统重新绑定
-            writeAccessibilityList(cr, others + component)
+            val addOk = writeAccessibilityList(context, cr, others + component)
             Log.i(TAG, "强制重绑：已写回 InputService，等待系统重新绑定")
+            diag(context, "forceRebind 完成 removeOk=$removeOk addOk=$addOk")
+            // 本轮仅观测：保持原有控制流（不抛异常即视为写入动作完成），
+            // 绑定与否由 awaitBound 判定；写入是否真被接受以日志回读为准
             true
         } catch (e: Exception) {
             Log.w(TAG, "强制重绑无障碍失败", e)
@@ -704,9 +789,26 @@ object AdbAuthManager {
         }
     }
 
-    private fun writeAccessibilityList(cr: android.content.ContentResolver, services: List<String>) {
-        Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, services.joinToString(":"))
-        Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+    private fun writeAccessibilityList(
+        context: Context,
+        cr: android.content.ContentResolver,
+        services: List<String>
+    ): Boolean {
+        val value = services.joinToString(":")
+        val r1 = Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, value)
+        val r2 = Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+        // 立即回读：部分 ROM 会吞掉写入（put 返回 true 但值没变）或异步改写
+        val readback = try {
+            Settings.Secure.getString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+        } catch (e: Exception) {
+            "<read error: ${e.message}>"
+        }
+        diag(
+            context,
+            "writeAccessibilityList putString=$r1 putInt=$r2 match=${readback == value}\n" +
+                "  写入: '$value'\n  回读: '$readback'"
+        )
+        return r1 && readback == value
     }
 
     /**

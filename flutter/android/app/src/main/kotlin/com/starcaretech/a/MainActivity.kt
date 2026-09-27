@@ -106,6 +106,11 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AdbAuthManager.trace(
+            applicationContext,
+            "MainActivity#onCreate coldStart=${savedInstanceState == null} " +
+                "pid=${android.os.Process.myPid()} inputBound=${InputService.isOpen}"
+        )
         if (_rdClipboardManager == null) {
             _rdClipboardManager = RdClipboardManager(getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
             FFI.setClipboardManager(_rdClipboardManager!!)
@@ -142,6 +147,9 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         Log.e(logTag, "onDestroy")
+        // 注意：划掉任务若被系统直接杀进程，这里不会执行；出现这条说明
+        // 是正常 finish/配置变更。与下一次 onCreate 的 PID 对比可确认进程死活
+        AdbAuthManager.trace(applicationContext, "MainActivity#onDestroy（正常销毁回调）")
         mainService?.let {
             unbindService(serviceConnection)
         }
@@ -601,6 +609,12 @@ class MainActivity : FlutterActivity() {
                         return@setMethodCallHandler
                     }
                     InputService.requestDisable()
+                    result.success(true)
+                }
+                "adb_diag" -> {
+                    // Flutter 侧时间线落盘到同一份 adb_auth_diag.log
+                    val txt = call.argument<String>("text") ?: ""
+                    AdbAuthManager.trace(context, "[Flutter] $txt")
                     result.success(true)
                 }
                 else -> {

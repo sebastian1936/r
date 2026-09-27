@@ -116,6 +116,9 @@ class InputService : AccessibilityService() {
             val c = ctx ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 Log.i("input service", "按总开关要求停用无障碍服务")
+                com.starcaretech.a.adb.AdbAuthManager.trace(
+                    c, "InputService#requestDisable 调用 disableSelf（App 主动关闭）"
+                )
                 c.disableSelf()
             }
         }
@@ -934,9 +937,23 @@ class InputService : AccessibilityService() {
         return null
     }
 
+    override fun onCreate() {
+        super.onCreate()
+        // 进程/服务实例创建即落盘：可区分"重开 App 后系统自动拉起的新进程"
+        // 与"进程未死、服务仍在"两种情况（PID 不同即进程被杀过）
+        com.starcaretech.a.adb.AdbAuthManager.trace(
+            applicationContext,
+            "InputService#onCreate（系统创建服务实例，pid=${android.os.Process.myPid()}）"
+        )
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         ctx = this
+        com.starcaretech.a.adb.AdbAuthManager.trace(
+            applicationContext,
+            "InputService#onServiceConnected ★系统已绑定★ pid=${android.os.Process.myPid()}"
+        )
         val info = AccessibilityServiceInfo()
         if (Build.VERSION.SDK_INT >= 33) {
             info.flags = FLAG_INPUT_METHOD_EDITOR or FLAG_RETRIEVE_INTERACTIVE_WINDOWS
@@ -987,6 +1004,10 @@ class InputService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        com.starcaretech.a.adb.AdbAuthManager.trace(
+            applicationContext,
+            "InputService#onDestroy ★服务被解绑/销毁★ pid=${android.os.Process.myPid()}"
+        )
         stopConsentRescue()
         runCatching { watchdogHandler.removeCallbacks(watchdogTick) }
         ctx = null

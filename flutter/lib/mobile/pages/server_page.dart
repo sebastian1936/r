@@ -691,6 +691,14 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
   /// 关闭控制永远允许，不受此状态限制
   bool _scamAcknowledged = false;
 
+  /// 恢复权限流程时间线：追加到原生 adb_auth_diag.log（fire-and-forget，
+  /// 同一 channel 保序），用于实测"划掉任务重开后转圈"的真实时序
+  void _adiag(String text) {
+    try {
+      gFFI.invokeMethod("adb_diag", {"text": text});
+    } catch (_) {}
+  }
+
   /// "接受控制"总开关。
   /// 开：只做三件必要的事——确认配对记录、恢复无障碍、启动服务（系统
   ///    录屏确认框是录屏授权唯一无法绕过的手动确认）。全程不弹任何其他
@@ -702,6 +710,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     _controlBusy = true;
     try {
       if (on) {
+        _adiag("toggle#begin 用户打开接受控制开关");
         // 1) 拉最新授权状态，消除进页面首次 _refresh 尚未返回的竞态
         var paired = false;
         try {
@@ -727,10 +736,12 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         //    立刻释放忙碌锁（配对对话框是独立流程，不能卡住开关），
         //    也绝不能先弹存储/录音权限。
         if (!paired) {
+          _adiag("无配对记录，进入配对引导");
           _controlBusy = false;
           _startPairing();
           return;
         }
+        _adiag("已配对，进入恢复无障碍循环");
 
         // 3) 已配对：先恢复无障碍。恢复过程最长约 30 秒（找调试服务+连接），
         //    显示加载框；失败时按原生返回的原因码给针对性指引——配对失效
@@ -784,6 +795,8 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
               });
             }
           });
+          _adiag("enable_input#invoke 调用原生恢复（显示转圈）");
+          final swEnable = Stopwatch()..start();
           try {
             final dynamic r = await gFFI
                 .invokeMethod("adb_enable_input", null)
@@ -802,11 +815,16 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
             failDetail = (r is Map && r["detail"] is String)
                 ? r["detail"] as String
                 : null;
+            _adiag(
+                "enable_input#return ok=$inputOk mode=$failMode "
+                "cost=${swEnable.elapsedMilliseconds}ms "
+                "detail=${(failDetail ?? '').take(200)}");
           } catch (e) {
             slowTimer.cancel();
             inputOk = false;
             failMode = "flutter_invoke_error";
             failDetail = e.toString();
+            _adiag("enable_input#throw cost=${swEnable.elapsedMilliseconds}ms $e");
           }
           // 无论页面是否还在，都关掉加载框（其 context 独立于 State.context）
           if (loadingCtx != null && loadingCtx!.mounted) {
@@ -817,6 +835,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           // 再给系统 1.5s 复核真实运行状态，确已绑定就按成功继续，避免
           // 误把用户拉进配对流程或一直转圈
           if (!inputOk) {
+            _adiag("enable_input 失败，1.5s 后复核 a11y_running");
             await Future.delayed(const Duration(milliseconds: 1500));
             try {
               final dynamic st2 = await gFFI
@@ -824,21 +843,30 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
                   .timeout(const Duration(seconds: 5));
               if (st2 is Map) {
                 final dynamic snap2 = st2["snap"];
-                if (snap2 is Map && snap2["a11y_running"] == true) {
+                final running = snap2 is Map && snap2["a11y_running"] == true;
+                _adiag("复核结果 a11y_running=$running snap=$snap2");
+                if (running) {
                   inputOk = true;
                 }
               }
-            } catch (_) {}
+            } catch (e) {
+              _adiag("复核异常 $e");
+            }
+          }
+          if (inputOk) {
+            _adiag("恢复流程判定成功，继续启动服务");
           }
           if (inputOk || !mounted) break;
 
           // 本地直写失败/记录异常：直接走配对流程兜底
           if (failMode == "not_paired" || failMode == "local_failed") {
+            _adiag("按 mode=$failMode 进入配对引导");
             _controlBusy = false;
             _startPairing();
             return;
           }
 
+          _adiag("弹失败对话框 mode=$failMode，等待用户选择");
           final action = await showDialog<String>(
             context: context,
             barrierDismissible: false,
@@ -865,6 +893,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         //    没开存储就不传文件）→ 启动服务。唯一会出现的系统框是录屏
         //    授权确认——那是录屏权限技术上必需的手动确认，无法绕过。
         setState(() => _controlPending = true);
+        _adiag("无障碍已就绪，启动 MainService/录屏");
         await gFFI.serverModel.applySharedCapabilitiesSilently();
         // 系统绑定 InputService 有 1~2s 延迟，等它就绪后再拉录屏框，
         // Android 11~13 才能赶上自动点"立即开始"
