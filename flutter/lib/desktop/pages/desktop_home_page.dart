@@ -385,6 +385,25 @@ class _DesktopHomePageState extends State<DesktopHomePage>
                         ),
                     ],
                   ),
+                  // 固定密码方式启用时，在一次性密码下方给出直达按钮，
+                  // 总有用户问"固定密码在哪设置"。
+                  if (model.approveMode != 'click' &&
+                      model.verificationMethod != kUseTemporaryPassword)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 4),
+                          minimumSize: const Size(0, 32),
+                        ),
+                        icon: const Icon(Icons.key_outlined, size: 16),
+                        label: Text(translate('Set permanent password'),
+                            style: const TextStyle(fontSize: 13)),
+                        onPressed: () => setPasswordDialog(),
+                      ).marginOnly(top: 2, bottom: 2),
+                    ),
                 ],
               ),
             ),

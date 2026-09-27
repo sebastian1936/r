@@ -551,15 +551,6 @@ class ServerInfo extends StatelessWidget {
               !showOneTime
                   ? SizedBox.shrink()
                   : Row(children: [
-                      // 固定密码启用时，在一次性密码旁提供直达入口，
-                      // 总有用户问"固定密码在哪设置"。
-                      if (serverModel.verificationMethod !=
-                          kUseTemporaryPassword)
-                        IconButton(
-                            visualDensity: VisualDensity.compact,
-                            tooltip: translate('Set permanent password'),
-                            icon: const Icon(Icons.key),
-                            onPressed: () => setPasswordDialog()),
                       IconButton(
                           visualDensity: VisualDensity.compact,
                           icon: const Icon(Icons.refresh),
@@ -572,7 +563,31 @@ class ServerInfo extends StatelessWidget {
                                 model.serverPasswd.value.text.trim());
                           })
                     ])
-            ]).marginOnly(left: 40, bottom: 15),
+            ]).marginOnly(left: 40),
+            // 固定密码方式启用时，在一次性密码下方给出直达按钮，
+            // 总有用户问"固定密码在哪设置"。
+            if (serverModel.approveMode != 'click' &&
+                serverModel.verificationMethod != kUseTemporaryPassword)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 40, top: 6, bottom: 15),
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 4),
+                      minimumSize: const Size(0, 36),
+                    ),
+                    icon: const Icon(Icons.key_outlined, size: 18),
+                    label: Text(translate('Set permanent password'),
+                        style: const TextStyle(fontSize: 13)),
+                    onPressed: () => setPasswordDialog(),
+                  ),
+                ),
+              )
+            else
+              const SizedBox(height: 15),
             ConnectionStateNotification()
           ],
         ));
