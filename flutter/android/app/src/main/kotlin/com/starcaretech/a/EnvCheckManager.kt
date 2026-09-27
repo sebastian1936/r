@@ -90,6 +90,14 @@ object EnvCheckManager {
         if (pairingCapable) {
             items += Item("developer_options", globalStatus(context, "development_settings_enabled"))
             items += Item("adb_master", globalStatus(context, Settings.Global.ADB_ENABLED))
+            // 小米/红米专有：「USB 调试（安全设置）」是与 USB 调试总开关
+            // 独立的第二个开关，控制 adb shell 的 pm grant/写 secure settings
+            // 权限——不开它无线配对会成功但授权失败。该开关状态无任何 API
+            // 可读（Settings/provider/AppOps 都不暴露），恒 unknown 由用户
+            // 手动确认；开启还需小米服务器在线校验（插 SIM+移动数据+账号）。
+            if (isMiui) {
+                items += Item("miui_adb_secure", STATUS_UNKNOWN)
+            }
             // 无线调试必须在已连接 Wi-Fi 时才能打开/保持运行，放在它前面
             // 先排查（系统在未连 Wi-Fi 时会直接灰掉或自动关闭无线调试）
             items += Item("wifi_connected", checkWifi(context))
@@ -366,7 +374,7 @@ object EnvCheckManager {
             "wifi_connected" ->
                 launch(appContext, Intent(Settings.ACTION_WIFI_SETTINGS))
 
-            "developer_options", "adb_master" ->
+            "developer_options", "adb_master", "miui_adb_secure" ->
                 launch(appContext, Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
 
             "notification" -> openNotificationSettings(appContext)

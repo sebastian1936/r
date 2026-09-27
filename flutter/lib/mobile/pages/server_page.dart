@@ -1334,7 +1334,17 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
     ],
     "adb_master": [
       "USB 调试",
-      "开发者选项里打开「USB 调试」",
+      "开发者选项里打开「USB 调试」（安卓通用开关）",
+      true,
+    ],
+    "miui_adb_secure": [
+      "USB 调试（安全设置）",
+      "小米/红米专有，与上面的「USB 调试」是两个独立开关，不开它"
+          "会出现「配对成功但授权失败」。开启方法：先插 SIM、关 Wi-Fi "
+          "用移动数据、并登录小米账号（该开关需联网到小米服务器在线校验，"
+          "仅连 Wi-Fi 时会显示开启但实际不生效），在开发者选项里打开"
+          "「USB 调试（安全设置）」，开完再连回 Wi-Fi。"
+          "若开关已显示开启但配对时仍提示未授权，请关掉它、用流量重新打开",
       true,
     ],
     "wifi_connected": [
@@ -1601,19 +1611,6 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
           }[_brand] ??
           "没开：设置 → 关于手机，连续点「版本号」7 次";
     }
-    // 小米/红米：USB 调试总开关之外，必须再开「USB 调试（安全设置）」，
-    // 否则配对成功也无法授权。该开关需小米服务器在线校验，顺序上要先
-    // 关 Wi-Fi 用流量打开它，再连回 Wi-Fi 开无线调试（无线调试必须 Wi-Fi）。
-    if (key == "adb_master" && _brand == "xiaomi") {
-      // 系统只能读到 USB 调试总开关状态，读不到安全开关；标题点明有
-      // 两个开关，防止总开关已开（绿勾）时用户以为本项已全部完成。
-      title = "USB 调试（小米还要打开「安全设置」）";
-      desc = "开发者选项里要打开两个独立开关：「USB 调试」和"
-          "「USB 调试（安全设置）」。开安全设置时必须插 SIM、关 Wi-Fi "
-          "用移动数据、并已登录小米账号（需联网到小米服务器校验，仅连 "
-          "Wi-Fi 时开关会显示开启但实际不生效）；开完后再连回 Wi-Fi。"
-          "若开关已显示开启但配对时仍提示未授权，请关掉它、用流量重新打开";
-    }
     final required_ = meta[2] as bool;
     final status = _statusOf(key);
     return Padding(
@@ -1655,10 +1652,7 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
               ],
             ),
           ),
-          // 小米 adb_master：安全开关状态系统不可读，总开关绿勾不代表
-          // 安全开关已开，保留「去确认」按钮直达开发者选项页。
-          if (status != "ok" ||
-              (key == "adb_master" && _brand == "xiaomi"))
+          if (status != "ok")
             TextButton(
               style: TextButton.styleFrom(
                 padding:
