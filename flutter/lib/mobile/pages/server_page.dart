@@ -1806,9 +1806,13 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
                     .map(_buildRow)
                     .toList(),
               const SizedBox(height: 8),
-              // 首次配对流程提示：点「开始配对」后用户要连续做三个系统侧
-              // 动作，仅靠随后的短时 toast 很容易漏看，固定在清单底部说明
-              if (!widget.reviewMode && !widget.retryMode)
+              // 无线调试配对方法：首次配对与配对后的权限复查（review）都展示，
+              // 保证用户随时能看到配对步骤；retryMode 有专属失败指引不重复展示。
+              // 仅在支持无线调试的机型（原生下发 wireless_debug 检查项）显示，
+              // Android10 以下/鸿蒙无此功能。
+              if (!widget.retryMode &&
+                  _items.any((e) =>
+                      e is Map && e["key"] == "wireless_debug"))
                 Container(
                   width: double.maxFinite,
                   margin: const EdgeInsets.only(bottom: 8),
@@ -1817,14 +1821,21 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
                     color: Theme.of(context).colorScheme.primaryContainer,
                     borderRadius: BorderRadius.circular(6),
                   ),
-                  child: const Text(
-                    "点下方「开始配对」后（全程约 30 秒，只需配对一次）：\n"
-                    "1. 系统会自动打开「无线调试」页，请点「使用配对码配对设备」\n"
-                    "2. 看到 6 位配对码后，从屏幕顶部下拉通知栏\n"
-                    "3. 点本应用通知上的输入框，输入这 6 位码并发送，等待提示成功\n"
-                    "若通知栏里没有本应用的通知，请回到这里确认「通知权限」已开启"
-                    "（小米/红米还需设置「通知栏样式：原生」）",
-                    style: TextStyle(fontSize: 12, height: 1.6),
+                  child: Text(
+                    widget.reviewMode
+                        ? "无线调试配对方法（只需配对一次；配对失效或换设备时可重新配对）：\n"
+                            "1. 打开开发者选项里的「无线调试」，点「使用配对码配对设备」\n"
+                            "2. 看到 6 位配对码后，从屏幕顶部下拉通知栏\n"
+                            "3. 点本应用通知上的输入框，输入这 6 位码并发送，等待提示成功\n"
+                            "若通知栏里没有本应用的通知，请确认上面列表中「通知权限」"
+                            "已开启（小米/红米还需设置「通知栏样式：原生」）"
+                        : "点下方「开始配对」后（全程约 30 秒，只需配对一次）：\n"
+                            "1. 系统会自动打开「无线调试」页，请点「使用配对码配对设备」\n"
+                            "2. 看到 6 位配对码后，从屏幕顶部下拉通知栏\n"
+                            "3. 点本应用通知上的输入框，输入这 6 位码并发送，等待提示成功\n"
+                            "若通知栏里没有本应用的通知，请回到这里确认「通知权限」已开启"
+                            "（小米/红米还需设置「通知栏样式：原生」）",
+                    style: const TextStyle(fontSize: 12, height: 1.6),
                   ),
                 ),
               Container(
