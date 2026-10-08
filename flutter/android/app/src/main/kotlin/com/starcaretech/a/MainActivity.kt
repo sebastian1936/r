@@ -577,6 +577,10 @@ class MainActivity : FlutterActivity() {
                         result.success(mapOf("ok" to false, "mode" to "unsupported"))
                         return@setMethodCallHandler
                     }
+                    // Flutter 侧会与"真实绑定状态轮询"竞速并可能在本调用返回前
+                    // 结束等待；enableInput 无法中途取消，迟到的回调必须去重，
+                    // 否则 result.success 重复提交会在主线程抛 IllegalStateException
+                    val replied = java.util.concurrent.atomic.AtomicBoolean(false)
                     thread {
                         val r = AdbAuthManager.enableInput(context)
                         Log.i("AdbAuth", "enableInput result=$r snap=${AdbAuthManager.statusSnapshot(context)}")
@@ -588,16 +592,24 @@ class MainActivity : FlutterActivity() {
                             )
                         }
                         activity.runOnUiThread {
-                            pushInputState()
-                            android.os.Handler(android.os.Looper.getMainLooper())
-                                .postDelayed({ pushInputState() }, 2500)
-                            result.success(
-                                mapOf(
-                                    "ok" to r.ok,
-                                    "mode" to r.mode,
-                                    "detail" to r.detail
+                            if (!replied.compareAndSet(false, true)) {
+                                Log.i("AdbAuth", "enableInput 迟到结果已丢弃（界面已按真实状态继续）")
+                                return@runOnUiThread
+                            }
+                            try {
+                                pushInputState()
+                                android.os.Handler(android.os.Looper.getMainLooper())
+                                    .postDelayed({ pushInputState() }, 2500)
+                                result.success(
+                                    mapOf(
+                                        "ok" to r.ok,
+                                        "mode" to r.mode,
+                                        "detail" to r.detail
+                                    )
                                 )
-                            )
+                            } catch (e: Exception) {
+                                Log.w("AdbAuth", "enableInput 结果回调失败", e)
+                            }
                         }
                     }
                 }

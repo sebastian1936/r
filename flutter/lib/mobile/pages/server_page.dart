@@ -789,11 +789,12 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
               );
             },
           );
-          // 30s 未返回：无线调试 mDNS 发现+重连确实可能较久，更新文案安抚，
-          // 不中断流程；85s 硬超时（覆盖原生最坏约 70s + 余量），避免通道
-          // 异常（如划掉任务后重开的生命周期竞态）导致永久转圈
+          // 12s 未返回：无线调试 mDNS 发现+重连确实可能较久，更新文案安抚，
+          // 不中断流程；30s 硬超时（覆盖一轮完整 mDNS 发现 24.5s + 余量），
+          // 避免通道异常导致永久转圈。绝大多数成功路径会被真实状态轮询
+          // 在数秒内提前结束等待，不受此超时影响
           final slowTimer =
-              Timer(const Duration(seconds: 30), () {
+              Timer(const Duration(seconds: 12), () {
             final c = loadingCtx;
             if (c != null && c.mounted) {
               loadingSetState?.call(() {
@@ -803,35 +804,19 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           });
           _adiag("enable_input#invoke 调用原生恢复（显示转圈）");
           final swEnable = Stopwatch()..start();
-          try {
-            final dynamic r = await gFFI
-                .invokeMethod("adb_enable_input", null)
-                .timeout(const Duration(seconds: 85), onTimeout: () {
-              return {
-                "ok": false,
-                "mode": "shell_connect_error",
-                "detail": "client-timeout-85s"
-              };
-            });
-            slowTimer.cancel();
-            inputOk = r is Map && r["ok"] == true;
-            failMode = (r is Map && r["mode"] is String)
-                ? r["mode"] as String
-                : null;
-            failDetail = (r is Map && r["detail"] is String)
-                ? r["detail"] as String
-                : null;
-            _adiag(
-                "enable_input#return ok=$inputOk mode=$failMode "
-                "cost=${swEnable.elapsedMilliseconds}ms "
-                "detail=${_clamp(failDetail, 200)}");
-          } catch (e) {
-            slowTimer.cancel();
-            inputOk = false;
-            failMode = "flutter_invoke_error";
-            failDetail = e.toString();
-            _adiag("enable_input#throw cost=${swEnable.elapsedMilliseconds}ms $e");
-          }
+          // 等待期间持续轮询真实绑定状态：重启后系统自然重绑可能在原生调用
+          // 返回前（甚至其 shell 扫描的几十秒里）就已完成，以真实状态为准，
+          // 避免"权限实际已恢复但转圈一直不关"
+          final r = await _awaitEnableInputWithWatch();
+          slowTimer.cancel();
+          inputOk = r["ok"] == true;
+          failMode = (r["mode"] is String) ? r["mode"] as String : null;
+          failDetail =
+              (r["detail"] is String) ? r["detail"] as String : null;
+          _adiag(
+              "enable_input#return ok=$inputOk mode=$failMode "
+              "cost=${swEnable.elapsedMilliseconds}ms "
+              "detail=${_clamp(failDetail ?? "", 200)}");
           // 无论页面是否还在，都关掉加载框（其 context 独立于 State.context）
           if (loadingCtx != null && loadingCtx!.mounted) {
             Navigator.of(loadingCtx!).pop();
@@ -929,6 +914,78 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
       }
     } finally {
       _controlBusy = false;
+    }
+  }
+
+  /// 调用原生 adb_enable_input 恢复无障碍，并在等待期间每 2 秒轮询一次
+  /// InputService 的真实绑定状态（a11y_running）。
+  ///
+  /// 重启手机后，系统对名单中的无障碍服务是异步自然重绑的，时机数百 ms
+  /// 到数秒不等；而原生 enableInput 自然等待窗口仅 2.5s，之后可能转入
+  /// shell/mDNS 扫描（最坏数十秒）。若系统在这期间已经绑好，界面仍会
+  /// 傻等原生调用返回。这里让"真实状态已绑定"与"原生调用返回"竞速，
+  /// 谁先证明成功就按成功走；30s 硬超时作为最终兜底（覆盖一轮完整
+  /// mDNS 发现窗口，再慢则让用户手动重试，避免界面无限转圈）。
+  /// 原生调用无法真正取消，迟到的结果由原生侧去重回调吞掉。
+  Future<Map<String, dynamic>> _awaitEnableInputWithWatch() async {
+    const hardTimeout = Duration(seconds: 30);
+    final enableDone = Completer<Map<String, dynamic>>();
+
+    gFFI.invokeMethod("adb_enable_input", null).then((dynamic v) {
+      if (!enableDone.isCompleted) {
+        enableDone.complete(v is Map
+            ? Map<String, dynamic>.from(v)
+            : <String, dynamic>{"ok": false, "mode": "bad_result"});
+      }
+    }).catchError((Object e) {
+      if (!enableDone.isCompleted) {
+        enableDone.complete(<String, dynamic>{
+          "ok": false,
+          "mode": "flutter_invoke_error",
+          "detail": e.toString(),
+        });
+      }
+    });
+
+    final watched = Completer<Map<String, dynamic>>();
+    Timer? pollTimer;
+    pollTimer = Timer.periodic(const Duration(seconds: 2), (t) async {
+      try {
+        final dynamic st = await gFFI
+            .invokeMethod("adb_auth_status", null)
+            .timeout(const Duration(seconds: 3));
+        if (st is Map) {
+          final dynamic snap = st["snap"];
+          if (snap is Map && snap["a11y_running"] == true) {
+            t.cancel();
+            if (!watched.isCompleted) {
+              watched.complete(<String, dynamic>{
+                "ok": true,
+                "mode": "watch_running",
+                "detail": "poll detected a11y_running",
+              });
+            }
+          }
+        }
+      } catch (_) {
+        // 单次状态查询失败不影响主流程，下一轮继续
+      }
+    });
+
+    try {
+      return await Future.any<Map<String, dynamic>>([
+        enableDone.future,
+        watched.future,
+      ]).timeout(hardTimeout, onTimeout: () {
+        _adiag("enable_input#hard-timeout 30s");
+        return <String, dynamic>{
+          "ok": false,
+          "mode": "shell_connect_error",
+          "detail": "client-timeout-30s",
+        };
+      });
+    } finally {
+      pollTimer?.cancel();
     }
   }
 
