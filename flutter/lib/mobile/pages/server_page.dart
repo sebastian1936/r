@@ -763,11 +763,21 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           BuildContext? loadingCtx;
           StateSetter? loadingSetState;
           var loadingSlow = false;
+          // 关闭请求标志：enableInput 在服务已开时会在 1~5ms 内同步返回，
+          // 而 showDialog 的 builder 要到下一帧才执行。若返回先于首帧，
+          // 下方 pop 时 loadingCtx 还没赋值，会漏掉关闭，转圈框将永远
+          // 挂在屏幕上。builder 挂载后检查此标志，自行补一次 pop。
+          var loadingDismissRequested = false;
           showDialog(
             context: context,
             barrierDismissible: false,
             builder: (ctx) {
               loadingCtx = ctx;
+              if (loadingDismissRequested) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (ctx.mounted) Navigator.of(ctx).pop();
+                });
+              }
               return WillPopScope(
                 onWillPop: () async => false,
                 child: StatefulBuilder(builder: (ctx, setSt) {
@@ -817,7 +827,9 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
               "enable_input#return ok=$inputOk mode=$failMode "
               "cost=${swEnable.elapsedMilliseconds}ms "
               "detail=${_clamp(failDetail ?? "", 200)}");
-          // 无论页面是否还在，都关掉加载框（其 context 独立于 State.context）
+          // 无论页面是否还在，都关掉加载框（其 context 独立于 State.context）。
+          // 先置标志：极速返回（结果早于 dialog 首帧）时由 builder 补 pop
+          loadingDismissRequested = true;
           if (loadingCtx != null && loadingCtx!.mounted) {
             Navigator.of(loadingCtx!).pop();
           }
