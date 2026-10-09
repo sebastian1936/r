@@ -1668,11 +1668,12 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
         return "没有检测到无线调试在运行（关过 WiFi 或重启手机后，系统会"
             "自动把它关掉）。请打开开发者选项里的「无线调试」；如果开关"
             "本来就是开的，点进「无线调试」页面停留 5～10 秒再点重试。"
-            "配对只做第一次，这里不需要重新配对";
+            "正常情况下配对一直有效、无需重新配对；若开开关后重试多次"
+            "仍失败，可点「重新配对」重新走一次配对。";
       default:
         return "连接无线调试服务失败。请确认开发者选项里「无线调试」是"
             "开着的，然后进「无线调试」页面停留 5～10 秒再点重试；仍失败"
-            "就把它关掉重新打开。配对只做第一次，这里不需要重新配对";
+            "就把它关掉重新打开。重试多次仍失败可点「重新配对」。";
     }
   }
 
@@ -1916,6 +1917,16 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
           child: const Text("重新检查"),
         ),
         if (widget.retryMode) ...[
+          // 非配对失效场景下，主按钮是"重试"（绝大多数情况开开关即可恢复）；
+          // 但部分 ROM 重启后会同时清空已配对设备列表，反复重试仍失败时
+          // 用户需要一个手动重新配对的自救出口，故始终保留此次要入口
+          if (!_isRepairNeeded)
+            TextButton(
+              onPressed: _loading
+                  ? null
+                  : () => Navigator.of(context).pop("repair"),
+              child: const Text("重新配对"),
+            ),
           TextButton(
             onPressed: () => Navigator.of(context).pop("cancel"),
             child: const Text("取消"),
