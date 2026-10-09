@@ -112,13 +112,12 @@ object CrashLogger {
                 val time = SimpleDateFormat("MM-dd HH:mm:ss", Locale.US).format(Date(info.timestamp))
                 buildString {
                     append("EXIT-REASON time=$time pid=${info.pid} reason=${exitReasonName(info.reason)}")
-                    append(" sub=${info.subReason} importance=${info.importance} status=${info.status}")
+                    // getSubReason 是 @hide API，反射读取（拿不到就省略）
+                    readHiddenSubReason(info)?.let { append(" sub=$it") }
+                    append(" importance=${info.importance} status=${info.status}")
                     info.description?.takeIf { it.isNotBlank() }?.let { append(" desc=$it") }
                     // ANR/部分 native 崩溃系统会附一段 trace（如 ANR 主线程栈）
-                    runCatching {
-                        info.traceInputStream?.bufferedReader()?.use { it.readText() }
-                            ?.take(4000)?.takeIf { t -> t.isNotBlank() }
-                    }.getOrNull()?.let { append("\n--- trace ---\n").append(it) }
+                    readExitTrace(info)?.let { append("\n--- trace ---\n").append(it) }
                 }
             }
             prefs.edit().putLong(KEY_LAST_EXIT_TS, maxTs).apply()
@@ -144,24 +143,44 @@ object CrashLogger {
         }
     }
 
+    /** 读取系统附在退出记录里的 ANR/native trace（API 31+） */
+    @android.annotation.SuppressLint("NewApi")
+    private fun readExitTrace(info: android.app.ApplicationExitInfo): String? {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S) return null
+        return runCatching {
+            info.traceInputStream?.bufferedReader()?.use { it.readText() }
+                ?.take(4000)?.takeIf { it.isNotBlank() }
+        }.getOrNull()
+    }
+
+    /** getSubReason 是 @hide API，公开 SDK 不可见，反射读取 */
+    private fun readHiddenSubReason(info: android.app.ApplicationExitInfo): Int? = runCatching {
+        val m = info.javaClass.getMethod("getSubReason")
+        (m.invoke(info) as? Int)?.takeIf { it != 0 }
+    }.getOrNull()
+
+    // 退出原因码全部用字面量：0(UNKNOWN)/8(EXCESSIVE_RESOURCE_USE) 是
+    // @SystemApi/@hide，公开 android.jar 里没有对应常量，直接引用会编译失败。
+    // 13=FREEZER(API31) 14=PACKAGE_UPDATED(API33)
+    // 15=PACKAGE_STATE_CHANGED(API33) 16=FORCED_SIGNAL(API35)
     private fun exitReasonName(reason: Int): String = when (reason) {
-        android.app.ApplicationExitInfo.REASON_EXIT_UNKNOWN -> "UNKNOWN($reason)"
-        android.app.ApplicationExitInfo.REASON_SIGNALED -> "SIGNALED($reason)"
-        android.app.ApplicationExitInfo.REASON_LOW_MEMORY -> "LOW_MEMORY($reason)"
-        android.app.ApplicationExitInfo.REASON_CRASH -> "CRASH(Java,$reason)"
-        android.app.ApplicationExitInfo.REASON_CRASH_NATIVE -> "CRASH_NATIVE($reason)"
-        android.app.ApplicationExitInfo.REASON_ANR -> "ANR($reason)"
-        android.app.ApplicationExitInfo.REASON_INITIALIZATION_FAILURE -> "INIT_FAILURE($reason)"
-        android.app.ApplicationExitInfo.REASON_PERMISSION_CHANGE -> "PERMISSION_CHANGE($reason)"
-        android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USE -> "EXCESSIVE_RESOURCE($reason)"
-        android.app.ApplicationExitInfo.REASON_USER_REQUESTED -> "USER_REQUESTED($reason)"
-        android.app.ApplicationExitInfo.REASON_USER_STOPPED -> "USER_STOPPED($reason)"
-        android.app.ApplicationExitInfo.REASON_DEPENDENCY_DIED -> "DEPENDENCY_DIED($reason)"
-        android.app.ApplicationExitInfo.REASON_OTHER -> "OTHER($reason)"
-        // 15=REASON_FREEZER(API31)、16=REASON_PACKAGE_UPDATED(API33)，
-        // 用字面量避免 API30 设备访问高版本静态字段
-        15 -> "FREEZER(15)"
-        16 -> "PACKAGE_UPDATED(16)"
+        0 -> "UNKNOWN(0)"
+        1 -> "SIGNALED(1)"
+        2 -> "LOW_MEMORY(2)"
+        3 -> "CRASH(Java,3)"
+        4 -> "CRASH_NATIVE(4)"
+        5 -> "ANR(5)"
+        6 -> "INIT_FAILURE(6)"
+        7 -> "PERMISSION_CHANGE(7)"
+        8 -> "EXCESSIVE_RESOURCE(8)"
+        9 -> "USER_REQUESTED(9)"
+        10 -> "USER_STOPPED(10)"
+        11 -> "DEPENDENCY_DIED(11)"
+        12 -> "OTHER(12)"
+        13 -> "FREEZER(13)"
+        14 -> "PACKAGE_UPDATED(14)"
+        15 -> "PACKAGE_STATE_CHANGED(15)"
+        16 -> "FORCED_SIGNAL(16)"
         else -> "REASON_$reason"
     }
 
@@ -242,11 +261,7 @@ private val CRASH_MARKERS = listOf(
     "ANR in"
 )
 
-/** 系统历史退出原因中视为"崩溃"的类型（另存 crash 文件并对用户弹窗） */
-private val FATAL_EXIT_REASONS = setOf(
-    android.app.ApplicationExitInfo.REASON_CRASH,
-    android.app.ApplicationExitInfo.REASON_CRASH_NATIVE,
-    android.app.ApplicationExitInfo.REASON_ANR,
-    android.app.ApplicationExitInfo.REASON_SIGNALED,
-    android.app.ApplicationExitInfo.REASON_INITIALIZATION_FAILURE
-)
+/** 系统历史退出原因中视为"崩溃"的类型（另存 crash 文件并对用户弹窗）。
+ *  用字面量避免依赖可能被 @hide 的常量：3=CRASH 4=CRASH_NATIVE 5=ANR
+ *  1=SIGNALED 6=INITIALIZATION_FAILURE */
+private val FATAL_EXIT_REASONS = setOf(1, 3, 4, 5, 6)
