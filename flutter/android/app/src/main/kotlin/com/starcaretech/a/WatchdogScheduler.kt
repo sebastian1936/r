@@ -105,6 +105,7 @@ object WatchdogScheduler {
         }
         lastStartAttemptMs = now
         Log.i(TAG, "拉起 MainService（来源=$source）")
+        StartWatchdog.stage("Watchdog 拉起 MainService（来源=$source）")
         val intent = Intent(context, MainService::class.java).apply {
             action = ACT_WATCHDOG_RESTART
         }

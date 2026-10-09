@@ -981,7 +981,9 @@ class InputService : AccessibilityService() {
         // 进程外拉起锚点：进程被系统杀掉后，只要无障碍名单里还有本服务，
         // 系统为分发事件会重建本进程并绑定 InputService。此时若用户仍期望
         // 被控在线，立刻拉起 MainService，并每 60s 巡检一次（进程内零成本）。
+        StartWatchdog.stage("InputService.onServiceConnected: 拉起看门狗前")
         startServiceWatchdog()
+        StartWatchdog.stage("InputService.onServiceConnected: done")
     }
 
     private val watchdogTick = object : Runnable {

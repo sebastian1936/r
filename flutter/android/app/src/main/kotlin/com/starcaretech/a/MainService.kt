@@ -564,12 +564,15 @@ class MainService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        StartWatchdog.stage("MainService.onCreate: enter")
         // 服务存活事实 + 用户期望在线：进程外看门狗（Job/无障碍/开机）据此拉起
         markServiceAlive(true)
         aliveInstance = this
         WatchdogScheduler.setServiceWanted(applicationContext, true)
         Log.d(logTag,"MainService onCreate, sdk int:${Build.VERSION.SDK_INT} reuseVirtualDisplay:$reuseVirtualDisplay")
+        StartWatchdog.stage("MainService: FFI.init 前")
         FFI.init(this)
+        StartWatchdog.stage("MainService: FFI.init 后")
         HandlerThread("Service", Process.THREAD_PRIORITY_BACKGROUND).apply {
             start()
             serviceLooper = looper
@@ -581,7 +584,9 @@ class MainService : Service() {
         // keep the config dir same with flutter
         val prefs = applicationContext.getSharedPreferences(KEY_SHARED_PREFERENCES, FlutterActivity.MODE_PRIVATE)
         val configPath = prefs.getString(KEY_APP_DIR_CONFIG_PATH, "") ?: ""
+        StartWatchdog.stage("MainService: FFI.startServer 前")
         FFI.startServer(configPath, "")
+        StartWatchdog.stage("MainService: FFI.startServer 后")
 
         createForegroundNotification()
 
@@ -605,6 +610,7 @@ class MainService : Service() {
 
         // 防电诈：系统通话期间锁定被控输入（AudioManager 轮询，无需权限）
         CallStateMonitor.start(applicationContext)
+        StartWatchdog.stage("MainService.onCreate: done")
     }
 
     override fun onDestroy() {

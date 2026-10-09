@@ -62,7 +62,9 @@ class MainActivity : FlutterActivity() {
     private val audioRecordHandle = AudioRecordHandle(this, { false }, { isAudioStart })
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        StartWatchdog.stage("configureFlutterEngine: enter")
         super.configureFlutterEngine(flutterEngine)
+        StartWatchdog.stage("configureFlutterEngine: super 后")
         if (!isController && MainService.isReady) {
             Intent(activity, MainService::class.java).also {
                 bindService(it, serviceConnection, Context.BIND_AUTO_CREATE)
@@ -73,6 +75,7 @@ class MainActivity : FlutterActivity() {
             channelTag
         )
         initFlutterChannel(flutterMethodChannel!!)
+        StartWatchdog.stage("configureFlutterEngine: 通道注册完成")
         thread {
             try {
                 setCodecInfo()
@@ -104,8 +107,20 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    override fun attachBaseContext(newBase: Context) {
+        // Activity 生命周期的最早入口，super 前先打一笔：用于区分
+        // "点击图标后系统压根没调度 Activity" 与 "卡在 super.onCreate"
+        StartWatchdog.stage("MainActivity.attachBaseContext: enter（super 前）")
+        super.attachBaseContext(newBase)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        // FlutterActivity.super.onCreate 内含 Flutter 引擎首次加载（libflutter.so
+        // + 快照），stub 进程里与 MainService 的 native 初始化争用时可能卡死，
+        // 前后各打一笔以精确判定
+        StartWatchdog.stage("MainActivity.onCreate: super 前")
         super.onCreate(savedInstanceState)
+        StartWatchdog.stage("MainActivity.onCreate: super 后（引擎首帧初始化完成）")
         AdbAuthManager.trace(
             applicationContext,
             "MainActivity#onCreate coldStart=${savedInstanceState == null} " +
