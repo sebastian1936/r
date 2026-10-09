@@ -38,6 +38,7 @@ class MainApplication : Application() {
             override fun onActivityStarted(activity: android.app.Activity) {
                 startedCount++
                 isAppForeground = startedCount > 0
+                StartWatchdog.stage("ActivityLifecycle: started ${activity.javaClass.simpleName}")
             }
 
             override fun onActivityStopped(activity: android.app.Activity) {
@@ -45,8 +46,15 @@ class MainApplication : Application() {
                 isAppForeground = startedCount > 0
             }
 
-            override fun onActivityCreated(activity: android.app.Activity, savedInstanceState: android.os.Bundle?) {}
-            override fun onActivityResumed(activity: android.app.Activity) {}
+            override fun onActivityCreated(activity: android.app.Activity, savedInstanceState: android.os.Bundle?) {
+                // 覆盖所有 Activity（含 PermissionRequestTransparentActivity 等
+                // 未单独埋点的），定位"点了按钮但 MainActivity 没起来"的场景：
+                // 若此处都无日志，说明 Activity 启动被系统拦在进程之外
+                StartWatchdog.stage("ActivityLifecycle: created ${activity.javaClass.simpleName}")
+            }
+            override fun onActivityResumed(activity: android.app.Activity) {
+                StartWatchdog.stage("ActivityLifecycle: resumed ${activity.javaClass.simpleName}")
+            }
             override fun onActivityPaused(activity: android.app.Activity) {}
             override fun onActivitySaveInstanceState(activity: android.app.Activity, outState: android.os.Bundle) {}
             override fun onActivityDestroyed(activity: android.app.Activity) {}
