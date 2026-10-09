@@ -730,6 +730,8 @@ class MainService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d("whichService", "this service: ${Thread.currentThread()}")
+        com.starcaretech.a.adb.AdbAuthManager.trace(
+            applicationContext, "MainService.onStartCommand action=${intent?.action} startId=$startId")
         super.onStartCommand(intent, flags, startId)
         // 关键修复：MainActivity 长期 bindService，stopSelf() 后服务实例可能
         // 因绑定仍存活，destroy() 里置的 serviceDestroyed=true 会残留——
@@ -763,22 +765,33 @@ class MainService : Service() {
                         // 重复 applyProjection 会互顶会话并并发创建 MediaCodec（-38 崩溃链），
                         // 已就绪时直接丢弃迟到的重复授权
                         Log.i(logTag, "录屏已就绪，忽略重复的授权结果回传")
+                        com.starcaretech.a.adb.AdbAuthManager.trace(
+                            applicationContext, "录屏 ACT_INIT：已就绪，忽略重复授权")
                         endProjectionRequest()
-                    } else if (!applyProjection(mediaProjectionManager, token)) {
-                        Log.w(logTag, "新鲜授权 token 也无法建立 MediaProjection，回退重新请求")
-                        endProjectionRequest()
-                        // 同步失败同样计入熔断，避免异常 ROM 下"点允许→秒失败→再弹"的死循环
-                        promptProjectionRecovery(recordProjectionFailure())
                     } else {
-                        MediaProjectionTokenStore.save(this, token)
-                        _isReady = true
-                        // 用户完成了一次有效授权：历史短命失败计数全部清零，
-                        // 否则熔断后手动成功一次，下次单次抖动又会立即熔断
-                        shortLivedProjectionFailures = 0
-                        endProjectionRequest()
-                        // checkMediaPermission 内部会撤下恢复通知并同步 Dart 状态
-                        checkMediaPermission()
-                        resumeCaptureIfWanted()
+                        com.starcaretech.a.adb.AdbAuthManager.trace(
+                            applicationContext, "录屏 ACT_INIT：applyProjection 前")
+                        val projOk = applyProjection(mediaProjectionManager, token)
+                        com.starcaretech.a.adb.AdbAuthManager.trace(
+                            applicationContext, "录屏 ACT_INIT：applyProjection=$projOk")
+                        if (!projOk) {
+                            Log.w(logTag, "新鲜授权 token 也无法建立 MediaProjection，回退重新请求")
+                            endProjectionRequest()
+                            // 同步失败同样计入熔断，避免异常 ROM 下"点允许→秒失败→再弹"的死循环
+                            promptProjectionRecovery(recordProjectionFailure())
+                        } else {
+                            MediaProjectionTokenStore.save(this, token)
+                            _isReady = true
+                            // 用户完成了一次有效授权：历史短命失败计数全部清零，
+                            // 否则熔断后手动成功一次，下次单次抖动又会立即熔断
+                            shortLivedProjectionFailures = 0
+                            endProjectionRequest()
+                            // checkMediaPermission 内部会撤下恢复通知并同步 Dart 状态
+                            checkMediaPermission()
+                            com.starcaretech.a.adb.AdbAuthManager.trace(
+                                applicationContext, "录屏 ACT_INIT：授权就绪 checkMediaPermission 完成")
+                            resumeCaptureIfWanted()
+                        }
                     }
                 } ?: let {
                     Log.d(logTag, "getParcelableExtra intent null, try restore then request")
@@ -1109,6 +1122,8 @@ class MainService : Service() {
         if (isStart) {
             return true
         }
+        com.starcaretech.a.adb.AdbAuthManager.trace(
+            applicationContext, "startCapture: enter（vp9=$useVP9 projection=${mediaProjection != null}）")
         if (mediaProjection == null) {
             Log.w(logTag, "startCapture fail,mediaProjection is null")
             // 主控连接进来但录屏会话不存在（锁屏后进程被看门狗重建、token 不可缓存机型）：
@@ -1136,6 +1151,8 @@ class MainService : Service() {
             startRawVideoRecorder(mediaProjection!!)
         }
         if (!displayReady) {
+            com.starcaretech.a.adb.AdbAuthManager.trace(
+                applicationContext, "startCapture: 编码器/VirtualDisplay 启动失败 displayReady=false")
             // MediaProjection 已失效：onProjectionInvalid 已清理会话并弹出授权引导。
             // 必须在这里中止——旧实现吞掉异常后继续把 _isStart 置 true 并向 Rust
             // 声明 video 可用，但根本没有 VirtualDisplay 供帧，连接进来时会状态错乱。

@@ -61,6 +61,9 @@ class MainApplication : Application() {
         })
         // 崩溃日志落盘：Java 异常栈/logcat 写 filesDir/crash，供重启后弹窗分享定位
         CrashLogger.install(this)
+        // 上次进程怎么死的（native 崩溃/系统杀/ANR/覆盖安装）：系统 API 直接给结论，
+        // 后台线程读取并写诊断时间线，不拖慢冷启动
+        Thread { CrashLogger.recordHistoricalExitReasons(this) }.start()
         Log.d(TAG, "App start")
         // 主控/被控双包拆分：controller 包注入 conn-type=outgoing，
         // 使 is_outgoing_only() 生效，隐藏被控入口且不初始化被控服务

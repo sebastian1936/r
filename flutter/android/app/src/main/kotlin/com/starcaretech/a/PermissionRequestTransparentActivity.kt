@@ -33,9 +33,13 @@ class PermissionRequestTransparentActivity: Activity() {
             || !MainService.beginProjectionRequest()) {
             // 已有授权请求在途（重复实例/重入触发）：不做任何事直接关掉
             Log.i(logTag, "授权请求已在途或 action 非法，关闭重复的透明页")
+            com.starcaretech.a.adb.AdbAuthManager.trace(
+                applicationContext, "录屏透明页：闸门未抢到/action 非法，直接 finish")
             finish()
             return
         }
+        com.starcaretech.a.adb.AdbAuthManager.trace(
+            applicationContext, "录屏透明页：发起系统录屏确认框（等待自动点击闸门 20s）")
 
         // 锁屏恢复场景：点亮屏幕并把授权页显示在锁屏之上（无密码锁屏可直接完成；
         // 有密码锁屏仍需先解锁，这是系统安全边界）
@@ -56,6 +60,9 @@ class PermissionRequestTransparentActivity: Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQ_REQUEST_MEDIA_PROJECTION) {
+            com.starcaretech.a.adb.AdbAuthManager.trace(
+                applicationContext,
+                "录屏确认框结果: resultCode=$resultCode data=${data != null}")
             // 系统确认框已有结果，立即关闭闸门
             InputService.endConsentWait()
             if (resultCode == RESULT_OK && data != null) {

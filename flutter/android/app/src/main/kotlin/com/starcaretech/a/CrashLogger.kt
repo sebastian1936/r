@@ -28,6 +28,7 @@ object CrashLogger {
     private const val PREF_NAME = "crash_pref"
     private const val KEY_WAS_RUNNING = "was_running"
     private const val KEY_LAST_SHOWN = "last_shown_file"
+    private const val KEY_LAST_EXIT_TS = "last_exit_ts"
     private const val MAX_KEEP_FILES = 5
     private const val MAX_FILE_CHARS = 200_000
 
@@ -75,9 +76,8 @@ object CrashLogger {
         val looksLikeCrash = CRASH_MARKERS.any { log.contains(it, ignoreCase = true) }
         if (!looksLikeCrash) return
         val dir = crashDir(ctx)
-        // Java 崩溃时 handler 已写过一份，5 分钟内不重复写 native 疑似文件
-        val newest = dir.listFiles()?.maxByOrNull { it.lastModified() }
-        if (newest != null && System.currentTimeMillis() - newest.lastModified() < 5 * 60_000) return
+        // 连环死亡场景（如录屏授权后反复崩溃，每 7~12s 一轮）必须每次都落盘，
+        // 仅保留最近 MAX_KEEP_FILES 份即可，不再按时间窗去重丢证据
         trimOldFiles(dir)
         val file = File(dir, "crash_native_${timestamp()}.txt")
         val body = buildString {
@@ -87,6 +87,82 @@ object CrashLogger {
         }
         file.writeText(body.takeLast(MAX_FILE_CHARS))
         Log.i(TAG, "suspect native crash written to ${file.absolutePath}")
+    }
+
+    /**
+     * 读取系统记录的"历史进程退出原因"（Android 11+，无需任何权限，且不依赖
+     * 能否读 logcat——国产 ROM 静默杀进程/native 信号崩溃都能拿到原因码与
+     * 系统给出的描述）。结果写入诊断时间线；属于崩溃/ANR 的另存 crash 文件，
+     * 供崩溃弹窗展示给用户分享。
+     */
+    fun recordHistoricalExitReasons(ctx: Context) {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) return
+        try {
+            val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+                ?: return
+            val infos = am.getHistoricalProcessExitReasons(ctx.packageName, 0, 10)
+            if (infos.isNullOrEmpty()) return
+            val prefs = ctx.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            val lastTs = prefs.getLong(KEY_LAST_EXIT_TS, 0L)
+            var maxTs = lastTs
+            val fresh = infos.filter { it.timestamp > lastTs }
+            if (fresh.isEmpty()) return
+            val lines = fresh.map { info ->
+                if (info.timestamp > maxTs) maxTs = info.timestamp
+                val time = SimpleDateFormat("MM-dd HH:mm:ss", Locale.US).format(Date(info.timestamp))
+                buildString {
+                    append("EXIT-REASON time=$time pid=${info.pid} reason=${exitReasonName(info.reason)}")
+                    append(" sub=${info.subReason} importance=${info.importance} status=${info.status}")
+                    info.description?.takeIf { it.isNotBlank() }?.let { append(" desc=$it") }
+                    // ANR/部分 native 崩溃系统会附一段 trace（如 ANR 主线程栈）
+                    runCatching {
+                        info.traceInputStream?.bufferedReader()?.use { it.readText() }
+                            ?.take(4000)?.takeIf { t -> t.isNotBlank() }
+                    }.getOrNull()?.let { append("\n--- trace ---\n").append(it) }
+                }
+            }
+            prefs.edit().putLong(KEY_LAST_EXIT_TS, maxTs).apply()
+            // 1) 进诊断时间线（用户每次都能在 adb_auth_diag.log 看到）
+            lines.forEach { com.starcaretech.a.adb.AdbAuthManager.trace(ctx, it) }
+            // 2) 崩溃类原因另存 crash 目录，让崩溃分享弹窗能带上
+            val fatal = fresh.any { it.reason in FATAL_EXIT_REASONS }
+            if (fatal) {
+                val dir = crashDir(ctx)
+                trimOldFiles(dir)
+                val file = File(dir, "crash_exit_${timestamp()}.txt")
+                val body = buildString {
+                    appendHeader(ctx, "exit-reason")
+                    lines.joinToString("\n\n").also { append(it) }
+                    append("\n\n----- logcat tail -----\n")
+                    append(dumpLogcat())
+                }
+                file.writeText(body.takeLast(MAX_FILE_CHARS))
+                Log.i(TAG, "fatal exit reason written to ${file.absolutePath}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "recordHistoricalExitReasons fail", e)
+        }
+    }
+
+    private fun exitReasonName(reason: Int): String = when (reason) {
+        android.app.ApplicationExitInfo.REASON_EXIT_UNKNOWN -> "UNKNOWN($reason)"
+        android.app.ApplicationExitInfo.REASON_SIGNALED -> "SIGNALED($reason)"
+        android.app.ApplicationExitInfo.REASON_LOW_MEMORY -> "LOW_MEMORY($reason)"
+        android.app.ApplicationExitInfo.REASON_CRASH -> "CRASH(Java,$reason)"
+        android.app.ApplicationExitInfo.REASON_CRASH_NATIVE -> "CRASH_NATIVE($reason)"
+        android.app.ApplicationExitInfo.REASON_ANR -> "ANR($reason)"
+        android.app.ApplicationExitInfo.REASON_INITIALIZATION_FAILURE -> "INIT_FAILURE($reason)"
+        android.app.ApplicationExitInfo.REASON_PERMISSION_CHANGE -> "PERMISSION_CHANGE($reason)"
+        android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USE -> "EXCESSIVE_RESOURCE($reason)"
+        android.app.ApplicationExitInfo.REASON_USER_REQUESTED -> "USER_REQUESTED($reason)"
+        android.app.ApplicationExitInfo.REASON_USER_STOPPED -> "USER_STOPPED($reason)"
+        android.app.ApplicationExitInfo.REASON_DEPENDENCY_DIED -> "DEPENDENCY_DIED($reason)"
+        android.app.ApplicationExitInfo.REASON_OTHER -> "OTHER($reason)"
+        // 15=REASON_FREEZER(API31)、16=REASON_PACKAGE_UPDATED(API33)，
+        // 用字面量避免 API30 设备访问高版本静态字段
+        15 -> "FREEZER(15)"
+        16 -> "PACKAGE_UPDATED(16)"
+        else -> "REASON_$reason"
     }
 
     private fun StringBuilder.appendHeader(ctx: Context, type: String): StringBuilder {
@@ -156,5 +232,21 @@ private val CRASH_MARKERS = listOf(
     "SIGSEGV",
     "SIGABRT",
     "panicked at",
-    "RUST_BACKTRACE"
+    "RUST_BACKTRACE",
+    // FGS / 录屏授权违规导致的进程级异常（Android 12+）
+    "ForegroundServiceStartNotAllowed",
+    "ForegroundServiceDidNotStartInTimeException",
+    "ForegroundServiceDidNotStopInTimeException",
+    "RemoteServiceException",
+    "MediaProjection",
+    "ANR in"
+)
+
+/** 系统历史退出原因中视为"崩溃"的类型（另存 crash 文件并对用户弹窗） */
+private val FATAL_EXIT_REASONS = setOf(
+    android.app.ApplicationExitInfo.REASON_CRASH,
+    android.app.ApplicationExitInfo.REASON_CRASH_NATIVE,
+    android.app.ApplicationExitInfo.REASON_ANR,
+    android.app.ApplicationExitInfo.REASON_SIGNALED,
+    android.app.ApplicationExitInfo.REASON_INITIALIZATION_FAILURE
 )
