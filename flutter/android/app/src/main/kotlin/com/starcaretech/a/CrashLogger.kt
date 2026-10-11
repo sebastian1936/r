@@ -112,6 +112,8 @@ object CrashLogger {
                 val time = SimpleDateFormat("MM-dd HH:mm:ss", Locale.US).format(Date(info.timestamp))
                 buildString {
                     append("EXIT-REASON time=$time pid=${info.pid} reason=${exitReasonName(info.reason)}")
+                    // 非崩溃类退出（低内存查杀/冻结/用户停止等）只进时间线，显式标注避免误判
+                    if (info.reason !in FATAL_EXIT_REASONS) append(" [non-fatal]")
                     // getSubReason 是 @hide API，反射读取（拿不到就省略）
                     readHiddenSubReason(info)?.let { append(" sub=$it") }
                     append(" importance=${info.importance} status=${info.status}")
@@ -159,28 +161,35 @@ object CrashLogger {
         (m.invoke(info) as? Int)?.takeIf { it != 0 }
     }.getOrNull()
 
-    // 退出原因码全部用字面量：0(UNKNOWN)/8(EXCESSIVE_RESOURCE_USE) 是
-    // @SystemApi/@hide，公开 android.jar 里没有对应常量，直接引用会编译失败。
-    // 13=FREEZER(API31) 14=PACKAGE_UPDATED(API33)
-    // 15=PACKAGE_STATE_CHANGED(API33) 16=FORCED_SIGNAL(API35)
+    // 退出原因码全部用字面量：15/16 是 @hide 常量，公开 android.jar 里没有，
+    // 直接引用会编译失败。取值严格对照 AOSP ApplicationExitInfo.java 与官方文档，
+    // 切勿凭记忆移位（曾整体错位一位，把 LOW_MEMORY(3) 误报成 Java 崩溃）：
+    // 0 UNKNOWN / 1 EXIT_SELF / 2 SIGNALED / 3 LOW_MEMORY /
+    // 4 CRASH(Java) / 5 CRASH_NATIVE / 6 ANR / 7 INITIALIZATION_FAILURE /
+    // 8 PERMISSION_CHANGE / 9 EXCESSIVE_RESOURCE_USAGE /
+    // 10 USER_REQUESTED / 11 USER_STOPPED / 12 DEPENDENCY_DIED /
+    // 13 OTHER / 14 FREEZER / 15 PACKAGE_STATE_CHANGE / 16 PACKAGE_UPDATED /
+    // 17 MEMORY_LIMITER / 18 ANOMALY
     private fun exitReasonName(reason: Int): String = when (reason) {
         0 -> "UNKNOWN(0)"
-        1 -> "SIGNALED(1)"
-        2 -> "LOW_MEMORY(2)"
-        3 -> "CRASH(Java,3)"
-        4 -> "CRASH_NATIVE(4)"
-        5 -> "ANR(5)"
-        6 -> "INIT_FAILURE(6)"
-        7 -> "PERMISSION_CHANGE(7)"
-        8 -> "EXCESSIVE_RESOURCE(8)"
-        9 -> "USER_REQUESTED(9)"
-        10 -> "USER_STOPPED(10)"
-        11 -> "DEPENDENCY_DIED(11)"
-        12 -> "OTHER(12)"
-        13 -> "FREEZER(13)"
-        14 -> "PACKAGE_UPDATED(14)"
-        15 -> "PACKAGE_STATE_CHANGED(15)"
-        16 -> "FORCED_SIGNAL(16)"
+        1 -> "EXIT_SELF(1)"
+        2 -> "SIGNALED(2)"
+        3 -> "LOW_MEMORY(3)"
+        4 -> "CRASH(Java,4)"
+        5 -> "CRASH_NATIVE(5)"
+        6 -> "ANR(6)"
+        7 -> "INITIALIZATION_FAILURE(7)"
+        8 -> "PERMISSION_CHANGE(8)"
+        9 -> "EXCESSIVE_RESOURCE(9)"
+        10 -> "USER_REQUESTED(10)"
+        11 -> "USER_STOPPED(11)"
+        12 -> "DEPENDENCY_DIED(12)"
+        13 -> "OTHER(13)"
+        14 -> "FREEZER(14)"
+        15 -> "PACKAGE_STATE_CHANGE(15)"
+        16 -> "PACKAGE_UPDATED(16)"
+        17 -> "MEMORY_LIMITER(17)"
+        18 -> "ANOMALY(18)"
         else -> "REASON_$reason"
     }
 
@@ -262,6 +271,9 @@ private val CRASH_MARKERS = listOf(
 )
 
 /** 系统历史退出原因中视为"崩溃"的类型（另存 crash 文件并对用户弹窗）。
- *  用字面量避免依赖可能被 @hide 的常量：3=CRASH 4=CRASH_NATIVE 5=ANR
- *  1=SIGNALED 6=INITIALIZATION_FAILURE */
-private val FATAL_EXIT_REASONS = setOf(1, 3, 4, 5, 6)
+ *  用字面量避免依赖可能被 @hide 的常量：
+ *  2=SIGNALED(native 信号杀进程) 4=CRASH(Java) 5=CRASH_NATIVE
+ *  6=ANR 7=INITIALIZATION_FAILURE。
+ *  注意 1=EXIT_SELF 是正常退出，3=LOW_MEMORY、14=FREEZER 是系统杀后台，
+ *  都不是崩溃，不能放进此集合（曾错位把 1/3 纳入导致误报弹窗）。 */
+private val FATAL_EXIT_REASONS = setOf(2, 4, 5, 6, 7)
