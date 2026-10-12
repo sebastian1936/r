@@ -491,29 +491,53 @@ object EnvCheckManager {
 
     /**
      * 「关于手机」页（连点版本号 7 次解锁开发者模式的页面）。
-     * 先走系统通用 Intent；MIUI/HyperOS 的「我的设备 → 全部参数」是
-     * 私有 Activity，通用 Intent 在部分版本只到「我的设备」，再补两个
-     * 常见组件名；全部失败回退设置主页（用户手动找关于手机）。
+     *
+     * MIUI/HyperOS 必须优先用显式组件直达「全部参数与信息」页：
+     * 通用 ACTION_DEVICE_INFO_SETTINGS 在部分 MIUI/HyperOS 版本上被
+     * 系统路由到检查解锁状态的页面——startActivity 不抛异常但页面
+     * 弹「请先打开开发者模式」toast 后立即 finish（假成功），用户看到
+     * 一闪而过回到 App。显式组件不会被 MIUI intent router 改写。
+     * 其他品牌先走系统通用 Intent。
+     * 全部失败回退设置主页（用户手动找关于手机）。
      */
     private fun openAboutDeviceSettings(context: Context): Boolean {
+        if (isMiui) {
+            // HyperOS 2 新版「全部参数」页
+            launchSettingsComponent(
+                context, "com.android.settings.Settings\$AllSpecActivity"
+            ) && return true
+            // MIUI 11 ~ HyperOS 1 主流「全部参数与信息」页
+            launchSettingsComponent(
+                context, "com.android.settings.Settings\$MyDeviceInfoActivity"
+            ) && return true
+            // 旧版 MIUI 的关于页
+            launchSettingsComponent(
+                context, "com.android.settings.Settings\$DeviceInfoSettingsActivity"
+            ) && return true
+        }
         if (launch(context, Intent(Settings.ACTION_DEVICE_INFO_SETTINGS))) {
             return true
         }
-        val components = listOf(
-            // MIUI/HyperOS「全部参数」页
-            "com.android.settings.Settings\$MyDeviceInfoActivity",
-            // 部分 MIUI/原生版本的关于页组件名
-            "com.android.settings.Settings\$DeviceInfoSettingsActivity"
-        )
-        components.forEach { name ->
-            runCatching {
-                val intent = Intent().setComponent(
-                    ComponentName("com.android.settings", name)
-                )
-                if (launch(context, intent)) return true
-            }
-        }
+        // 非小米品牌/通用 action 失败时也兜底试一次显式组件
+        launchSettingsComponent(
+            context, "com.android.settings.Settings\$DeviceInfoSettingsActivity"
+        ) && return true
         return launch(context, Intent(Settings.ACTION_SETTINGS))
+    }
+
+    /**
+     * 显式启动 com.android.settings 内的 Activity；组件不存在或未导出
+     * （startActivity 抛异常）时返回 false，由调用方尝试下一个候选。
+     */
+    private fun launchSettingsComponent(context: Context, className: String): Boolean {
+        return try {
+            val intent = Intent().setComponent(
+                ComponentName("com.android.settings", className)
+            )
+            launch(context, intent)
+        } catch (e: Throwable) {
+            false
+        }
     }
 
     /**
