@@ -76,21 +76,31 @@ object EnvCheckManager {
      * @param checkPairingChannel 是否检查"配对专用通知渠道"。
      *   仅配对前/开启前重试需要；保活复查只查通知总开关，避免已配对用户
      *   被无关的渠道状态干扰。
+     * @param keepAliveOnly 手动授权模式开启前的保活检查：只下发保活相关项
+     *   （通知/电池/悬浮窗/自启动/后台弹出/三星防休眠），不含任何无线调试
+     *   相关项，也不含文件/录音功能权限项。
      */
     fun envInfo(
         context: Context,
         pairingCapable: Boolean,
-        checkPairingChannel: Boolean
+        checkPairingChannel: Boolean,
+        keepAliveOnly: Boolean = false
     ): Map<String, Any?> = mapOf(
         "brand" to brandKey,
         "brand_label" to brandLabel,
-        "items" to checkAll(context, pairingCapable, checkPairingChannel)
+        "items" to checkAll(
+            context,
+            pairingCapable && !keepAliveOnly,
+            checkPairingChannel && !keepAliveOnly,
+            keepAliveOnly
+        )
     )
 
     fun checkAll(
         context: Context,
         pairingCapable: Boolean = true,
-        checkPairingChannel: Boolean = true
+        checkPairingChannel: Boolean = true,
+        keepAliveOnly: Boolean = false
     ): List<Map<String, String>> {
         val items = ArrayList<Item>()
         if (pairingCapable) {
@@ -146,11 +156,14 @@ object EnvCheckManager {
         )
         items += Item("overlay", checkOverlay(context))
         // 以下两项是功能可选项：不授权不影响远程看屏与操作，
-        // 只影响对应能力（传文件 / 传被控端播放的声音）
-        items += Item("file_storage", checkFileStorage(context))
-        // 被控端系统音频仅 Android 11+ 支持，低版本无此项
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            items += Item("record_audio", checkRecordAudio(context))
+        // 只影响对应能力（传文件 / 传被控端播放的声音）。
+        // 手动授权的保活检查只关注保活项，不下发功能权限项。
+        if (!keepAliveOnly) {
+            items += Item("file_storage", checkFileStorage(context))
+            // 被控端系统音频仅 Android 11+ 支持，低版本无此项
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                items += Item("record_audio", checkRecordAudio(context))
+            }
         }
         if (isMiui) {
             items += Item("miui_autostart", appOpStatus(context, MIUI_OP_AUTO_START))
@@ -399,15 +412,22 @@ object EnvCheckManager {
         return when (key) {
             // 无线调试：优先直达系统「无线调试」子页（少点一层），
             // 组件不存在/未导出（部分 ROM）时回退开发者选项主页
+            // （开发者模式未解锁时再回退「关于手机」页）
             "wireless_debug" -> openWirelessDebugSettings(appContext)
 
             // Wi-Fi：直达系统 WLAN 设置页
             "wifi_connected" ->
                 launch(appContext, Intent(Settings.ACTION_WIFI_SETTINGS))
 
-            "developer_options", "adb_master", "miui_adb_secure",
+            // 开发者模式未解锁：开发者选项页还不存在，ACTION_APPLICATION_
+            // DEVELOPMENT_SETTINGS 会打不开/被重定向，直达「关于手机」页
+            // 连点版本号 7 次
+            "developer_options" -> openAboutDeviceSettings(appContext)
+
+            // 这些开关都在开发者选项里：未解锁时同样先去「关于手机」
+            "adb_master", "miui_adb_secure",
             "oppo_disable_monitor", "vivo_usb_simulate" ->
-                launch(appContext, Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+                devSettingsEntry(appContext)
 
             "notification" -> openNotificationSettings(appContext)
 
@@ -466,7 +486,49 @@ object EnvCheckManager {
         // 部分 ROM 暴露的 action 别名
         candidates += Intent("android.settings.WIFI_DEBUGGING_SETTINGS")
         candidates.forEach { if (launch(context, it)) return true }
-        return launch(context, Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+        return devSettingsEntry(context)
+    }
+
+    /**
+     * 「关于手机」页（连点版本号 7 次解锁开发者模式的页面）。
+     * 先走系统通用 Intent；MIUI/HyperOS 的「我的设备 → 全部参数」是
+     * 私有 Activity，通用 Intent 在部分版本只到「我的设备」，再补两个
+     * 常见组件名；全部失败回退设置主页（用户手动找关于手机）。
+     */
+    private fun openAboutDeviceSettings(context: Context): Boolean {
+        if (launch(context, Intent(Settings.ACTION_DEVICE_INFO_SETTINGS))) {
+            return true
+        }
+        val components = listOf(
+            // MIUI/HyperOS「全部参数」页
+            "com.android.settings.Settings\$MyDeviceInfoActivity",
+            // 部分 MIUI/原生版本的关于页组件名
+            "com.android.settings.Settings\$DeviceInfoSettingsActivity"
+        )
+        components.forEach { name ->
+            runCatching {
+                val intent = Intent().setComponent(
+                    ComponentName("com.android.settings", name)
+                )
+                if (launch(context, intent)) return true
+            }
+        }
+        return launch(context, Intent(Settings.ACTION_SETTINGS))
+    }
+
+    /**
+     * 开发者选项入口：开发者模式已解锁时直达开发者选项主页；
+     * 未解锁时该页面尚不存在，改去「关于手机」页解锁，
+     * 避免点「去开启」后跳转失败/被系统重定向。
+     */
+    private fun devSettingsEntry(context: Context): Boolean {
+        val unlocked = globalStatus(context, "development_settings_enabled") == STATUS_OK
+        if (unlocked &&
+            launch(context, Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+        ) {
+            return true
+        }
+        return openAboutDeviceSettings(context)
     }
 
     private fun openNotificationSettings(context: Context): Boolean {

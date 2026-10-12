@@ -1276,6 +1276,25 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     }
   }
 
+  /// 手动授权模式专用的保活复查（清单不含无线调试项）
+  _openManualKeepAliveReview() async {
+    await showDialog<bool>(
+      context: context,
+      builder: (_) => const _EnvCheckDialog(keepAliveCheck: true),
+    );
+  }
+
+  /// 手动授权模式：点「输入控制/屏幕共享」先弹保活设置检查清单，
+  /// 用户可忽略未开项点「检查完成，去开启」继续原动作；取消则不执行。
+  /// 关闭操作（开关已开）不拦截，直接执行。
+  Future<void> _manualPreCheckThen(VoidCallback action) async {
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (_) => const _EnvCheckDialog(keepAliveCheck: true),
+    );
+    if (go == true) action();
+  }
+
   Future<void> _launchPairing() async {
     try {
       await gFFI.invokeMethod("adb_start_pairing", null);
@@ -1364,8 +1383,13 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
             "找到本应用并开启服务\n"
             "2. 再点「Screen Capture / 屏幕共享」，在系统录屏弹窗里"
             "点「立即开始」\n"
+            "点击开关后会先弹出保活设置检查（自启动/通知/后台/电池），"
+            "可按项开启，也可直接点「检查完成，去开启」跳过。\n"
             "重启手机或无障碍被系统关闭后，重新打开这两个开关即可，"
-            "不需要配对；无障碍页面找不到本应用时可先用下方「权限检查」",
+            "不需要配对。\n"
+            "若无障碍列表里找不到本应用：在「已安装的服务/已下载的应用」"
+            "等分组里查找，或用设置顶部搜索框搜「Rust」；仍找不到说明"
+            "可能装成了纯主控版，请改装被控版 Rust-Desk 后重试",
             style: TextStyle(fontSize: 12, height: 1.6),
           ),
         ),
@@ -1381,27 +1405,34 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         PermissionRow(
             translate("Screen Capture"),
             serverModel.mediaOk,
-            !serverModel.mediaOk &&
-                    gFFI.userModel.userName.value.isEmpty &&
-                    bind.mainGetLocalOption(key: "show-scam-warning") !=
-                        "N"
-                ? () => showScamWarning(context, serverModel)
-                : serverModel.toggleService),
+            // 关闭瞬时执行；开启先弹保活检查，点「检查完成，去开启」后
+            // 再走原流程（防诈骗确认或直接拉录屏框）
+            serverModel.mediaOk
+                ? serverModel.toggleService
+                : () => _manualPreCheckThen(
+                      !serverModel.mediaOk &&
+                              gFFI.userModel.userName.value.isEmpty &&
+                              bind.mainGetLocalOption(
+                                      key: "show-scam-warning") !=
+                                  "N"
+                          ? () => showScamWarning(context, serverModel)
+                          : serverModel.toggleService,
+                    )),
         PermissionRow(
             translate("Input Control"),
             serverModel.inputOk,
             // 手动模式：直接跳系统无障碍设置页（showInputWarnAlert），
             // 不走 toggleInput 里先尝试 adb_enable_input 的长等待；
-            // 关闭仍是瞬时的 stop_input，保持原入口
+            // 开启前先弹保活检查，可跳过；关闭瞬时执行
             serverModel.inputOk
                 ? serverModel.toggleInput
-                : () {
-                    if (serverModel.callLocked) {
-                      showToast(translate('call_input_locked_tip'));
-                      return;
-                    }
-                    showInputWarnAlert(gFFI);
-                  }),
+                : () => _manualPreCheckThen(() {
+                      if (serverModel.callLocked) {
+                        showToast(translate('call_input_locked_tip'));
+                        return;
+                      }
+                      showInputWarnAlert(gFFI);
+                    })),
         PermissionRow(translate("Transfer file"), serverModel.fileOk,
             serverModel.toggleFile),
         if (hasAudioPermission)
@@ -1416,7 +1447,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
                 padding: const EdgeInsets.symmetric(horizontal: 12),
                 minimumSize: const Size(0, 34),
                 tapTargetSize: MaterialTapTargetSize.shrinkWrap),
-            onPressed: _openEnvReview,
+            onPressed: _openManualKeepAliveReview,
             label: const Text("权限检查（自启动/通知/后台/电池）",
                 style: TextStyle(fontSize: 12.5))),
       ],
@@ -1681,11 +1712,17 @@ class _EnvCheckDialog extends StatefulWidget {
       this.retryMode = false,
       this.failMode,
       this.failDetail,
-      this.autoContinue = false})
+      this.autoContinue = false,
+      this.keepAliveCheck = false})
       : super(key: key);
 
   /// true=已配对后的复查入口（底部只显示「完成」，不显示开始配对）
   final bool reviewMode;
+
+  /// true=手动授权模式开启无障碍/录屏前的保活检查：清单只有保活项
+  /// （无无线调试相关项），底部「检查完成，去开启」始终可点，
+  /// 用户可忽略未开项继续
+  final bool keepAliveCheck;
 
   /// true=已配对但恢复失败后的引导（底部：取消 / 我已打开重试）
   final bool retryMode;
@@ -1883,9 +1920,11 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
       // （Android11+ 非鸿蒙：任何场景都显示——已配对后无线调试也可能被
       // 系统关掉；Android10以下/鸿蒙：永不显示）。mode=review 只影响
       // 配对专用通知渠道是否检查，不影响这些项目的显示。
-      final dynamic raw = await gFFI.invokeMethod(
-          "adb_env_check",
-          widget.reviewMode ? const {"mode": "review"} : null);
+      final dynamic envArgs = widget.keepAliveCheck
+          ? const {"mode": "keepalive"}
+          : (widget.reviewMode ? const {"mode": "review"} : null);
+      final dynamic raw =
+          await gFFI.invokeMethod("adb_env_check", envArgs);
       if (seq != _refreshSeq || !mounted) return;
       // 新格式 {brand, brand_label, items:[...]}；兼容旧 List 格式
       final items = raw is Map && raw["items"] is List
@@ -2105,7 +2144,9 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
         (_meta[e["key"]]?[2] == true));
     final titleText = widget.retryMode
         ? "开启前检查"
-        : (widget.reviewMode ? "权限检查" : "配对前设置检查");
+        : (widget.keepAliveCheck
+            ? "开启前保活检查"
+            : (widget.reviewMode ? "权限检查" : "配对前设置检查"));
     return AlertDialog(
       title: Row(children: [
         const Icon(Icons.fact_check_outlined, size: 22),
@@ -2178,6 +2219,15 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
                   child: Text("全部开启后，锁屏久了被系统杀掉也能自动恢复",
                       style: TextStyle(fontSize: 12, color: Colors.black54)),
                 ),
+              if (widget.keepAliveCheck)
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 6),
+                  child: Text(
+                      "这些设置保证服务长期在线（锁屏久了被系统杀掉也能自动"
+                      "恢复），建议按项开启；赶时间也可以直接点下方"
+                      "「检查完成，去开启」，之后再补开不影响使用",
+                      style: TextStyle(fontSize: 12, color: Colors.black54)),
+                ),
               if (_loading)
                 Padding(
                   padding: const EdgeInsets.symmetric(vertical: 24),
@@ -2208,6 +2258,7 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
               // 仅在支持无线调试的机型（原生下发 wireless_debug 检查项）显示，
               // Android10 以下/鸿蒙无此功能。
               if (!widget.retryMode &&
+                  !widget.keepAliveCheck &&
                   _items.any((e) =>
                       e is Map && e["key"] == "wireless_debug"))
                 Container(
@@ -2235,17 +2286,6 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
                     style: const TextStyle(fontSize: 12, height: 1.6),
                   ),
                 ),
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: Colors.orangeAccent.withOpacity(0.08),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: const Text(
-                  "另外：最近任务列表里把本应用卡片下拉加锁，可进一步防止被清理",
-                  style: TextStyle(fontSize: 12, color: Colors.black87),
-                ),
-              ),
             ],
           ),
         ),
@@ -2285,7 +2325,15 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
             onPressed: () => Navigator.of(context).pop(),
             child: const Text("完成"),
           )
-        else ...[
+        else if (widget.keepAliveCheck) ...[
+          // 保活检查不阻断流程：用户可忽略任何未开项，点完成直接继续
+          // 原来的开启动作（无障碍设置页 / 录屏框）
+          ElevatedButton(
+            onPressed:
+                _loading ? null : () => Navigator.of(context).pop(true),
+            child: const Text("检查完成，去开启"),
+          ),
+        ] else ...[
           TextButton(
             // 检测误报（尤其无线调试状态）时允许用户强行走配对
             onPressed: () => Navigator.of(context).pop(true),

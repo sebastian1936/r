@@ -571,9 +571,13 @@ class MainActivity : FlutterActivity() {
                     // 配对通知渠道不检查；但配对三项（开发者模式/USB调试/
                     // 无线调试/MIUI通知样式）在支持配对的机型上仍下发——
                     // 已配对手机的无线调试也会被系统关掉，复查必须可见。
+                    // mode=="keepalive" 时是手动授权开启前的保活检查：
+                    // 只返回保活项，不含任何无线调试/功能权限项。
                     val envArgs = call.arguments
                     val reviewMode = envArgs is Map<*, *> &&
                         envArgs["mode"] == "review"
+                    val keepAliveMode = envArgs is Map<*, *> &&
+                        envArgs["mode"] == "keepalive"
                     // Android11+ 且非鸿蒙才具备无线调试配对能力
                     val pairingCapable =
                         Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
@@ -591,7 +595,8 @@ class MainActivity : FlutterActivity() {
                             val payload = EnvCheckManager.envInfo(
                                 context,
                                 pairingCapable = pairingCapable,
-                                checkPairingChannel = !reviewMode
+                                checkPairingChannel = !reviewMode,
+                                keepAliveOnly = keepAliveMode
                             )
                             activity.runOnUiThread { result.success(payload) }
                         }
