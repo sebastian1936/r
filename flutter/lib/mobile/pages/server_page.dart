@@ -691,6 +691,22 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
   /// 关闭控制永远允许，不受此状态限制
   bool _scamAcknowledged = false;
 
+  /// 手动授权兜底模式：无线调试配对/授权在部分 ROM（典型如 ColorOS
+  /// 找不到「禁止权限监控」或开启后仍拦截）无法走通时，退回旧版安卓的
+  /// 传统方式——用户自己去系统设置开无障碍、自己点录屏框。
+  /// 选择持久化（main local option），下次进页面仍停留在手动模式，
+  /// 用户可随时点"返回一键授权"退出。
+  static const _kManualFallbackOption = "adb-manual-fallback";
+  bool _manualMode = false;
+
+  Future<void> _setManualMode(bool on) async {
+    try {
+      await bind.mainSetLocalOption(
+          key: _kManualFallbackOption, value: on ? "Y" : "N");
+    } catch (_) {}
+    if (mounted) setState(() => _manualMode = on);
+  }
+
   /// 恢复权限流程时间线：追加到原生 adb_auth_diag.log（fire-and-forget，
   /// 同一 channel 保序），用于实测"划掉任务重开后转圈"的真实时序
   void _adiag(String text) {
@@ -884,6 +900,13 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
             _startPairing();
             return;
           }
+          if (action == "manual") {
+            // 兜底：改用传统手动授权（手动开无障碍+录屏）
+            _adiag("用户选择手动授权兜底模式");
+            _controlBusy = false;
+            await _setManualMode(true);
+            return;
+          }
           if (action != "retry") {
             // 用户取消：开关保持关闭
             return;
@@ -1005,6 +1028,13 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // 恢复上次选择的手动授权兜底模式（通道不可用时默认一键模式）
+    try {
+      _manualMode =
+          bind.mainGetLocalOption(key: _kManualFallbackOption) == "Y";
+    } catch (_) {
+      _manualMode = false;
+    }
     _refresh();
   }
 
@@ -1032,13 +1062,24 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         final capturePending = (status["capture_pending"] ?? false) as bool;
         grantedNow = (status["granted"] ?? false) as bool;
         final dynamic snap = status["snap"];
+        // 失败通知「手动授权」动作：原生写一次性标记，这里读后即焚，
+        // 自动切到手动授权兜底模式并持久化
+        final manualFallback =
+            (status["manual_fallback"] ?? false) == true;
         setState(() {
           _supported = (status["supported"] ?? false) as bool;
           _granted = grantedNow;
           _lastSnap = snap is Map ? snap : const {};
           _lastPackage = (status["package"] ?? "") as String;
           _lastError = "";
+          if (manualFallback) _manualMode = true;
         });
+        if (manualFallback) {
+          try {
+            bind.mainSetLocalOption(
+                key: _kManualFallbackOption, value: "Y");
+          } catch (_) {}
+        }
         // 回写共享状态：权限页据此在"未授权只显一键入口"与
         // "已授权显示运行时开关"两种布局间切换
         gFFI.serverModel.setAdbAuthState(
@@ -1146,7 +1187,11 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           initialErrorCode: e.code,
         ),
       ).then((ok) async {
-        if (ok == true) await _onPairingSucceeded();
+        if (ok == true) {
+          await _onPairingSucceeded();
+        } else if (ok == "manual") {
+          await _setManualMode(true);
+        }
       });
     } catch (_) {
       if (!mounted) return;
@@ -1154,7 +1199,11 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         context: context,
         builder: (_) => const _AdbPairDialog(),
       ).then((ok) async {
-        if (ok == true) await _onPairingSucceeded();
+        if (ok == true) {
+          await _onPairingSucceeded();
+        } else if (ok == "manual") {
+          await _setManualMode(true);
+        }
       });
     }
   }
@@ -1167,6 +1216,108 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     await _refresh(delayedRescan: true);
     checkService();
     gFFI.serverModel.checkAndroidPermission();
+  }
+
+  /// 手动授权兜底模式 UI：回到旧版安卓的传统流程——用户自己在系统
+  /// 无障碍设置里开服务、自己在录屏弹窗点「立即开始」，不依赖
+  /// WRITE_SECURE_SETTINGS / 无线调试配对
+  Widget _buildManualMode(ServerModel serverModel) {
+    final hasAudioPermission = androidVersion >= 30;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          const Icon(Icons.touch_app_outlined,
+                  size: 20, color: Colors.blueGrey)
+              .marginOnly(right: 8),
+          const Expanded(
+            child: Text("手动授权（兼容模式）",
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              minimumSize: const Size(0, 32),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            onPressed: () => _setManualMode(false),
+            child: const Text("返回无线调试一键授权",
+                style: TextStyle(fontSize: 12)),
+          ),
+        ]),
+        Container(
+          width: double.maxFinite,
+          margin: const EdgeInsets.only(bottom: 6),
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: Colors.blueGrey.withOpacity(0.07),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Colors.blueGrey.withOpacity(0.25)),
+          ),
+          child: const Text(
+            "无线调试配对/授权在你的机型上走不通时，按下面顺序手动操作"
+            "（与旧版安卓相同）：\n"
+            "1. 先点「Input Control / 输入控制」，在系统无障碍设置里"
+            "找到本应用并开启服务\n"
+            "2. 再点「Screen Capture / 屏幕共享」，在系统录屏弹窗里"
+            "点「立即开始」\n"
+            "重启手机或无障碍被系统关闭后，重新打开这两个开关即可，"
+            "不需要配对；无障碍页面找不到本应用时可先用下方「权限检查」",
+            style: TextStyle(fontSize: 12, height: 1.6),
+          ),
+        ),
+        if (serverModel.mediaOk)
+          ElevatedButton.icon(
+                  style: ButtonStyle(
+                      backgroundColor:
+                          MaterialStateProperty.all(Colors.red)),
+                  icon: const Icon(Icons.stop),
+                  onPressed: serverModel.toggleService,
+                  label: Text(translate("Stop service")))
+              .marginOnly(bottom: 8),
+        PermissionRow(
+            translate("Screen Capture"),
+            serverModel.mediaOk,
+            !serverModel.mediaOk &&
+                    gFFI.userModel.userName.value.isEmpty &&
+                    bind.mainGetLocalOption(key: "show-scam-warning") !=
+                        "N"
+                ? () => showScamWarning(context, serverModel)
+                : serverModel.toggleService),
+        PermissionRow(
+            translate("Input Control"),
+            serverModel.inputOk,
+            // 手动模式：直接跳系统无障碍设置页（showInputWarnAlert），
+            // 不走 toggleInput 里先尝试 adb_enable_input 的长等待；
+            // 关闭仍是瞬时的 stop_input，保持原入口
+            serverModel.inputOk
+                ? serverModel.toggleInput
+                : () {
+                    if (serverModel.callLocked) {
+                      showToast(translate('call_input_locked_tip'));
+                      return;
+                    }
+                    showInputWarnAlert(gFFI);
+                  }),
+        PermissionRow(translate("Transfer file"), serverModel.fileOk,
+            serverModel.toggleFile),
+        if (hasAudioPermission)
+          PermissionRow(translate("Audio Capture"), serverModel.audioOk,
+              serverModel.toggleAudio),
+        PermissionRow(translate("Enable clipboard"),
+            serverModel.clipboardOk, serverModel.toggleClipboard),
+        const SizedBox(height: 10),
+        OutlinedButton.icon(
+            icon: const Icon(Icons.fact_check_outlined, size: 17),
+            style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                minimumSize: const Size(0, 34),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+            onPressed: _openEnvReview,
+            label: const Text("权限检查（自启动/通知/后台/电池）",
+                style: TextStyle(fontSize: 12.5))),
+      ],
+    );
   }
 
   @override
@@ -1205,6 +1356,12 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           ),
         ],
       );
+    }
+
+    // 手动授权兜底模式：与 Android 10 以下/鸿蒙相同的传统两行，
+    // 用户手动去系统设置开无障碍、手动点录屏框
+    if (_manualMode) {
+      return _buildManualMode(serverModel);
     }
 
     // Android 11+：接受控制总开关（统一无障碍 + 录屏授权 + 启动服务）
@@ -1289,6 +1446,14 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
               GestureDetector(
                 onTap: _showDiag,
                 child: const Text("配对没成功？点此诊断",
+                    style: TextStyle(fontSize: 12, color: MyTheme.darkGray)),
+              ),
+            // 兜底：机型限制（如 ColorOS 禁止 ADB 授权）导致配对/授权
+            // 走不通时，退回旧版安卓的手动无障碍+录屏
+            if (!switchOn)
+              GestureDetector(
+                onTap: () => _setManualMode(true),
+                child: const Text("配对不成功？改用手动授权",
                     style: TextStyle(fontSize: 12, color: MyTheme.darkGray)),
               ),
           ],
@@ -1467,6 +1632,21 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
           "仅连 Wi-Fi 时会显示开启但实际不生效），在开发者选项里打开"
           "「USB 调试（安全设置）」，开完再连回 Wi-Fi。"
           "若开关已显示开启但配对时仍提示未授权，请关掉它、用流量重新打开",
+      true,
+    ],
+    "oppo_disable_monitor": [
+      "禁止权限监控（OPPO/一加/realme 必开）",
+      "ColorOS 没有小米那样的「USB 调试（安全设置）」（部分机型同页"
+          "另有该开关，若有请一并打开）。控制 ADB 授权的是开发者选项"
+          "最底部的「禁止权限监控」：打开它，然后【重启手机】才生效。"
+          "不打开会出现「配对成功但授权失败」。部分版本打开该开关需要"
+          "登录 HeyTap 账号、插 SIM 并用移动数据校验",
+      true,
+    ],
+    "vivo_usb_simulate": [
+      "USB 模拟点击（vivo/iQOO 必开）",
+      "开发者选项里打开「USB 模拟点击」（部分版本名为「安全调试」），"
+          "不打开会出现「配对成功但授权失败」",
       true,
     ],
     "wifi_connected": [
@@ -1670,9 +1850,31 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
             "开发者选项 →「无线调试」页面停留 5～10 秒（不要马上退出），"
             "再点重试；仍失败就把无线调试关掉重新打开，再停留几秒后重试";
       case "shell_put_denied":
-        return "小米/红米手机还需要打开开发者选项里的「USB 调试（安全设置）」"
-            "（允许通过 USB 调试修改权限或模拟点击；部分版本要求登录小米账号"
-            "并插入 SIM 卡后才能打开）。打开后点重试";
+        // 不同 ROM 拦截 ADB 授权的开关不一样，按原生识别到的品牌给准确指引，
+        // 避免 OPPO 用户照着小米教程找不到开关
+        switch (_brand) {
+          case "oppo":
+            return "OPPO/一加/realme 手机：到开发者选项最底部打开「禁止权限监控」，"
+                "打开后【必须重启手机】再生效，重启完点重试；若同页还有"
+                "「USB 调试（安全设置）」也一并打开（部分版本需登录 "
+                "HeyTap 账号、插 SIM 用移动数据才能开启）。"
+                "如果重启后仍然失败，可点下方「改用手动授权」，像旧版安卓一样"
+                "手动开启无障碍和录屏";
+          case "vivo":
+            return "vivo/iQOO 手机：到开发者选项里打开「USB 模拟点击」"
+                "（部分版本名为「安全调试」），打开后点重试。"
+                "如果仍失败，可点下方「改用手动授权」，手动开启无障碍和录屏";
+          case "xiaomi":
+            return "小米/红米手机还需要打开开发者选项里的「USB 调试（安全设置）」"
+                "（允许通过 USB 调试修改权限或模拟点击；部分版本要求登录小米账号"
+                "并插入 SIM 卡后才能打开）。打开后点重试。仍失败可点下方"
+                "「改用手动授权」，手动开启无障碍和录屏";
+          default:
+            return "系统禁止了 ADB 授权：请到开发者选项里找「USB 调试（安全设置）/"
+                "禁止权限监控/USB 模拟点击」类开关并打开（部分品牌需重启手机），"
+                "然后点重试。也可以点下方「改用手动授权」，像旧版安卓一样"
+                "手动开启无障碍和录屏";
+        }
       case "shell_verify_failed":
         return "系统没有确认权限生效。请把开发者选项里的「无线调试」关掉再"
             "重新打开，等几秒后点重试；仍失败请重启一次手机再试";
@@ -1829,6 +2031,25 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
                       Text(
                         _retryHint,
                         style: const TextStyle(fontSize: 12, height: 1.5),
+                      ),
+                      // 兜底：无线调试怎么都授权不成功（如 ColorOS 开关
+                      // 被隐藏/开启后仍拦截），退回旧版安卓的手动模式
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton(
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 2, vertical: 4),
+                            minimumSize: const Size(0, 32),
+                            tapTargetSize:
+                                MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          onPressed: () =>
+                              Navigator.of(context).pop("manual"),
+                          child: const Text(
+                              "改用手动授权（手动开无障碍 + 录屏）",
+                              style: TextStyle(fontSize: 12)),
+                        ),
                       ),
                       if (widget.failMode != null ||
                           widget.failDetail != null)
@@ -2131,6 +2352,23 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
                 label: const Text("打开通知设置", style: TextStyle(fontSize: 12)),
               ),
             ),
+          // 兜底：配对成功但系统禁止授权等情况下，放弃一键授权，
+          // 退回手动开无障碍+录屏的传统模式
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              style: TextButton.styleFrom(
+                foregroundColor: Colors.black87,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                minimumSize: const Size(0, 36),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              onPressed: () => Navigator.of(context).pop("manual"),
+              child: const Text(
+                  "多次失败？改用手动授权（手动开无障碍 + 录屏）",
+                  style: TextStyle(fontSize: 12)),
+            ),
+          ),
         ],
       ),
     );
@@ -2158,6 +2396,24 @@ class _AdbPairDialogState extends State<_AdbPairDialog> {
             ),
             onPressed: _busy ? null : _openNotificationSettings,
             child: const Text("通知栏没有通知？打开系统通知设置",
+                style: TextStyle(fontSize: 12)),
+          ),
+        ),
+        // 主动兜底入口：机型受限/不想配对时直接走旧版手动流程
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            style: TextButton.styleFrom(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 2, vertical: 6),
+              minimumSize: const Size(0, 32),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            onPressed: _busy
+                ? null
+                : () => Navigator.of(context).pop("manual"),
+            child: const Text(
+                "手机不支持或配对不成功？改用手动授权（手动开无障碍 + 录屏）",
                 style: TextStyle(fontSize: 12)),
           ),
         ),

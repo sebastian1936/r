@@ -104,6 +104,16 @@ object EnvCheckManager {
             if (isMiui) {
                 items += Item("miui_adb_secure", STATUS_UNKNOWN)
             }
+            // ColorOS（OPPO/一加/realme）：没有统一的「USB 调试（安全设置）」，
+            // 控制 adb shell 授权能力的是开发者选项底部的「禁止权限监控」（需重启），
+            // 状态同样无任何 API 可读，恒 unknown 由用户手动确认。
+            if (isOppo) {
+                items += Item("oppo_disable_monitor", STATUS_UNKNOWN)
+            }
+            // vivo / iQOO：对应开关为「USB 模拟点击」
+            if (isVivo) {
+                items += Item("vivo_usb_simulate", STATUS_UNKNOWN)
+            }
             // 无线调试必须在已连接 Wi-Fi 时才能打开/保持运行，放在它前面
             // 先排查（系统在未连 Wi-Fi 时会直接灰掉或自动关闭无线调试）
             items += Item("wifi_connected", checkWifi(context))
@@ -395,7 +405,8 @@ object EnvCheckManager {
             "wifi_connected" ->
                 launch(appContext, Intent(Settings.ACTION_WIFI_SETTINGS))
 
-            "developer_options", "adb_master", "miui_adb_secure" ->
+            "developer_options", "adb_master", "miui_adb_secure",
+            "oppo_disable_monitor", "vivo_usb_simulate" ->
                 launch(appContext, Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
 
             "notification" -> openNotificationSettings(appContext)

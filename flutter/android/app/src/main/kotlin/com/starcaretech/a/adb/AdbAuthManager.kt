@@ -6,6 +6,7 @@ import android.os.Build
 import android.provider.Settings
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.starcaretech.a.EnvCheckManager
 import com.starcaretech.a.InputService
 import java.io.File
 import java.text.SimpleDateFormat
@@ -492,18 +493,49 @@ object AdbAuthManager {
         return pending
     }
 
+    /** 写入"用户在失败通知上选择了手动授权"标记（由 AdbPairingService 通知动作调用）。
+     *  Flutter 下次 adb_auth_status 读取并消费一次，自动切到手动授权模式。 */
+    fun markManualFallback(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean("manual_fallback", true).apply()
+    }
+
+    /** 读取并清除"手动授权"标记（一次性） */
+    fun consumeManualFallback(context: Context): Boolean {
+        val sp = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val v = sp.getBoolean("manual_fallback", false)
+        if (v) sp.edit().putBoolean("manual_fallback", false).apply()
+        return v
+    }
+
     /** GRANT_RUNTIME_PERMISSIONS 特征错误：国产 ROM 的"USB 调试安全设置"未开。
-     *  只给操作步骤，不讲原理；原始错误仅进日志 */
+     *  只给操作步骤，不讲原理；原始错误仅进日志。
+     *  按识别到的品牌把对应段落置顶（失败通知折叠态只显示前几行，
+     *  避免 OPPO 用户首屏看到小米教程）。 */
     private fun buildRomSecurityHint(rawError: String): String {
-        Log.w(TAG, "ROM 安全开关未开，原始错误：\n$rawError")
-        return "配对成功，但系统禁止 ADB 授权。请到「开发者选项」打开对应开关后重试：\n" +
-            "· 小米 / 红米（澎湃OS/MIUI）：打开「USB 调试（安全设置）」（与「USB 调试」是两个开关）。" +
+        Log.w(TAG, "ROM 安全开关未开(brand=${EnvCheckManager.brandKey})，原始错误：\n$rawError")
+        val xiaomi = "· 小米 / 红米（澎湃OS/MIUI）：打开「USB 调试（安全设置）」（与「USB 调试」是两个开关）。" +
             "该开关需联网到小米服务器校验：必须插 SIM、关 Wi-Fi 用移动数据、并已登录小米账号；" +
-            "若开关已显示开启仍报此错，请关掉它、用流量重新打开后立刻重试\n" +
-            "· OPPO / 一加 / realme：USB 调试（安全设置），或关闭「权限监控」\n" +
-            "· vivo / iQOO：USB 模拟点击\n" +
-            "· 华为 / 荣耀：仅充电模式下允许 ADB 调试\n" +
-            "· 其他品牌：在开发者选项中找「安全 / 权限 / 模拟点击」类开关"
+            "若开关已显示开启仍报此错，请关掉它、用流量重新打开后立刻重试"
+        // ColorOS 系没有统一的「USB 调试（安全设置）」（部分机型不存在），
+        // Shizuku 官方对 ColorOS 的标准解法是开发者选项底部的「禁止权限监控」，且需重启生效
+        val oppo = "· OPPO / 一加 / realme（ColorOS）：到开发者选项最底部打开「禁止权限监控」，" +
+            "打开后【重启手机】再重试；若同页还有「USB 调试（安全设置）」也一并打开" +
+            "（部分版本需登录 HeyTap 账号、插 SIM 用移动数据才能开启）"
+        val vivo = "· vivo / iQOO（OriginOS）：打开「USB 模拟点击」（部分版本名为「安全调试」）"
+        val huawei = "· 华为 / 荣耀：打开「仅充电模式下允许 ADB 调试」"
+        val other = "· 其他品牌：在开发者选项中找「安全 / 权限 / 模拟点击 / 禁止权限监控」类开关"
+        val lead = when (EnvCheckManager.brandKey) {
+            "xiaomi" -> xiaomi
+            "oppo" -> oppo
+            "vivo" -> vivo
+            "huawei" -> huawei
+            "honor" -> huawei
+            else -> other
+        }
+        val rest = listOf(xiaomi, oppo, vivo, huawei, other).filter { it != lead }
+        return "配对成功，但系统禁止 ADB 授权。请按下面第 1 条操作后重试（不同品牌开关位置不同）：\n" +
+            lead + "\n" + rest.joinToString("\n")
     }
 
     /**

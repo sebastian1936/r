@@ -121,6 +121,8 @@ class MainActivity : FlutterActivity() {
         StartWatchdog.stage("MainActivity.onCreate: super 前")
         super.onCreate(savedInstanceState)
         StartWatchdog.stage("MainActivity.onCreate: super 后（引擎首帧初始化完成）")
+        // 失败通知「手动授权」兜底入口（冷启动）
+        handleManualFallbackExtra(intent)
         AdbAuthManager.trace(
             applicationContext,
             "MainActivity#onCreate coldStart=${savedInstanceState == null} " +
@@ -158,6 +160,29 @@ class MainActivity : FlutterActivity() {
         } catch (e: Exception) {
             Log.e(logTag, "show crash dialog fail", e)
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // 失败通知「手动授权」兜底入口（Activity 已在栈顶时）
+        handleManualFallbackExtra(intent)
+    }
+
+    /**
+     * 配对失败通知上的「手动授权」动作：写一次性标记（adb_auth_status 读取消费后，
+     * Flutter 自动切到传统手动授权模式），并停掉仍驻留的配对服务。
+     */
+    private fun handleManualFallbackExtra(intent: Intent?) {
+        if (intent?.getBooleanExtra(AdbPairingService.EXTRA_MANUAL_FALLBACK, false) != true) return
+        AdbAuthManager.markManualFallback(applicationContext)
+        AdbAuthManager.trace(applicationContext, "MainActivity 收到手动授权兜底标记（通知动作）")
+        try {
+            stopService(Intent(this, AdbPairingService::class.java))
+        } catch (e: Exception) {
+            Log.w(logTag, "stop pairing service failed", e)
+        }
+        // 一次性 extra，消费后清掉，避免旋转/重建重复触发
+        intent.removeExtra(AdbPairingService.EXTRA_MANUAL_FALLBACK)
     }
 
     override fun onDestroy() {
@@ -368,6 +393,8 @@ class MainActivity : FlutterActivity() {
                             "supported" to AdbAuthManager.isSupported(),
                             "granted" to granted,
                             "capture_pending" to AdbAuthManager.peekCapturePending(context),
+                            // 失败通知「手动授权」一次性兜底标记（读后即焚）
+                            "manual_fallback" to AdbAuthManager.consumeManualFallback(context),
                             "reason" to (AdbAuthManager.unsupportedReason() ?: ""),
                             // 诊断明细：App 内"配对状态诊断"弹窗展示，供已配对却显示
                             // 未授权时定位（名单实际内容/组件名/三重判据逐项值）

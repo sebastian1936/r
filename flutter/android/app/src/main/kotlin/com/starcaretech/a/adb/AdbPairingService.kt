@@ -39,6 +39,10 @@ class AdbPairingService : Service() {
         private const val ACTION_REPLY = "com.starcaretech.a.adb.REPLY"
         private const val ACTION_STOP = "com.starcaretech.a.adb.STOP"
         private const val ACTION_RETRY = "com.starcaretech.a.adb.RETRY"
+        // 用户放弃配对，回退到传统手动授权（手动开无障碍+录屏）。
+        // 由失败通知动作以 Activity PendingIntent extra 传给 MainActivity
+        const val EXTRA_MANUAL_FALLBACK = "manual_fallback"
+        private const val ACTION_MANUAL_ACTIVITY = "com.starcaretech.a.adb.MANUAL_FALLBACK"
 
         private const val EXTRA_PORT = "port"
         private const val KEY_CODE = "pairing_code"
@@ -211,7 +215,7 @@ class AdbPairingService : Service() {
                 Log.w(TAG, "配对授权失败", e)
                 postResult(
                     success = false,
-                    shortText = "配对或授权失败，点通知上的「重试」再来一次",
+                    shortText = "配对或授权失败：可点「重试」再来一次；机型不支持时点「手动授权」改用传统方式",
                     detail = e.message ?: e.javaClass.name
                 )
                 // 失败后保持服务存活，用户可在通知上直接重试（重新扫配对端口）
@@ -286,6 +290,21 @@ class AdbPairingService : Service() {
         return Notification.Action.Builder(null, "重试", pi).build()
     }
 
+    /** 兜底动作：放弃无线配对，回 App 走传统手动授权（手动开无障碍+录屏）。
+     *  用 Activity PendingIntent（通知动作触发的启动有后台启动豁免），
+     *  extra 由 MainActivity 写入一次性 manual_fallback 标记 */
+    private fun manualAction(): Notification.Action {
+        val pi = PendingIntent.getActivity(
+            this, 13,
+            Intent(this, MainActivity::class.java)
+                .setAction(ACTION_MANUAL_ACTIVITY)
+                .putExtra(EXTRA_MANUAL_FALLBACK, true)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        return Notification.Action.Builder(null, "手动授权", pi).build()
+    }
+
     /** 结果通知以普通通知形式保留（脱离前台服务生命周期），点击可回到 App */
     private fun postResult(success: Boolean, shortText: String, detail: String?) {
         val openPi = PendingIntent.getActivity(
@@ -304,6 +323,7 @@ class AdbPairingService : Service() {
         }
         if (!success) {
             builder.addAction(retryAction())
+            builder.addAction(manualAction())
             builder.addAction(stopAction())
         }
         val notification = builder.build()
