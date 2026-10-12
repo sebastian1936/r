@@ -1927,9 +1927,27 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
           await gFFI.invokeMethod("adb_env_check", envArgs);
       if (seq != _refreshSeq || !mounted) return;
       // 新格式 {brand, brand_label, items:[...]}；兼容旧 List 格式
-      final items = raw is Map && raw["items"] is List
+      var items = raw is Map && raw["items"] is List
           ? raw["items"] as List
           : (raw is List ? raw : const []);
+      // 手动授权的保活检查只允许保活项：客户端白名单硬过滤，
+      // 双保险——即使原生侧参数/版本异常返回了无线调试相关项
+      // （开发者模式/USB调试/无线调试/Wi-Fi/品牌安全开关/通知样式）
+      // 或文件/录音功能项，这里也绝不渲染
+      if (widget.keepAliveCheck) {
+        const keepAliveKeys = {
+          "notification",
+          "battery_optimization",
+          "miui_battery_unrestricted",
+          "overlay",
+          "miui_autostart",
+          "miui_background_start",
+          "samsung_sleep_apps",
+        };
+        items = items
+            .where((e) => e is Map && keepAliveKeys.contains(e["key"]))
+            .toList();
+      }
       setState(() {
         _items = items;
         if (raw is Map) {
