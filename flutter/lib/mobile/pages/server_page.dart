@@ -691,20 +691,134 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
   /// 关闭控制永远允许，不受此状态限制
   bool _scamAcknowledged = false;
 
-  /// 手动授权兜底模式：无线调试配对/授权在部分 ROM（典型如 ColorOS
-  /// 找不到「禁止权限监控」或开启后仍拦截）无法走通时，退回旧版安卓的
-  /// 传统方式——用户自己去系统设置开无障碍、自己点录屏框。
-  /// 选择持久化（main local option），下次进页面仍停留在手动模式，
-  /// 用户可随时点"返回一键授权"退出。
-  static const _kManualFallbackOption = "adb-manual-fallback";
+  /// 授权方式：false=无线调试一键授权（默认）；true=手动授权兼容模式
+  /// （用户自己去系统设置开无障碍、自己点录屏框，适用于 ColorOS 等
+  /// 配对/授权走不通的 ROM）。两种方式可随时相互切换；选择只在当前
+  /// 页面生命周期内有效，每次进入默认无线调试授权。
+  /// 例外：配对失败通知上的「手动授权」动作写一次性原生标记，当次
+  /// 进入页面自动切到手动模式。
   bool _manualMode = false;
 
-  Future<void> _setManualMode(bool on) async {
-    try {
-      await bind.mainSetLocalOption(
-          key: _kManualFallbackOption, value: on ? "Y" : "N");
-    } catch (_) {}
-    if (mounted) setState(() => _manualMode = on);
+  void _switchMode(bool manual) {
+    if (mounted) setState(() => _manualMode = manual);
+  }
+
+  /// 切换授权方式前弹窗说明两种方式的区别，用户确认后再切。
+  /// [toManual] true=无线调试 → 手动；false=手动 → 无线调试
+  Future<void> _confirmSwitchMode({required bool toManual}) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("两种授权方式的区别",
+            style: TextStyle(fontSize: 16)),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildModeExplainBlock(
+                title: "无线调试一键授权（默认，推荐）",
+                recommended: true,
+                highlight: !toManual,
+                lines: const [
+                  ["优点：", "授权持久。只需配对一次（约 30 秒），之后重启"
+                      "手机、升级 App 权限都不丢失；无障碍服务被系统关闭后"
+                      "还能自动恢复，不用重新操作"],
+                  ["缺点：", "首次配对略微麻烦，需要按提示输入一次配对码；"
+                      "小米/OPPO/vivo 等机型还需在开发者选项打开品牌专属"
+                      "安全开关，个别机型可能无法授权"],
+                ],
+              ),
+              const SizedBox(height: 10),
+              _buildModeExplainBlock(
+                title: "手动授权（兼容模式）",
+                recommended: false,
+                highlight: toManual,
+                lines: const [
+                  ["优点：", "相对简单。不用配对，直接在系统设置里打开"
+                      "无障碍服务、再点一次录屏「立即开始」即可"],
+                  ["缺点：", "权限可能掉线。重启手机、App 被系统清理或"
+                      "无障碍服务被杀后，可能需要重新手动开启"],
+                ],
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: Text(translate("Cancel"))),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(toManual ? "改用手动授权" : "改用无线调试授权"),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) _switchMode(toManual);
+  }
+
+  Widget _buildModeExplainBlock({
+    required String title,
+    required bool recommended,
+    required bool highlight,
+    required List<List<String>> lines,
+  }) {
+    final color = highlight ? Colors.blue : Colors.blueGrey;
+    return Container(
+      width: double.maxFinite,
+      padding: const EdgeInsets.all(9),
+      decoration: BoxDecoration(
+        color: color.withOpacity(highlight ? 0.08 : 0.05),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+            color: color.withOpacity(highlight ? 0.5 : 0.2),
+            width: highlight ? 1.4 : 1),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(
+              recommended ? Icons.wifi_tethering : Icons.touch_app_outlined,
+              size: 15,
+              color: color,
+            ),
+            const SizedBox(width: 5),
+            Expanded(
+              child: Text(title,
+                  style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                      color: color)),
+            ),
+            if (highlight)
+              const Text("将切换到此方式",
+                  style: TextStyle(fontSize: 10, color: Colors.blue)),
+          ]),
+          const SizedBox(height: 4),
+          ...lines.map((l) => Padding(
+                padding: const EdgeInsets.only(top: 3),
+                child: Text.rich(TextSpan(children: [
+                  TextSpan(
+                    text: l[0],
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.black87),
+                  ),
+                  TextSpan(
+                    text: l[1],
+                    style: const TextStyle(
+                        fontSize: 12,
+                        height: 1.5,
+                        color: Colors.black54),
+                  ),
+                ])),
+              )),
+        ],
+      ),
+    );
   }
 
   /// 恢复权限流程时间线：追加到原生 adb_auth_diag.log（fire-and-forget，
@@ -901,10 +1015,10 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
             return;
           }
           if (action == "manual") {
-            // 兜底：改用传统手动授权（手动开无障碍+录屏）
-            _adiag("用户选择手动授权兜底模式");
+            // 用户改用传统手动授权（手动开无障碍+录屏），随时可切回
+            _adiag("用户切换到手动授权模式");
             _controlBusy = false;
-            await _setManualMode(true);
+            _switchMode(true);
             return;
           }
           if (action != "retry") {
@@ -1028,13 +1142,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // 恢复上次选择的手动授权兜底模式（通道不可用时默认一键模式）
-    try {
-      _manualMode =
-          bind.mainGetLocalOption(key: _kManualFallbackOption) == "Y";
-    } catch (_) {
-      _manualMode = false;
-    }
+    // 每次进入默认无线调试一键授权，用户可在页面内随时切换手动模式
     _refresh();
   }
 
@@ -1063,7 +1171,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         grantedNow = (status["granted"] ?? false) as bool;
         final dynamic snap = status["snap"];
         // 失败通知「手动授权」动作：原生写一次性标记，这里读后即焚，
-        // 自动切到手动授权兜底模式并持久化
+        // 当次自动切到手动授权模式（不持久化，下次进入仍默认无线调试）
         final manualFallback =
             (status["manual_fallback"] ?? false) == true;
         setState(() {
@@ -1074,12 +1182,6 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           _lastError = "";
           if (manualFallback) _manualMode = true;
         });
-        if (manualFallback) {
-          try {
-            bind.mainSetLocalOption(
-                key: _kManualFallbackOption, value: "Y");
-          } catch (_) {}
-        }
         // 回写共享状态：权限页据此在"未授权只显一键入口"与
         // "已授权显示运行时开关"两种布局间切换
         gFFI.serverModel.setAdbAuthState(
@@ -1190,7 +1292,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         if (ok == true) {
           await _onPairingSucceeded();
         } else if (ok == "manual") {
-          await _setManualMode(true);
+          _switchMode(true);
         }
       });
     } catch (_) {
@@ -1202,7 +1304,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
         if (ok == true) {
           await _onPairingSucceeded();
         } else if (ok == "manual") {
-          await _setManualMode(true);
+          _switchMode(true);
         }
       });
     }
@@ -1234,14 +1336,15 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
             child: Text("手动授权（兼容模式）",
                 style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
           ),
-          TextButton(
+          TextButton.icon(
             style: TextButton.styleFrom(
               padding: const EdgeInsets.symmetric(horizontal: 8),
               minimumSize: const Size(0, 32),
               tapTargetSize: MaterialTapTargetSize.shrinkWrap,
             ),
-            onPressed: () => _setManualMode(false),
-            child: const Text("返回无线调试一键授权",
+            onPressed: () => _confirmSwitchMode(toManual: false),
+            icon: const Icon(Icons.wifi_tethering, size: 15),
+            label: const Text("改用无线调试一键授权",
                 style: TextStyle(fontSize: 12)),
           ),
         ]),
@@ -1442,18 +1545,21 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
                 onPressed: _openEnvReview,
                 label: const Text("权限检查（自启动/通知/后台/电池）",
                     style: TextStyle(fontSize: 12.5))),
+            // 两种授权方式对等可切换：无线调试走不通（如 ColorOS 禁止
+            // ADB 授权）时随时改用传统手动授权，任何状态下都可见
+            OutlinedButton.icon(
+                icon: const Icon(Icons.touch_app_outlined, size: 17),
+                style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    minimumSize: const Size(0, 34),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                onPressed: () => _confirmSwitchMode(toManual: true),
+                label: const Text("改用手动授权",
+                    style: TextStyle(fontSize: 12.5))),
             if (!switchOn && !pairedBefore)
               GestureDetector(
                 onTap: _showDiag,
                 child: const Text("配对没成功？点此诊断",
-                    style: TextStyle(fontSize: 12, color: MyTheme.darkGray)),
-              ),
-            // 兜底：机型限制（如 ColorOS 禁止 ADB 授权）导致配对/授权
-            // 走不通时，退回旧版安卓的手动无障碍+录屏
-            if (!switchOn)
-              GestureDetector(
-                onTap: () => _setManualMode(true),
-                child: const Text("配对不成功？改用手动授权",
                     style: TextStyle(fontSize: 12, color: MyTheme.darkGray)),
               ),
           ],
