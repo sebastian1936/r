@@ -1284,15 +1284,42 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     );
   }
 
-  /// 手动授权模式：点「输入控制/屏幕共享」先弹保活设置检查清单，
-  /// 用户可忽略未开项点「检查完成，去开启」继续原动作；取消则不执行。
-  /// 关闭操作（开关已开）不拦截，直接执行。
+  /// 手动授权模式：点「控制屏幕/观看屏幕」开启时先静默跑一次保活检查——
+  /// 全部已开启则不弹窗直接执行原动作；有未开项才弹清单，用户在清单里
+  /// 开启后自动复查通过会关窗继续，也可点「检查完成，去开启」忽略继续；
+  /// 取消则不执行。关闭操作（开关已开）不拦截，直接执行。
   Future<void> _manualPreCheckThen(VoidCallback action) async {
+    if (await _keepAliveAllPass()) {
+      action();
+      return;
+    }
+    if (!mounted) return;
     final go = await showDialog<bool>(
       context: context,
-      builder: (_) => const _EnvCheckDialog(keepAliveCheck: true),
+      builder: (_) => const _EnvCheckDialog(
+          keepAliveCheck: true, autoProceedWhenPass: true),
     );
     if (go == true) action();
+  }
+
+  /// 静默执行一次保活检查，全部通过（无 off 项）返回 true。
+  /// 三星「防深度休眠」这类无 API 可读的建议项状态恒 unknown，不阻塞；
+  /// 通道异常时保守返回 false（照常弹窗，不因异常静默放行）。
+  Future<bool> _keepAliveAllPass() async {
+    try {
+      final dynamic raw = await gFFI.invokeMethod(
+          "adb_env_check", const {"mode": "keepalive"});
+      final items = raw is Map && raw["items"] is List
+          ? (raw["items"] as List)
+              .where((e) =>
+                  e is Map &&
+                  _EnvCheckDialogState.keepAliveKeys.contains(e["key"]))
+              .toList()
+          : const [];
+      return _EnvCheckDialogState.keepAliveAllPass(items);
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> _launchPairing() async {
@@ -1379,12 +1406,13 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           child: const Text(
             "无线调试配对/授权在你的机型上走不通时，按下面顺序手动操作"
             "（与旧版安卓相同）：\n"
-            "1. 先点「Input Control / 输入控制」，在系统无障碍设置里"
+            "1. 先点「控制屏幕」，在系统无障碍设置里"
             "找到本应用并开启服务\n"
-            "2. 再点「Screen Capture / 屏幕共享」，在系统录屏弹窗里"
+            "2. 再点「观看屏幕」，在系统录屏弹窗里"
             "点「立即开始」\n"
-            "点击开关后会先弹出保活设置检查（自启动/通知/后台/电池），"
-            "可按项开启，也可直接点「检查完成，去开启」跳过。\n"
+            "点击开关后若保活设置（自启动/通知/后台/电池）有未开项，"
+            "会先弹出检查；全部已开启则直接继续，也可点「检查完成，"
+            "去开启」跳过检查。\n"
             "重启手机或无障碍被系统关闭后，重新打开这两个开关即可，"
             "不需要配对。\n"
             "若无障碍列表里找不到本应用：在「已安装的服务/已下载的应用」"
@@ -1713,7 +1741,8 @@ class _EnvCheckDialog extends StatefulWidget {
       this.failMode,
       this.failDetail,
       this.autoContinue = false,
-      this.keepAliveCheck = false})
+      this.keepAliveCheck = false,
+      this.autoProceedWhenPass = false})
       : super(key: key);
 
   /// true=已配对后的复查入口（底部只显示「完成」，不显示开始配对）
@@ -1739,6 +1768,12 @@ class _EnvCheckDialog extends StatefulWidget {
   /// 首刷完成后若所有项目均已开启，窗口自动关闭并返回 true 直接配对
   final bool autoContinue;
 
+  /// true=从手动模式开关点入的保活检查：用户在清单里按项开启后，
+  /// 复查发现全部通过则自动关窗返回 true 继续原动作（跳无障碍页/
+  /// 拉录屏框）。从底部「权限检查」按钮主动打开时保持 false——
+  /// 用户主动查看，即使全部通过也停留展示。
+  final bool autoProceedWhenPass;
+
   @override
   State<_EnvCheckDialog> createState() => _EnvCheckDialogState();
 }
@@ -1748,6 +1783,25 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
   List<dynamic> _items = const [];
   bool _loading = true;
   String _brand = "other";
+
+  /// 手动模式保活检查允许出现的检查项白名单（与原生 keepAliveOnly 对应，
+  /// 客户端再硬过滤一次，防止无线调试/功能权限项串入）
+  static const Set<String> keepAliveKeys = {
+    "notification",
+    "battery_optimization",
+    "miui_battery_unrestricted",
+    "overlay",
+    "miui_autostart",
+    "miui_background_start",
+    "samsung_sleep_apps",
+  };
+
+  /// 保活检查是否全部通过：没有任何 off 项即通过。
+  /// 三星防休眠等无 API 可读的品牌建议项状态恒为 unknown（需用户手动
+  /// 确认），不阻塞自动继续——用户仍可通过底部「权限检查」按钮主动查看。
+  static bool keepAliveAllPass(List<dynamic> items) =>
+      items.isNotEmpty &&
+      items.every((e) => e is Map && e["status"] != "off");
 
   /// 回前台后的退避补查定时器。MIUI/部分 ROM 把"省电策略：无限制"等
   /// 设置写回系统 doze 白名单（isIgnoringBatteryOptimizations）有延迟，
@@ -1935,17 +1989,9 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
       // （开发者模式/USB调试/无线调试/Wi-Fi/品牌安全开关/通知样式）
       // 或文件/录音功能项，这里也绝不渲染
       if (widget.keepAliveCheck) {
-        const keepAliveKeys = {
-          "notification",
-          "battery_optimization",
-          "miui_battery_unrestricted",
-          "overlay",
-          "miui_autostart",
-          "miui_background_start",
-          "samsung_sleep_apps",
-        };
         items = items
-            .where((e) => e is Map && keepAliveKeys.contains(e["key"]))
+            .where(
+                (e) => e is Map && keepAliveKeys.contains(e["key"]))
             .toList();
       }
       setState(() {
@@ -1956,11 +2002,29 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
         _loading = false;
       });
       _maybeAutoContinue(items, allChecked: true);
+      _maybeAutoProceed(items);
     } catch (_) {
       if (seq != _refreshSeq || !mounted) return;
       setState(() => _loading = false);
       // 检查通道异常不阻断配对（与旧版预检查 catch 后直接配对一致）
       _maybeAutoContinue(const [], allChecked: false);
+      // 保活检查通道异常时不自动继续（保守停留，由用户手动点按钮）
+    }
+  }
+
+  /// 手动模式点开关进入的保活检查：用户在清单里按项开启并返回后，
+  /// 退避补查发现已无 off 项时自动关窗返回 true，继续原动作
+  /// （跳系统无障碍页 / 拉录屏授权框），无需再点一次按钮。
+  void _maybeAutoProceed(List<dynamic> items) {
+    if (!widget.keepAliveCheck ||
+        !widget.autoProceedWhenPass ||
+        !mounted) {
+      return;
+    }
+    if (keepAliveAllPass(items)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) Navigator.of(context).pop(true);
+      });
     }
   }
 
