@@ -2,6 +2,7 @@ package com.starcaretech.a
 
 import android.app.Activity
 import android.content.Intent
+import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
@@ -53,8 +54,23 @@ class PermissionRequestTransparentActivity: Activity() {
         InputService.beginConsentWait()
         val mediaProjectionManager =
             getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        val intent = mediaProjectionManager.createScreenCaptureIntent()
-        startActivityForResult(intent, REQ_REQUEST_MEDIA_PROJECTION)
+        // Android 14+ 默认弹"整个屏幕/单个应用"两段式选择框（多一步且
+        // 无障碍自动点选标签在 HyperOS 等 ROM 上不可靠）。按官方文档用
+        // createConfigForDefaultDisplay() 明确声明只投整个显示屏：
+        // 系统跳过应用/整屏选择器，直接回到老样式的"立即开始/取消"
+        // 单确认框，无障碍自动点击即可重新生效。
+        // 最终一次"立即开始"用户确认是系统安全边界，无法用 API 跳过；
+        // 忽略本 config 仍弹选择器的 ROM，由 InputService 的
+        // hasProjectionChoice 兜底检测到后放弃自动点击，交回用户手动。
+        val captureIntent =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                mediaProjectionManager.createScreenCaptureIntent(
+                    MediaProjectionConfig.createConfigForDefaultDisplay()
+                )
+            } else {
+                mediaProjectionManager.createScreenCaptureIntent()
+            }
+        startActivityForResult(captureIntent, REQ_REQUEST_MEDIA_PROJECTION)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

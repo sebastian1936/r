@@ -86,14 +86,14 @@ class InputService : AccessibilityService() {
         /** 透明授权页发起系统录屏确认前调用 */
         @JvmStatic
         fun beginConsentWait() {
-            // Android 14+ 录屏授权框是"整个屏幕/单个应用"选择式：实测自动
-            // 点选标签在 HyperOS 上不可靠（标签命中/选中态识别都可能失败），
-            // 误点风险高。该版本起一律由用户手动选择"整个屏幕"并点开始，
-            // 不做任何自动点击；Android 13 及以下老样式仍自动点"立即开始"
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                Log.i("input service", "Android 14+ 选择式录屏授权框，不启用自动点击")
-                return
-            }
+            // Android 14+ 默认录屏授权框是"整个屏幕/单个应用"选择式，
+            // 自动点选标签在 HyperOS 等 ROM 不可靠。但透明授权页已通过
+            // MediaProjectionConfig.createConfigForDefaultDisplay() 声明
+            // 只投整个显示屏，系统会跳过选择器、直接给老样式的
+            // "立即开始/取消"单确认框，因此全版本统一启用自动点击。
+            // 若个别 ROM 无视 config 仍弹选择器，scanAndClickProjectionDialog
+            // 里的 hasProjectionChoice 会检测到特征文案并放弃自动点击，
+            // 交回用户手动选择，不会误点"单个应用"。
             consentPending = true
             consentSince = System.currentTimeMillis()
             ctx?.startConsentRescue()
@@ -856,7 +856,9 @@ class InputService : AccessibilityService() {
         val pkgOk = projectionDialogPkgs.contains(pkg) || pkg.endsWith(".systemui")
         if (!pkgOk) return
 
-        // 选择式授权框（Android 14+/HyperOS，整个屏幕/单个应用）：
+        // 选择式授权框兜底（正常情况下 Android 14+ 已由
+        // createConfigForDefaultDisplay 跳过；此处只应对无视 config
+        // 仍强弹"整个屏幕/单个应用"的定制 ROM）：
         // 不做任何自动点击，由用户自己选"整个屏幕"并点开始，避免误进
         // "单个应用"选择页（小米13pro/Android15 实测自动点选不可靠）
         if (hasProjectionChoice(root)) {
