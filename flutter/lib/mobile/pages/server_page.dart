@@ -2193,10 +2193,16 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
                     style:
                         TextStyle(fontSize: 12, color: MyTheme.darkGray)),
                 if (status == "unknown")
-                  const Padding(
-                    padding: EdgeInsets.only(top: 2),
-                    child: Text("系统不允许读取此状态，请手动确认是否已开启",
-                        style: TextStyle(fontSize: 11, color: Colors.orangeAccent)),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                        key == "wireless_debug"
+                            ? "部分 vivo/小米机型读不到该状态：只要开发者选项里"
+                                "「无线调试」确实开着，不用管这个问号，直接点"
+                                "下方「开始配对」即可"
+                            : "系统不允许读取此状态，请手动确认是否已开启",
+                        style: const TextStyle(
+                            fontSize: 11, color: Colors.orangeAccent)),
                   ),
               ],
             ),

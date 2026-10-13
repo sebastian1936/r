@@ -116,15 +116,29 @@ object AdbDiscovery {
      * 的 "adb_wifi" 键，读不到开关值；但无线调试开着时 adbd 一定会注册
      * _adb-tls-connect 服务，且端口在回环真实监听——直接探测服务比读
      * 被屏蔽的设置值可靠。顺序：缓存端口 bind 探活（毫秒级）→ 短窗 mDNS
-     * → 固定 5555 兜底。命中同时记住端口，后续 shell 重连可直接复用。
+     * →（可选）独立第二轮 mDNS → 固定 5555 兜底。命中同时记住端口，
+     * 后续 shell 重连可直接复用。
+     *
+     * [extraRoundMs] > 0 时，首轮整窗未发现会用全新的 NsdManager 发现会话
+     * 再扫一轮：部分 ROM（实测 OriginOS）上 NsdManager 冷启动首轮对常驻
+     * connect 服务的 query 响应整窗丢失（start 成功但无任何回调），重开
+     * 一轮发现即可收到。envInfo 等得起几秒的场景传 3000；恢复热路径传 0。
      *
      * @return 可用端口；未发现返回 null
      */
-    fun quickProbeConnectPort(context: Context, timeoutMs: Long = 3_500L): Int? {
+    fun quickProbeConnectPort(
+        context: Context,
+        timeoutMs: Long = 3_500L,
+        extraRoundMs: Long = 0L
+    ): Int? {
         cachedPort(context)?.let { p ->
             if (isLoopbackPortListening(p)) return p
         }
-        val s = findFirst(context, TYPE_CONNECT, timeoutMs = timeoutMs)
+        var s = findFirst(context, TYPE_CONNECT, timeoutMs = timeoutMs)
+        if (s == null && extraRoundMs > 0) {
+            Log.i(TAG, "首轮 mDNS 未发现 connect 服务，${extraRoundMs}ms 内重开一轮发现")
+            s = findFirst(context, TYPE_CONNECT, timeoutMs = extraRoundMs)
+        }
         if (s != null) {
             rememberConnectPort(context, s.port)
             return s.port

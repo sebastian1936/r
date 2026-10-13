@@ -890,12 +890,13 @@ object AdbAuthManager {
      * 无线调试是否真的在运行。必须在非主线程调用（本函数就在 enableInput
      * 的后台线程里）。
      *
-     * 不能只靠 Settings.Global "adb_wifi"：MIUI/HyperOS 部分版本对普通
-     * 应用屏蔽该键，读异常时代码若保守返回 true 就会放行到后面的长扫描，
-     * 用户干等几十秒还看不到"请打开无线调试"的引导。新逻辑：
+     * 不能只靠 Settings.Global "adb_wifi"：MIUI/HyperOS/OriginOS 部分
+     * 版本对普通应用屏蔽该键，读异常时代码若保守返回 true 就会放行到后面
+     * 的长扫描，用户干等几十秒还看不到"请打开无线调试"的引导。新逻辑：
      *  - 键可读且值明确：按值返回（毫秒级）
-     *  - 键读不到（null/异常）：直接做 3.5s mDNS 实测——服务在广播才算开。
-     *    探测命中会记住端口，后续 shell 重连直接复用，总耗时反而更短
+     *  - 键读不到（null/异常）：做两轮 mDNS 实测（3.5s+3s）——首轮在部分
+     *    ROM 冷启动会整窗丢响应，服务在广播才算开。探测命中会记住端口，
+     *    后续 shell 重连直接复用，总耗时反而更短
      */
     private fun isWirelessDebugEnabled(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
@@ -907,7 +908,12 @@ object AdbAuthManager {
         } catch (e: Exception) {
             Log.w(TAG, "读取 adb_wifi 失败，改用 mDNS 实测", e)
         }
-        return AdbDiscovery.quickProbeConnectPort(context) != null
+        // 双轮探测：OriginOS 等 ROM 上 NsdManager 冷启动首轮可能整窗收不到
+        // connect 服务的 query 响应，单轮会把"开着"误判成"关了"，导致
+        // 已配对设备恢复时被错误引导去开开关。真没开时最坏多等约 3 秒。
+        return AdbDiscovery.quickProbeConnectPort(
+            context, timeoutMs = 3_500L, extraRoundMs = 3_000L
+        ) != null
     }
 
     private fun discoverConnect(context: Context, scanTimeoutMs: Long = 15_000L): AdbDiscovery.DiscoveredService? {
