@@ -1064,7 +1064,7 @@ class MainService : Service() {
                 .setContentTitle(if (fused) "录屏权限开启失败" else "录屏授权已失效")
                 .setContentText(
                     if (fused) "请点击重试（已停止自动弹窗）"
-                    else "点击恢复屏幕共享（需要重新确认一次）"
+                    else "点击即可自动恢复，无需手动确认"
                 )
                 .setContentIntent(pendingIntent)
                 // 锁屏/无前台界面时由系统直接展开为全屏授权页
