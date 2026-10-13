@@ -89,10 +89,12 @@ class InputService : AccessibilityService() {
             // Android 14+ 默认录屏授权框是"整个屏幕/单个应用"选择式，
             // 自动点选标签在 HyperOS 等 ROM 不可靠。但透明授权页已通过
             // MediaProjectionConfig.createConfigForDefaultDisplay() 声明
-            // 只投整个显示屏，系统会跳过选择器、直接给老样式的
-            // "立即开始/取消"单确认框，因此全版本统一启用自动点击。
-            // 若个别 ROM 无视 config 仍弹选择器，scanAndClickProjectionDialog
-            // 里的 hasProjectionChoice 会检测到特征文案并放弃自动点击，
+            // 只投整个显示屏，系统会跳过选择器，给只含
+            // "应用范围：整个屏幕"静态标签 + "开始/取消"的简化确认框
+            //（该框也会出现"整个屏幕"字样，但没有"单个应用"入口）。
+            // 若个别 ROM 无视 config 仍弹完整选择器，
+            // scanAndClickProjectionDialog 里的 hasProjectionChoice
+            // 检测到"单个应用/选择应用"备选入口才放弃自动点击，
             // 交回用户手动选择，不会误点"单个应用"。
             consentPending = true
             consentSince = System.currentTimeMillis()
@@ -787,14 +789,16 @@ class InputService : AccessibilityService() {
         "取消", "拒绝", "不要再询问", "cancel", "deny", "don't", "no thanks"
     )
 
-    // Android 14+ 选择式录屏授权框特征文案（HyperOS 等可能在低 API 级别
-    // 设备上也启用新样式）。窗口中一旦出现这些节点，说明需要用户自己选
-    // "整个屏幕"，自动点击一律放弃（新样式不做任何自动操作）
-    private val projectionChoiceTexts = setOf(
-        "整个屏幕", "全部屏幕", "共享整个屏幕", "录制整个屏幕", "单个应用",
-        "指定应用", "单个应用程序", "仅单个应用",
-        "entire screen", "share entire screen", "record entire screen",
-        "single app", "a single app", "share a single app"
+    // 真正的"整个屏幕/单个应用"两步选择器，必然列出"单个应用"一侧的
+    // 备选入口；而 createConfigForDefaultDisplay 生效后的简化确认框也含
+    // 静态标签"应用范围：整个屏幕"（实测 Android 14/15），不能仅凭
+    // "整个屏幕"就判定为选择器，否则会误杀简化框的自动确认。
+    // 因此这里只放"应用范围"一侧的选项文案，命中才放弃自动点击。
+    private val projectionAppChoiceTexts = setOf(
+        "单个应用", "指定应用", "单个应用程序", "仅单个应用",
+        "共享单个应用", "选择应用", "仅共享应用",
+        "single app", "a single app", "share a single app",
+        "select an app", "choose an app", "app only"
     )
 
     private val consentRescue = object : Runnable {
@@ -856,13 +860,14 @@ class InputService : AccessibilityService() {
         val pkgOk = projectionDialogPkgs.contains(pkg) || pkg.endsWith(".systemui")
         if (!pkgOk) return
 
-        // 选择式授权框兜底（正常情况下 Android 14+ 已由
+        // 两步选择器兜底（正常情况下 Android 14+ 已由
         // createConfigForDefaultDisplay 跳过；此处只应对无视 config
-        // 仍强弹"整个屏幕/单个应用"的定制 ROM）：
-        // 不做任何自动点击，由用户自己选"整个屏幕"并点开始，避免误进
-        // "单个应用"选择页（小米13pro/Android15 实测自动点选不可靠）
+        // 仍强弹"整个屏幕/单个应用"选择器的定制 ROM）：
+        // 只有检测到"单个应用/选择应用"备选入口时才放弃，交回用户选择，
+        // 避免误进单应用模式（小米13pro/Android15 实测自动点选不可靠）。
+        // 注意：简化框里的静态文案"应用范围：整个屏幕"不算选择器。
         if (hasProjectionChoice(root)) {
-            Log.i(logTag, "检测到选择式录屏授权框（整个屏幕/单个应用），放弃自动点击")
+            Log.i(logTag, "检测到两步式录屏授权选择器（含单个应用入口），放弃自动点击")
             return
         }
 
@@ -884,12 +889,12 @@ class InputService : AccessibilityService() {
         }
     }
 
-    /** 窗口中是否存在"整个屏幕/单个应用"选择式授权框的特征文案 */
+    /** 窗口中是否存在"单个应用"侧备选入口（两步选择器才有的文案） */
     private fun hasProjectionChoice(node: AccessibilityNodeInfo?): Boolean {
         node ?: return false
         val label = nodeLabel(node).lowercase(Locale.ROOT)
         if (label.isNotEmpty() &&
-            projectionChoiceTexts.any { label == it.lowercase(Locale.ROOT) }
+            projectionAppChoiceTexts.any { label == it.lowercase(Locale.ROOT) }
         ) {
             return true
         }
