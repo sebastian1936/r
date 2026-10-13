@@ -78,6 +78,14 @@ const String kWindowEventGetCachedSessionData = "get_cached_session_data";
 const String kWindowEventOpenMonitorSession = "open_monitor_session";
 
 const String kOptionViewStyle = "view_style";
+
+/// 连接建立后右上角质量监测面板的展示模式（全局自定义 option，默认 auto）：
+/// auto = 显示 15 秒后自动关闭；on = 常驻显示；off = 不显示。
+const String kOptionQualityMonitorMode = "quality-monitor-mode";
+const String kQualityMonitorAuto = "auto";
+const String kQualityMonitorOn = "on";
+const String kQualityMonitorOff = "off";
+
 const String kOptionScrollStyle = "scroll_style";
 const String kOptionEdgeScrollEdgeThickness = "edge-scroll-edge-thickness";
 const String kOptionImageQuality = "image_quality";

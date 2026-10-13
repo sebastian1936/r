@@ -3317,7 +3317,9 @@ class QualityMonitorModel with ChangeNotifier {
   WeakReference<FFI> parent;
 
   QualityMonitorModel(this.parent);
-  // _showOption：用户手动勾选（持久化）；_showAuto：建立连接后自动展示 15 秒
+  // _showOption：用户在工具栏手动勾选（逐会话，Rust 侧持久化）；
+  // _showAuto：建立连接后按全局设置自动展示（auto 模式 15 秒后隐藏，
+  // on 模式常驻，off 模式不展示）
   var _showOption = false;
   var _showAuto = false;
   Timer? _autoHideTimer;
@@ -3325,6 +3327,14 @@ class QualityMonitorModel with ChangeNotifier {
 
   bool get show => _showOption || _showAuto;
   QualityMonitorData get data => _data;
+
+  /// 全局质量监测展示模式（未设置/空值按默认 auto 处理）
+  String get _mode {
+    final v = bind.mainGetOptionSync(key: kOptionQualityMonitorMode);
+    return v == kQualityMonitorOn || v == kQualityMonitorOff
+        ? v
+        : kQualityMonitorAuto;
+  }
 
   checkShowQualityMonitor(SessionID sessionId) async {
     final show = await bind.sessionGetToggleOption(
@@ -3336,15 +3346,30 @@ class QualityMonitorModel with ChangeNotifier {
     }
   }
 
-  /// 建立连接后自动在右上角展示 15 秒；用户手动勾选的常驻显示不受影响。
+  /// 建立连接后按全局设置 [kOptionQualityMonitorMode] 展示质量监测面板：
+  ///  - on：常驻显示（本次连接内不自动隐藏，用户仍可在显示菜单手动关）
+  ///  - off：不自动展示（用户仍可在显示菜单手动开）
+  ///  - auto（默认）：展示 15 秒后自动关闭
+  /// 用户在工具栏手动勾选的常驻显示（_showOption）始终不受影响。
   void showAutoOnConnected(bool secure, bool direct, String streamType) {
     updateConnectionType(secure, direct, streamType);
-    _showAuto = true;
     _autoHideTimer?.cancel();
-    _autoHideTimer = Timer(const Duration(seconds: 15), () {
-      _showAuto = false;
-      notifyListeners();
-    });
+    _autoHideTimer = null;
+    switch (_mode) {
+      case kQualityMonitorOn:
+        _showAuto = true;
+        break;
+      case kQualityMonitorOff:
+        _showAuto = false;
+        break;
+      default:
+        _showAuto = true;
+        _autoHideTimer = Timer(const Duration(seconds: 15), () {
+          _showAuto = false;
+          notifyListeners();
+        });
+    }
+    notifyListeners();
   }
 
   /// 会话关闭时取消自动隐藏计时，避免销毁后回调。

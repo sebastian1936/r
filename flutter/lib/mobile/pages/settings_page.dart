@@ -1068,6 +1068,27 @@ class __DisplayPageState extends State<_DisplayPage> {
                           key: kOptionCodecPreference, value: value);
                     },
             ),
+            // 连接建立后右上角质量监测面板：默认显示 15 秒自动关闭，
+            // 可选常驻显示或完全不显示（全局生效，工具栏手动勾选仍可临时覆盖）
+            _getPopupDialogRadioEntry(
+              title: '连接后质量监测',
+              list: [
+                _RadioEntry('显示 15 秒后自动关闭（默认）', kQualityMonitorAuto),
+                _RadioEntry('始终显示', kQualityMonitorOn),
+                _RadioEntry('不显示', kQualityMonitorOff),
+              ],
+              getter: () {
+                final v =
+                    bind.mainGetOptionSync(key: kOptionQualityMonitorMode);
+                return (v == kQualityMonitorOn || v == kQualityMonitorOff)
+                    ? v
+                    : kQualityMonitorAuto;
+              },
+              asyncSetter: (value) async {
+                await bind.mainSetOption(
+                    key: kOptionQualityMonitorMode, value: value);
+              },
+            ),
           ],
         ),
         SettingsSection(
