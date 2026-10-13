@@ -62,9 +62,10 @@ object AdbAuthManager {
      */
     private const val AWAIT_NATURAL_BIND_MS = 2_500L
 
-    /** 授权失败诊断文件名（位于 App files 目录，可直接从 Android/data 取出） */
+    /** 旧版写在文件管理器可见目录的诊断文件名（仅用于一次性清理历史残留） */
     private const val DIAG_FILE = "adb_auth_diag.log"
-    private const val DIAG_MAX_BYTES = 256 * 1024L
+    /** 诊断时间线内存环形缓冲上限（字符），授权失败时整体上传服务端 */
+    private const val DIAG_MAX_CHARS = 192 * 1024
 
     /** 轮询等待 InputService 完成 onServiceConnected（只能在后台线程调用） */
     private fun awaitBound(timeoutMs: Long): Boolean {
@@ -162,6 +163,7 @@ object AdbAuthManager {
         } catch (e: Exception) {
             Log.w(TAG, "配对失败", e)
             diag(context, "pair failed: ${e.chainText()}")
+            DiagUploader.reportAsync(context, "adb_auth_fail", "pair_failed")
             throw AuthException(
                 "配对失败：请确认 6 位配对码正确、配对页仍在显示后重试\n${e.chainText()}",
                 e
@@ -179,9 +181,10 @@ object AdbAuthManager {
         }
         if (!grantRun.connected) {
             diag(context, "pm grant connect failed:\n${grantRun.attempts.joinToString("\n")}")
+            DiagUploader.reportAsync(context, "adb_auth_fail", "grant_connect_failed")
             throw AuthException(
                 "配对成功，但无法连接无线调试服务。请保持「无线调试」开启后重试。\n\n" +
-                grantRun.attempts.joinToString("\n\n"),
+                    grantRun.attempts.joinToString("\n\n"),
                 null
             )
         }
@@ -250,9 +253,9 @@ object AdbAuthManager {
                 "授权未生效，请关闭「无线调试」后重新打开，再重新配对；仍失败请重启手机后重试"
             else -> "授权失败，请重试。\n$grantOut"
         }
+        DiagUploader.reportAsync(context, "adb_auth_fail", "grant_blocked:${directResult.stage}")
         val diagTrailer =
-            "\n\n技术信息 [${directResult.stage}]：${directResult.detail.take(200).ifEmpty { grantOut.take(200) }}" +
-            "\n诊断日志：Android/data/${context.packageName}/files/adb_auth_diag.log"
+            "\n\n技术信息 [${directResult.stage}]：${directResult.detail.take(200).ifEmpty { grantOut.take(200) }}"
         throw AuthException(baseHint + diagTrailer)
     }
 
@@ -539,55 +542,61 @@ object AdbAuthManager {
     }
 
     /**
-     * 诊断日志文件：优先应用专属外部目录 getExternalFilesDir，
-     * 即 /storage/emulated/0/Android/data/<pkg>/files/adb_auth_diag.log，
-     * 用户用系统文件管理器即可取出（写入不需要任何存储权限）。
-     * 外部存储不可用时退回内部 filesDir（文件管理器不可见）。
+     * 诊断时间线：进程内环形缓冲（单进程，Activity/Service/InputService 共享），
+     * 不再落用户可见文件；授权/恢复失败时由 [DiagUploader] 整体静默上传。
+     * 进程死亡即丢失——真崩溃另有内部私有目录留存（CrashLogger），不靠这份缓冲。
      */
-    private fun diagFile(context: Context): File {
-        val ext = context.getExternalFilesDir(null)
-        return if (ext != null) File(ext, DIAG_FILE)
-        else File(context.filesDir, DIAG_FILE)
-    }
+    private val diagLock = Any()
+    private val diagBuffer = StringBuilder()
 
-    /** 旧版误写到内部 filesDir 的日志：升级后首次写入前一次性搬到外部
-     *  目录，保住升级前（如转圈 bug 现场）已产生的记录。进程内只跑一次。 */
+    /** 旧版把日志写到 getExternalFilesDir/filesDir 的 adb_auth_diag.log，
+     *  升级后首次写诊断时一次性删除（prefs 标记，只跑一次）。 */
     @Volatile
-    private var legacyMigrated = false
+    private var legacyCleaned = false
 
-    private fun migrateLegacyDiagOnce(context: Context, target: File) {
-        if (legacyMigrated) return
-        synchronized(this) {
-            if (legacyMigrated) return
-            legacyMigrated = true
+    private fun cleanupLegacyDiagFileOnce(context: Context) {
+        if (legacyCleaned) return
+        synchronized(diagLock) {
+            if (legacyCleaned) return
+            legacyCleaned = true
             try {
-                val legacy = File(context.filesDir, DIAG_FILE)
-                if (legacy.exists() && legacy.length() > 0 &&
-                    !(target.exists() && target.length() > 0)
-                ) {
-                    legacy.copyTo(target, overwrite = false)
-                    Log.i(TAG, "已迁移旧诊断日志到外部目录 ${target.absolutePath}")
+                val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                if (prefs.getBoolean("diag_legacy_cleaned", false)) return
+                runCatching { File(context.filesDir, DIAG_FILE).delete() }
+                runCatching {
+                    context.getExternalFilesDir(null)?.let { File(it, DIAG_FILE).delete() }
                 }
+                prefs.edit().putBoolean("diag_legacy_cleaned", true).apply()
             } catch (e: Exception) {
-                Log.w(TAG, "迁移旧诊断日志失败", e)
+                Log.w(TAG, "清理旧诊断日志失败", e)
             }
         }
     }
 
     private fun diag(context: Context, text: String) {
         try {
-            val f = diagFile(context)
-            runCatching { f.parentFile?.mkdirs() }
-            migrateLegacyDiagOnce(context, f)
-            if (f.exists() && f.length() > DIAG_MAX_BYTES) runCatching { f.delete() }
             val ts = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
             val pid = android.os.Process.myPid()
             val up = android.os.SystemClock.elapsedRealtime()
-            f.appendText("===== $ts pid=$pid up=${up}ms =====\n$text\n\n")
+            val entry = "===== $ts pid=$pid up=${up}ms =====\n$text\n\n"
+            synchronized(diagLock) {
+                diagBuffer.append(entry)
+                if (diagBuffer.length > DIAG_MAX_CHARS) {
+                    // 超限丢弃头部：截到 3/4 容量之后的下一条记录边界，避免半行
+                    val cut = diagBuffer.length - DIAG_MAX_CHARS * 3 / 4
+                    val nl = diagBuffer.indexOf("\n\n", cut)
+                    if (nl >= 0) diagBuffer.delete(0, nl + 2)
+                    else diagBuffer.delete(0, cut)
+                }
+            }
+            cleanupLegacyDiagFileOnce(context)
         } catch (e: Exception) {
-            Log.w(TAG, "diag 落盘失败", e)
+            Log.w(TAG, "diag 写入缓冲失败", e)
         }
     }
+
+    /** 当前诊断时间线快照（上报用） */
+    fun diagSnapshot(): String = synchronized(diagLock) { diagBuffer.toString() }
 
     /** 供 InputService / MainActivity 等外部类追加同一份诊断时间线 */
     @JvmStatic

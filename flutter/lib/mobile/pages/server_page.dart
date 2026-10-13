@@ -821,8 +821,8 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     );
   }
 
-  /// 恢复权限流程时间线：追加到原生 adb_auth_diag.log（fire-and-forget，
-  /// 同一 channel 保序），用于实测"划掉任务重开后转圈"的真实时序
+  /// 恢复权限流程时间线：追加到原生进程内诊断缓冲（fire-and-forget，
+  /// 同一 channel 保序），授权失败时随设备信息静默上传服务端，不落本地文件
   void _adiag(String text) {
     try {
       gFFI.invokeMethod("adb_diag", {"text": text});

@@ -44,6 +44,17 @@ import com.starcaretech.a.adb.HarmonyOsDetector
 class MainActivity : FlutterActivity() {
     companion object {
         var flutterMethodChannel: MethodChannel? = null
+
+        /** enableInput 的技术性失败模式：静默上传诊断（正常引导分支不在内） */
+        private val INPUT_FAIL_REPORT_MODES = setOf(
+            "local_failed",
+            "shell_no_service",
+            "shell_rejected",
+            "shell_put_denied",
+            "shell_verify_failed",
+            "shell_connect_error"
+        )
+
         private var _rdClipboardManager: RdClipboardManager? = null
         val rdClipboardManager: RdClipboardManager?
             get() = _rdClipboardManager;
@@ -131,34 +142,6 @@ class MainActivity : FlutterActivity() {
         if (_rdClipboardManager == null) {
             _rdClipboardManager = RdClipboardManager(getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
             FFI.setClipboardManager(_rdClipboardManager!!)
-        }
-        // 上次发生崩溃（Java/native 疑似）时弹窗，一键分享完整日志定位问题
-        window.decorView.postDelayed({ showLastCrashDialogIfAny() }, 1200)
-    }
-
-    private fun showLastCrashDialogIfAny() {
-        val crashText = CrashLogger.consumeIfNew(this) ?: return
-        try {
-            val preview = crashText.take(1500)
-            android.app.AlertDialog.Builder(this)
-                .setTitle("程序上次异常退出")
-                .setMessage("已自动记录崩溃日志，点「分享日志」可发给开发者定位。\n\n$preview")
-                .setPositiveButton("分享日志") { _, _ ->
-                    val send = Intent(Intent.ACTION_SEND).apply {
-                        type = "text/plain"
-                        putExtra(Intent.EXTRA_SUBJECT, "Rust-Desk 崩溃日志")
-                        // Binder 事务有 1MB 上限，截断到安全范围
-                        putExtra(Intent.EXTRA_TEXT, crashText.take(90_000))
-                    }
-                    runCatching {
-                        startActivity(Intent.createChooser(send, "分享崩溃日志"))
-                    }
-                }
-                .setNegativeButton("关闭", null)
-                .setCancelable(true)
-                .show()
-        } catch (e: Exception) {
-            Log.e(logTag, "show crash dialog fail", e)
         }
     }
 
@@ -631,6 +614,12 @@ class MainActivity : FlutterActivity() {
                     thread {
                         val r = AdbAuthManager.enableInput(context)
                         Log.i("AdbAuth", "enableInput result=$r snap=${AdbAuthManager.statusSnapshot(context)}")
+                        // 技术性失败静默上传诊断；not_paired/wireless_debug_off 是正常引导
+                        // 分支（会走配对引导/提示开无线调试），不上报以免污染样本
+                        if (!r.ok && r.mode in INPUT_FAIL_REPORT_MODES) {
+                            com.starcaretech.a.adb.DiagUploader
+                                .reportAsync(context, "enable_input_fail", r.mode)
+                        }
                         // 系统绑定 InputService 有 1~2s 延迟，立即 + 2s 后各推一次状态
                         fun pushInputState() {
                             flutterMethodChannel?.invokeMethod(
@@ -671,7 +660,7 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
                 "adb_diag" -> {
-                    // Flutter 侧时间线落盘到同一份 adb_auth_diag.log
+                    // Flutter 侧时间线追加到同一份进程内诊断缓冲（失败时静默上传）
                     val txt = call.argument<String>("text") ?: ""
                     AdbAuthManager.trace(context, "[Flutter] $txt")
                     result.success(true)

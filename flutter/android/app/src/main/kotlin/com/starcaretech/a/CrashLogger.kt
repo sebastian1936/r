@@ -15,8 +15,10 @@ import java.util.concurrent.TimeUnit
  * 崩溃日志落盘（无 root / 无电脑也能取到）：
  * 1. Java 未捕获异常：异常栈 + logcat(crash+main) 尾部写入 filesDir/crash/；
  * 2. 疑似 native 崩溃（Rust panic/SIGSEGV/SIGABRT，信号杀进程走不了 Java handler）：
- *    下次启动时读 logcat crash 缓冲，命中崩溃标志才落盘，避免每次启动都产生噪音；
- * 3. MainActivity 启动时通过 [consumeIfNew] 取未展示的崩溃文本，弹窗供用户分享。
+ *    下次启动时先看系统记录的最近退出原因，只有信号杀/native 崩溃/ANR
+ *    才读 logcat 缓冲并要求命中崩溃标志才落盘，避免每次启动都产生噪音；
+ * 3. 崩溃文件静默留存供 adb/远程取证，不再对用户弹窗（用户划任务等正常
+ *    退出曾导致频繁误报弹窗）。
  *
  * 同进程 exec logcat 从 Android 4.1 起只能读到本 uid 的日志，正好包含本进程的
  * FATAL EXCEPTION 与 Rust android_logger 输出；native tombstone 正文由系统进程
@@ -43,8 +45,9 @@ object CrashLogger {
         val wasRunning = prefs.getBoolean(KEY_WAS_RUNNING, false)
         prefs.edit().putBoolean(KEY_WAS_RUNNING, true).apply()
         if (wasRunning) {
-            // 上次没有走到"正常退出"标记：可能是 native 崩溃，也可能是被系统/用户杀进程。
-            // 后台扫描 crash 缓冲，只有真的命中崩溃标志才落盘，避免误报。
+            // 上次没有走到"正常退出"标记：可能是 native 崩溃、被系统杀，
+            // 也可能只是用户从最近任务划掉（was_running 无可靠时机复位）。
+            // 扫描内部先按系统退出原因过滤，再看 logcat 崩溃标志。
             Thread {
                 runCatching { captureSuspectNativeCrashIfAny(app) }
             }.start()
@@ -71,7 +74,31 @@ object CrashLogger {
         Log.e(TAG, "Java crash written to ${file.absolutePath}")
     }
 
+    /**
+     * 系统记录的最近一次进程退出是否属于崩溃类（信号杀 2 / native 崩溃 5 / ANR 6）。
+     * Java 崩溃(4)已由 UncaughtExceptionHandler 直接落盘，无需再扫 logcat。
+     * 取不到退出记录时保守返回 true，退回旧的 marker 扫描行为，避免漏报。
+     */
+    @android.annotation.SuppressLint("NewApi")
+    private fun lastExitLooksFatal(ctx: Context): Boolean {
+        val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+            ?: return true
+        val last = runCatching {
+            am.getHistoricalProcessExitReasons(ctx.packageName, 0, 1)?.firstOrNull()
+        }.getOrNull() ?: return true
+        return last.reason in setOf(2, 5, 6)
+    }
+
     private fun captureSuspectNativeCrashIfAny(ctx: Context) {
+        // Android 11+ 以系统记录的"最近一次退出原因"为准：只有信号杀(2)/
+        // native 崩溃(5)/ANR(6) 才继续扫 logcat。用户划任务(10)、强行停止(11)、
+        // 低内存(3)、冻结(14)等直接返回——logcat crash 缓冲是持久环形缓冲，
+        // 历史崩溃残留和正常功能日志会长期存在，不按退出原因过滤必然误报。
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
+            !lastExitLooksFatal(ctx)
+        ) {
+            return
+        }
         val log = dumpLogcat()
         val looksLikeCrash = CRASH_MARKERS.any { log.contains(it, ignoreCase = true) }
         if (!looksLikeCrash) return
@@ -123,9 +150,9 @@ object CrashLogger {
                 }
             }
             prefs.edit().putLong(KEY_LAST_EXIT_TS, maxTs).apply()
-            // 1) 进诊断时间线（用户每次都能在 adb_auth_diag.log 看到）
+            // 1) 进诊断时间线（进程内环形缓冲，授权失败时随诊断静默上传服务端）
             lines.forEach { com.starcaretech.a.adb.AdbAuthManager.trace(ctx, it) }
-            // 2) 崩溃类原因另存 crash 目录，让崩溃分享弹窗能带上
+            // 2) 崩溃类原因另存内部 crash 目录，静默留存待后续分析（不弹窗、不进文件管理器）
             val fatal = fresh.any { it.reason in FATAL_EXIT_REASONS }
             if (fatal) {
                 val dir = crashDir(ctx)
@@ -239,7 +266,7 @@ object CrashLogger {
     private fun timestamp(): String =
         SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
 
-    /** 取出尚未对用户展示过的最新崩溃日志全文；同一份只返回一次。 */
+    /** 取出尚未读取过的最新崩溃日志全文；同一份只返回一次（供以后需要时调用，当前无 UI 弹窗）。 */
     fun consumeIfNew(ctx: Context): String? {
         val dir = File(ctx.filesDir, DIR_NAME)
         val newest = dir.listFiles()
@@ -266,11 +293,12 @@ private val CRASH_MARKERS = listOf(
     "ForegroundServiceDidNotStartInTimeException",
     "ForegroundServiceDidNotStopInTimeException",
     "RemoteServiceException",
-    "MediaProjection",
+    // 注意：不要把 "MediaProjection" 等正常功能日志关键词放进标志表——
+    // 它在 App 正常运行时必然大量出现，曾导致每次启动都误报崩溃。
     "ANR in"
 )
 
-/** 系统历史退出原因中视为"崩溃"的类型（另存 crash 文件并对用户弹窗）。
+/** 系统历史退出原因中视为"崩溃"的类型（另存 crash 文件静默留存，不对用户弹窗）。
  *  用字面量避免依赖可能被 @hide 的常量：
  *  2=SIGNALED(native 信号杀进程) 4=CRASH(Java) 5=CRASH_NATIVE
  *  6=ANR 7=INITIALIZATION_FAILURE。
