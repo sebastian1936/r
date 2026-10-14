@@ -36,6 +36,9 @@ class OnlineStatusWidget extends StatefulWidget {
 class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
   final _svcStopped = Get.find<RxBool>(tag: 'stop-service');
   final _svcIsUsingPublicServer = true.obs;
+  // 连接中(0)的起始时间与超时兜底标记：断网时原生可能一直回0不上报-1
+  DateTime? _connectingSince;
+  final _connectingSlow = false.obs;
   Timer? _updateTimer;
 
   double get em => 14.0;
@@ -173,10 +176,14 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
       msg,
       style: TextStyle(fontSize: em),
     );
-    // 未就绪（服务已启动但信令没注册上）：提供本地网络自检入口
+    // 未就绪（服务已启动但信令没注册上），或连接中持续超时
+    // （飞行模式/半断网时原生状态反复重置回 0，永远不会上报 -1）：
+    // 提供本地网络自检入口
     final showNetCheck = !_controllerOnly &&
         !_svcStopped.value &&
-        stateGlobal.svcStatus.value == SvcStatus.notReady;
+        (stateGlobal.svcStatus.value == SvcStatus.notReady ||
+            (stateGlobal.svcStatus.value == SvcStatus.connecting &&
+                _connectingSlow.value));
     if (!showNetCheck) return text;
     return Row(mainAxisSize: MainAxisSize.min, children: [
       Flexible(child: text),
@@ -196,12 +203,19 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
     final statusNum = status['status_num'] as int;
     if (statusNum == 0) {
       stateGlobal.svcStatus.value = SvcStatus.connecting;
-    } else if (statusNum == -1) {
-      stateGlobal.svcStatus.value = SvcStatus.notReady;
-    } else if (statusNum == 1) {
-      stateGlobal.svcStatus.value = SvcStatus.ready;
+      _connectingSince ??= DateTime.now();
+      _connectingSlow.value = DateTime.now().difference(_connectingSince!) >=
+          kConnectingSlowThreshold;
     } else {
-      stateGlobal.svcStatus.value = SvcStatus.notReady;
+      _connectingSince = null;
+      _connectingSlow.value = false;
+      if (statusNum == -1) {
+        stateGlobal.svcStatus.value = SvcStatus.notReady;
+      } else if (statusNum == 1) {
+        stateGlobal.svcStatus.value = SvcStatus.ready;
+      } else {
+        stateGlobal.svcStatus.value = SvcStatus.notReady;
+      }
     }
     _svcIsUsingPublicServer.value = await bind.mainIsUsingPublicServer();
     try {

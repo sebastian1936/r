@@ -484,6 +484,18 @@ class ServerInfo extends StatelessWidget {
       showToast(translate('Copied'));
     }
 
+    // 网络自检按钮：未就绪，或连接中持续超时（断网时原生可能永远不上报-1）
+    Widget buildCheckNetworkButton() => Align(
+        alignment: Alignment.centerRight,
+        child: TextButton.icon(
+            style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                minimumSize: const Size(0, 32),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+            onPressed: () => showNetworkCheckDialog(context),
+            icon: const Icon(Icons.network_check, size: 18),
+            label: const Text('检查网络')));
+
     Widget ConnectionStateNotification() {
       if (serverModel.connectStatus == -1) {
         return Column(
@@ -497,23 +509,20 @@ class ServerInfo extends StatelessWidget {
                 Expanded(child: Text(translate('not_ready_status')))
               ]),
               // 未就绪大多是网络阻断：提供本地一键自检（DNS/TCP），结果可复制
-              Align(
-                  alignment: Alignment.centerRight,
-                  child: TextButton.icon(
-                      style: TextButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                          minimumSize: const Size(0, 32),
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap),
-                      onPressed: () => showNetworkCheckDialog(context),
-                      icon: const Icon(Icons.network_check, size: 18),
-                      label: const Text('检查网络')))
+              buildCheckNetworkButton()
             ]);
       } else if (serverModel.connectStatus == 0) {
-        return Row(children: [
+        final connectingRow = Row(children: [
           SizedBox(width: 20, height: 20, child: CircularProgressIndicator())
               .marginOnly(left: 4, right: iconMarginRight),
           Expanded(child: Text(translate('connecting_status')))
         ]);
+        if (!serverModel.connectingSlow) return connectingRow;
+        // 一直转圈（如飞行模式/半断网）：同样给出自检入口
+        return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [connectingRow, buildCheckNetworkButton()]);
       } else {
         return Row(children: [
           const Icon(Icons.check, color: colorPositive, size: iconSize)

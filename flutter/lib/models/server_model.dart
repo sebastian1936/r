@@ -16,6 +16,7 @@ import '../common/formatter/id_formatter.dart';
 import '../desktop/pages/server_page.dart' as desktop;
 import '../desktop/widgets/tabbar_widget.dart';
 import '../mobile/pages/server_page.dart';
+import '../utils/network_check.dart';
 import 'model.dart';
 
 const kLoginDialogTag = "LOGIN";
@@ -52,6 +53,11 @@ class ServerModel with ChangeNotifier {
     notifyListeners();
   }
   int _connectStatus = 0; // Rendezvous Server status
+  // 进入“连接中(0)”状态的起始时间及超时兜底标记。
+  // 断网（尤其飞行模式）时原生 socket 直接报错、状态反复重置回 0，
+  // 永远收不到未就绪(-1)，UI 层据此在连接中超时后露出网络自检入口。
+  DateTime? _connectingSince;
+  bool _connectingSlow = false;
   String _verificationMethod = "";
   String _temporaryPasswordLength = "";
   bool _allowNumericOneTimePassword = false;
@@ -93,6 +99,9 @@ class ServerModel with ChangeNotifier {
   bool get showElevation => _showElevation;
 
   int get connectStatus => _connectStatus;
+
+  /// 连接中(0)持续超过 [kConnectingSlowThreshold] 仍未注册上信令时为 true。
+  bool get connectingSlow => _connectingSlow;
 
   String get verificationMethod {
     final index = [
@@ -178,8 +187,26 @@ class ServerModel with ChangeNotifier {
       final connectionStatus =
           jsonDecode(await bind.mainGetConnectStatus()) as Map<String, dynamic>;
       final statusNum = connectionStatus['status_num'] as int;
+      var statusChanged = false;
       if (statusNum != _connectStatus) {
         _connectStatus = statusNum;
+        statusChanged = true;
+      }
+      if (statusNum == 0) {
+        // App 冷启动时 _connectStatus 初值即为 0，首次轮询补记起点
+        _connectingSince ??= DateTime.now();
+        final slow = DateTime.now().difference(_connectingSince!) >=
+            kConnectingSlowThreshold;
+        if (slow != _connectingSlow) {
+          _connectingSlow = slow;
+          statusChanged = true;
+        }
+      } else if (_connectingSince != null || _connectingSlow) {
+        _connectingSince = null;
+        _connectingSlow = false;
+        statusChanged = true;
+      }
+      if (statusChanged) {
         notifyListeners();
       }
 
@@ -544,6 +571,9 @@ class ServerModel with ChangeNotifier {
   /// Start the screen sharing service.
   Future<void> startService() async {
     _isStart = true;
+    // 重新开始连接计时，避免把服务停止期间的耗时算进慢连接判定
+    _connectingSince = null;
+    _connectingSlow = false;
     notifyListeners();
     parent.target?.ffiModel.updateEventListener(parent.target!.sessionId, "");
     await parent.target?.invokeMethod("init_service");

@@ -56,6 +56,13 @@ _HostPort _parseHostPort(String s, int defaultPort) {
 
 const int _tcpTimeoutMs = 4000;
 
+/// “连接中(0)”状态持续超过该时长仍未注册上信令，即认为可能遭遇网络阻断，
+/// 在状态行兜底露出【检查网络】入口。与原生层 UDP 注册超时窗口对齐
+/// （MIN_REG_TIMEOUT 3s × MAX_FAILS2 4 次 ≈ 12s 后写入未就绪 -1）。
+/// 飞行模式/半断网等场景下 socket 直接报错，原生层只会反复重置回 0、
+/// 永远不会上报 -1，只能由 UI 层按时间兜底。
+const Duration kConnectingSlowThreshold = Duration(seconds: 12);
+
 /// 执行网络检查，每完成一项通过 [onProgress] 回传当前完整列表。
 /// 返回可复制的纯文本报告。
 Future<String> runNetworkCheck({
