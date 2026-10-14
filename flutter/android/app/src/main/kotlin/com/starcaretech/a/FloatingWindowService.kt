@@ -72,10 +72,11 @@ class FloatingWindowService : Service(), View.OnTouchListener {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         try {
-            if (firstCreate) {
-                firstCreate = false
-                onFirstCreate(windowManager)
-            }
+            // 选项（尺寸/透明度等）每次创建都重读：悬浮窗随屏幕共享/前后台切换
+            // 频繁销毁重建，不能像上游那样进程内只读一次，否则设置永远不生效。
+            // 仅默认位置在首次创建时初始化，跨重建保留用户拖动后的位置。
+            onFirstCreate(windowManager, firstCreate)
+            firstCreate = false
             Log.d(logTag, "floating window size: $viewWidth x $viewHeight, transparency: $viewTransparency, lastLayoutX: $lastLayoutX, lastLayoutY: $lastLayoutY, customSvg: $customSvg")
             createView(windowManager)
             handler.postDelayed(runnable, 1000)
@@ -183,7 +184,7 @@ class FloatingWindowService : Service(), View.OnTouchListener {
         moveToScreenSide()
     }
 
-    private fun onFirstCreate(windowManager: WindowManager) {
+    private fun onFirstCreate(windowManager: WindowManager, initPosition: Boolean) {
         val wh = getScreenSize(windowManager)
         val w = wh.first
         val h = wh.second
@@ -222,10 +223,12 @@ class FloatingWindowService : Service(), View.OnTouchListener {
                 customSvg = it
             }
         }
-        // position
-        lastLayoutX = 0
-        lastLayoutY = (wh.second - viewHeight) / 2
-        lastOrientation = resources.configuration.orientation
+        // position：仅首次创建时给默认位置；之后重建保留用户上次拖动/吸附的位置
+        if (initPosition) {
+            lastLayoutX = 0
+            lastLayoutY = (wh.second - viewHeight) / 2
+            lastOrientation = resources.configuration.orientation
+        }
     }
 
 

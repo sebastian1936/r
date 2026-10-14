@@ -641,8 +641,10 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             ? null
             : onFloatingWindowChanged));
 
-    // 悬浮窗图标尺寸档位。极小尺寸（16px 以下）在高密度屏上几乎点不中，
-    // 停服务可走通知栏；尺寸在服务创建时读取，改后需重启屏幕共享服务生效。
+    // 悬浮窗图标尺寸档位（完整图标尺寸；吸附屏幕边缘后只露出一半）。
+    // 极小尺寸（16px 以下）在高密度屏上几乎点不中，停服务可走通知栏。
+    // FloatingWindowService 每次 onCreate 都重读该选项：App 在前台时悬浮窗
+    // 被 MainActivity.onStart 停掉，离开本页（onStop）即重建生效。
     const floatingSizes = [128, 64, 32, 16, 8, 4, 2, 1];
     String currentFloatingSize() {
       final v = int.tryParse(
@@ -651,7 +653,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
     }
 
     enhancementsTiles.add(_getPopupDialogRadioEntry(
-      title: '悬浮窗尺寸（改后重启屏幕共享服务生效）',
+      title: '悬浮窗尺寸（吸附边缘后露出一半，离开本页生效）',
       list: [
         for (final s in floatingSizes)
           _RadioEntry(s == 64 ? '$s px（默认）' : '$s px', '$s'),
