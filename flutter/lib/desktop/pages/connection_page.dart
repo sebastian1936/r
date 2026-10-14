@@ -19,6 +19,7 @@ import '../../common/widgets/peer_tab_page.dart';
 import '../../common/widgets/ios_compat_switch.dart';
 import '../../common/widgets/autocomplete.dart';
 import '../../models/platform_model.dart';
+import '../../utils/network_check.dart';
 import '../../desktop/widgets/material_mod_popup_menu.dart' as mod_menu;
 
 class OnlineStatusWidget extends StatefulWidget {
@@ -168,10 +169,25 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
                 : stateGlobal.svcStatus.value == SvcStatus.notReady
                     ? translate("not_ready_status")
                     : translate('Ready');
-    return Text(
+    final text = Text(
       msg,
       style: TextStyle(fontSize: em),
     );
+    // 未就绪（服务已启动但信令没注册上）：提供本地网络自检入口
+    final showNetCheck = !_controllerOnly &&
+        !_svcStopped.value &&
+        stateGlobal.svcStatus.value == SvcStatus.notReady;
+    if (!showNetCheck) return text;
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      Flexible(child: text),
+      TextButton(
+          style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              minimumSize: const Size(0, 30),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+          onPressed: () => showNetworkCheckDialog(context),
+          child: Text('检查网络', style: TextStyle(fontSize: em))),
+    ]);
   }
 
   updateStatus() async {

@@ -13,6 +13,7 @@ import '../../common/widgets/dialog.dart';
 import '../../consts.dart';
 import '../../models/platform_model.dart';
 import '../../models/server_model.dart';
+import '../../utils/network_check.dart';
 import 'home_page.dart';
 
 class ServerPage extends StatefulWidget implements PageShape {
@@ -485,12 +486,28 @@ class ServerInfo extends StatelessWidget {
 
     Widget ConnectionStateNotification() {
       if (serverModel.connectStatus == -1) {
-        return Row(children: [
-          const Icon(Icons.warning_amber_sharp,
-                  color: colorNegative, size: iconSize)
-              .marginOnly(right: iconMarginRight),
-          Expanded(child: Text(translate('not_ready_status')))
-        ]);
+        return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(children: [
+                const Icon(Icons.warning_amber_sharp,
+                        color: colorNegative, size: iconSize)
+                    .marginOnly(right: iconMarginRight),
+                Expanded(child: Text(translate('not_ready_status')))
+              ]),
+              // 未就绪大多是网络阻断：提供本地一键自检（DNS/TCP），结果可复制
+              Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                      style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          minimumSize: const Size(0, 32),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                      onPressed: () => showNetworkCheckDialog(context),
+                      icon: const Icon(Icons.network_check, size: 18),
+                      label: const Text('检查网络')))
+            ]);
       } else if (serverModel.connectStatus == 0) {
         return Row(children: [
           SizedBox(width: 20, height: 20, child: CircularProgressIndicator())
