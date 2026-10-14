@@ -749,6 +749,9 @@ object AdbAuthManager {
             var r = shellDirectEnableAccessibility(context, identity, force = listed)
             diag(context, "shell 首次执行 ok=${r.ok} stage=${r.stage} detail=${r.detail.take(300)}")
             if (r.ok && awaitBoundTimed(context, AWAIT_BIND_MS, "shell-first")) {
+                // 无障碍已恢复：趁 adbd 还连着，顺手补取持久授权，争取升级
+                // pm_grant，以后关 WiFi/无线调试被系统关闭也能本地离线恢复
+                tryUpgradeToPmGrant(context, identity)
                 diag(context, "enableInput#end=ok(shell-first) cost=${android.os.SystemClock.elapsedRealtime() - tStart}ms")
                 EnableResult(true, "shell")
             } else if (r.ok) {
@@ -758,6 +761,7 @@ object AdbAuthManager {
                 r = shellDirectEnableAccessibility(context, identity, force = true)
                 diag(context, "shell 第二轮执行 ok=${r.ok} stage=${r.stage} detail=${r.detail.take(300)}")
                 if (r.ok && awaitBoundTimed(context, AWAIT_BIND_MS, "shell-rebind")) {
+                    tryUpgradeToPmGrant(context, identity)
                     diag(context, "enableInput#end=ok(shell-rebind) cost=${android.os.SystemClock.elapsedRealtime() - tStart}ms")
                     EnableResult(true, "shell")
                 } else {
@@ -776,6 +780,61 @@ object AdbAuthManager {
             Log.w(TAG, "enableInput shell 路径异常", e)
             diag(context, "enableInput#end=FAIL(shell_connect_error) 异常=${e.chainText()} cost=${android.os.SystemClock.elapsedRealtime() - tStart}ms")
             EnableResult(false, "shell_connect_error", e.chainText())
+        }
+    }
+
+    /**
+     * shell_direct 设备的"模式升级"：shell 通道恢复无障碍成功后，趁 adbd
+     * 还连着补试一次 pm grant。配对当时被 ROM 安全开关拦截（只落到 shell
+     * 直写兜底）的设备，用户后来开过「USB 调试（安全设置）/禁止权限监控」
+     * 后，这里就能把持久授权补上：
+     *  - 成功：grant_mode 升级为 pm_grant，此后关 WiFi、无线调试被系统关闭、
+     *    重启都能本地离线恢复，彻底摆脱对无线调试开关的依赖；进程内自愈
+     *    （AdbSelfHeal 需 WSS）也随之生效
+     *  - 失败：静默保持 shell_direct 现状，不影响本次已成功的无障碍恢复
+     * 不能复用 [saveResult]：它会置 capture_pending 触发一次录屏引导，
+     * 而升级发生在恢复流程在途/完成时，不该再拉录屏框。
+     */
+    private fun tryUpgradeToPmGrant(
+        context: Context,
+        identity: AdbKeyStore.Identity
+    ) {
+        if (isWriteSecureSettingsGranted(context)) return
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        val run = try {
+            runShellWithRetry(context, identity) {
+                "pm grant ${context.packageName} $PERM_WRITE_SECURE_SETTINGS"
+            }
+        } catch (e: Exception) {
+            diag(context, "upgrade pm_grant 异常：${e.chainText()}")
+            return
+        }
+        if (!run.connected) {
+            diag(context, "upgrade pm_grant 跳过：shell 未连接（维持 shell_direct）")
+            return
+        }
+        val out = run.output.trim()
+        // 输出为空才可能成功；非空通常是 SecurityException(GRANT_RUNTIME_PERMISSIONS)
+        var granted = out.isEmpty() && isWriteSecureSettingsGranted(context)
+        if (!granted && out.isEmpty()) {
+            // pm grant 落库可能有延迟（配对流程同款等待，最多 3s）
+            for (i in 1..3) {
+                Thread.sleep(1000)
+                granted = isWriteSecureSettingsGranted(context)
+                if (granted) break
+            }
+        }
+        val cost = android.os.SystemClock.elapsedRealtime() - t0
+        if (granted) {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putBoolean("granted", true)
+                .putString("grant_mode", "pm_grant")
+                .putLong("granted_at", System.currentTimeMillis())
+                .apply()
+            Log.i(TAG, "授权模式升级 shell_direct -> pm_grant（以后离线可恢复）")
+            diag(context, "upgrade shell_direct->pm_grant ok cost=${cost}ms")
+        } else {
+            diag(context, "upgrade pm_grant 未生效（ROM 安全开关仍拦截）cost=${cost}ms out=${out.take(200)}")
         }
     }
 
