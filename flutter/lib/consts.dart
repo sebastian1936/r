@@ -193,6 +193,10 @@ const String kOptionToggleShowMyCursor = "show-my-cursor";
 
 const String kOptionDisableFloatingWindow = "disable-floating-window";
 
+/// 被控端悬浮窗图标尺寸（Android local option，单位 px，默认 64）。
+/// 值由 FloatingWindowService 读取，改后需重启屏幕共享服务才生效。
+const String kOptionFloatingWindowSize = "floating-window-size";
+
 const String kOptionKeepScreenOn = "keep-screen-on";
 
 const String kOptionShowMobileAction = "showMobileActions";

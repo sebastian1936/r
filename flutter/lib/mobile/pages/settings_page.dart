@@ -641,6 +641,32 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             ? null
             : onFloatingWindowChanged));
 
+    // 悬浮窗图标尺寸档位。极小尺寸（16px 以下）在高密度屏上几乎点不中，
+    // 停服务可走通知栏；尺寸在服务创建时读取，改后需重启屏幕共享服务生效。
+    const floatingSizes = [128, 64, 32, 16, 8, 4, 2, 1];
+    String currentFloatingSize() {
+      final v = int.tryParse(
+          bind.mainGetLocalOption(key: kOptionFloatingWindowSize));
+      return (v != null && floatingSizes.contains(v)) ? '$v' : '64';
+    }
+
+    enhancementsTiles.add(_getPopupDialogRadioEntry(
+      title: '悬浮窗尺寸（改后重启屏幕共享服务生效）',
+      list: [
+        for (final s in floatingSizes)
+          _RadioEntry(s == 64 ? '$s px（默认）' : '$s px', '$s'),
+      ],
+      getter: currentFloatingSize,
+      asyncSetter: (_floatingWindowDisabled ||
+              isOptionFixed(kOptionFloatingWindowSize))
+          ? null
+          : (value) async {
+              await bind.mainSetLocalOption(
+                  key: kOptionFloatingWindowSize, value: value);
+              setState(() {});
+            },
+    ));
+
     enhancementsTiles.add(_getPopupDialogRadioEntry(
       title: '保持屏幕开启',
       list: [

@@ -1495,6 +1495,7 @@ class _DisplayState extends State<_Display> {
       scrollStyle(context),
       imageQuality(context),
       codec(context),
+      qualityMonitor(context),
       if (isDesktop) trackpadSpeed(context),
       if (!isWeb) privacyModeImpl(context),
       other(context),
@@ -1681,6 +1682,38 @@ class _DisplayState extends State<_Display> {
           label: 'AV1',
           onChanged: isOptFixed ? null : onChanged),
       ...hwRadios,
+    ]);
+  }
+
+  // 连接建立后右上角质量监测面板：默认显示 15 秒自动关闭，可改常驻/不显示。
+  // 全局 option（与手机端一致），会话工具栏手动勾选仍可临时覆盖。
+  Widget qualityMonitor(BuildContext context) {
+    onChanged(String value) async {
+      await bind.mainSetOption(
+          key: kOptionQualityMonitorMode, value: value);
+      setState(() {});
+    }
+
+    final mode = bind.mainGetOptionSync(key: kOptionQualityMonitorMode);
+    final groupValue = (mode == kQualityMonitorOn || mode == kQualityMonitorOff)
+        ? mode
+        : kQualityMonitorAuto;
+    return _Card(title: '连接后质量监测', children: [
+      _Radio(context,
+          value: kQualityMonitorAuto,
+          groupValue: groupValue,
+          label: '显示 15 秒后自动关闭（默认）',
+          onChanged: onChanged),
+      _Radio(context,
+          value: kQualityMonitorOn,
+          groupValue: groupValue,
+          label: '始终显示',
+          onChanged: onChanged),
+      _Radio(context,
+          value: kQualityMonitorOff,
+          groupValue: groupValue,
+          label: '不显示',
+          onChanged: onChanged),
     ]);
   }
 

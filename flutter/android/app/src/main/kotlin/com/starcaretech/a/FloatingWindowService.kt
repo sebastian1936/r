@@ -47,9 +47,14 @@ class FloatingWindowService : Service(), View.OnTouchListener {
     companion object {
         private val logTag = "floatingService"
         private var firstCreate = true
-        private var viewWidth = 120
-        private var viewHeight = 120
-        private const val MIN_VIEW_SIZE = 32 // size 0 does not help prevent the service from being killed
+        // 默认 64px（上游 120）。尺寸可在被控端设置中选择
+        // 128/64/32/16/8/4/2/1：用户自负可点性——小于约 16px 后基本无法
+        // 点按（吸附边缘后窗口只露半幅，尺寸 1 时宽度为 0，仅作保活占位），
+        // 需要停服务可走通知栏。该可见 overlay 同时是录屏服务的保活手段，
+        // 尺寸 0 会失去保活作用，故最小允许 1 而非 0。
+        private var viewWidth = 64
+        private var viewHeight = 64
+        private const val MIN_VIEW_SIZE = 1 // size 0 does not help prevent the service from being killed
         private const val MAX_VIEW_SIZE = 320
         private var viewUntouchable = false
         private var viewTransparency = 1f // 0 means invisible but can help prevent the service from being killed
@@ -153,7 +158,8 @@ class FloatingWindowService : Service(), View.OnTouchListener {
             flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         }
         layoutParams = WindowManager.LayoutParams(
-            viewWidth / 2,
+            // 尺寸 1 时半幅为 0，窗口宽度兜底 1px（否则窗口非法/不可见）
+            (viewWidth / 2).coerceAtLeast(1),
             viewHeight,
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,
             flags,
@@ -277,7 +283,7 @@ class FloatingWindowService : Service(), View.OnTouchListener {
         if (center) {
             layoutParams.y = (wh.second - viewHeight) / 2
         }
-        layoutParams.width = viewWidth / 2
+        layoutParams.width = (viewWidth / 2).coerceAtLeast(1)
         windowManager.updateViewLayout(floatingView, layoutParams)
         lastLayoutX = layoutParams.x
         lastLayoutY = layoutParams.y
