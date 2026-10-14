@@ -2227,10 +2227,14 @@ impl Connection {
                 if password::approve_mode() == ApproveMode::Password {
                     // 纯密码模式：不弹"接受/拒绝"人工放行框。空密码直接拒绝，
                     // 同样计入失败次数，走穷举限流（check_failure）。
+                    // 错误码必须是 EMPTY 而非 WRONG：主控首连时会"边弹密码框
+                    // 边发空密码"，EMPTY 让主控直接停在密码输入框；回 WRONG
+                    // 会弹"密码错误请重试"并 dismissAll 顶掉输入框，弱网重发
+                    // Hash 时还会反复顶掉用户正在输入的密码。
                     let (failure, res) = self.check_failure(0).await;
                     if res {
                         self.update_failure(failure, false, 0);
-                        self.send_login_error(crate::client::LOGIN_MSG_PASSWORD_WRONG)
+                        self.send_login_error(crate::client::LOGIN_MSG_PASSWORD_EMPTY)
                             .await;
                     }
                 } else if err_msg.is_empty() {

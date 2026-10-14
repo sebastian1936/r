@@ -1889,6 +1889,11 @@ pub struct LoginConfigHandler {
     pub enable_trusted_devices: bool,
     pub record_state: bool,
     pub record_permission: bool,
+    // 上一次登录因空密码/密码错误被对端拒绝、UI 已在等待用户手动输入。
+    // 期间对端重发 Hash（弱网/中继重试）时不再重复弹框、不再自动发空密码，
+    // 否则新错误框会 dismissAll 顶掉用户正在输入的密码框。手动登录/成功/
+    // 重新 initialize 时复位。
+    pub waiting_manual_password: bool,
 }
 
 impl Deref for LoginConfigHandler {
@@ -1916,6 +1921,8 @@ impl LoginConfigHandler {
         shared_password: Option<String>,
         conn_token: Option<String>,
     ) {
+        // 新会话/重新初始化：上次会话残留的"等待手动输密码"状态不得带入
+        self.waiting_manual_password = false;
         let mut id = id;
         if id.contains("@") {
             let mut v = id.split("@");
@@ -2635,6 +2642,8 @@ impl LoginConfigHandler {
     /// * `username` - The name of the peer.
     /// * `pi` - The peer info.
     pub fn handle_peer_info(&mut self, pi: &PeerInfo) {
+        // 登录成功：清除等待手动输密码状态
+        self.waiting_manual_password = false;
         if !pi.version.is_empty() {
             self.version = hbb_common::get_version_number(&pi.version);
         }
@@ -3451,11 +3460,17 @@ pub fn handle_login_error(
     interface: &impl Interface,
 ) -> bool {
     if err == LOGIN_MSG_PASSWORD_EMPTY {
-        lc.write().unwrap().password = Default::default();
+        let mut l = lc.write().unwrap();
+        l.password = Default::default();
+        l.waiting_manual_password = true;
+        drop(l);
         interface.msgbox("input-password", "Password Required", "", "");
         true
     } else if err == LOGIN_MSG_PASSWORD_WRONG {
-        lc.write().unwrap().password = Default::default();
+        let mut l = lc.write().unwrap();
+        l.password = Default::default();
+        l.waiting_manual_password = true;
+        drop(l);
         interface.msgbox("re-input-password", err, "Do you want to enter again?", "");
         true
     } else if err == LOGIN_MSG_2FA_WRONG || err == REQUIRE_2FA {
@@ -3507,6 +3522,17 @@ pub async fn handle_hash(
     peer: &mut Stream,
 ) {
     lc.write().unwrap().hash = hash.clone();
+
+    // 上一次空密码/密码错误已被拒、UI 正在等用户手动输入：对端弱网/中继
+    // 配对重试重发 Hash 时整体静默——既不重复弹框（dismissAll 会顶掉用户
+    // 正在输入的密码框），也不再用任何自动密码源（含已失效的保存密码）
+    // 重发。terminal 会话（Windows UAC 提权）有独立登录框，不做此短路。
+    // 用户手动提交时 handle_login_from_ui 会先清标志并用最新 Hash 登录。
+    let is_terminal = lc.read().unwrap().conn_type.eq(&ConnType::TERMINAL);
+    if !is_terminal && lc.read().unwrap().waiting_manual_password {
+        return;
+    }
+
     // Take care of password application order
 
     // switch_uuid
@@ -3571,7 +3597,6 @@ pub async fn handle_hash(
     lc.write().unwrap().password = password.clone();
 
     let is_terminal_admin = lc.read().unwrap().is_terminal_admin;
-    let is_terminal = lc.read().unwrap().conn_type.eq(&ConnType::TERMINAL);
     if is_terminal && is_terminal_admin {
         if password.is_empty() {
             interface.msgbox("terminal-admin-login-password", "", "", "");
@@ -3593,7 +3618,6 @@ pub async fn handle_hash(
         hasher.finalize()[..].into()
     };
 
-    let is_terminal = lc.read().unwrap().conn_type.eq(&ConnType::TERMINAL);
     let (os_username, os_password) = if is_terminal {
         ("".to_owned(), "".to_owned())
     } else {
@@ -3673,6 +3697,9 @@ pub async fn handle_login_from_ui(
     remember: bool,
     peer: &mut Stream,
 ) {
+    // 用户已主动提交密码：解除"等待手动输入"静默状态。即使本次再错，
+    // handle_login_error 会重新置位，继续保护后续的重发 Hash。
+    lc.write().unwrap().waiting_manual_password = false;
     let mut hash_password = if password.is_empty() {
         let mut password2 = lc.read().unwrap().password.clone();
         if password2.is_empty() {
