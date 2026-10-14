@@ -5,13 +5,13 @@
 //   2) DNS 解析（信令服务器域名；直配 IP 时跳过）
 //   3) TCP 连通：hbbs(默认21116) / hbbr(默认21117) / API(443或端口)
 // 结果可一键复制发给客服。
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/models/platform_model.dart';
 
 import 'endpoints.dart';
 
@@ -65,7 +65,7 @@ Future<String> runNetworkCheck({
   final buf = StringBuffer();
   final ts = DateTime.now().toLocal().toString().substring(0, 19);
   buf.writeln('网络诊断 $ts');
-  buf.writeln('线路模式: ${EndpointsConfig.officialMode ? "官方明文" : "混淆"}');
+  buf.writeln('线路模式: ${EndpointStore.officialMode ? "官方明文" : "混淆"}');
 
   void emit(String name, String state, String detail) {
     final item = NetCheckItem(name, state, detail);
@@ -92,7 +92,7 @@ Future<String> runNetworkCheck({
               : '未知';
   emit('服务注册状态', statusNum == 1 ? 'ok' : 'fail', statusText);
 
-  final ep = EndpointsConfig.active;
+  final ep = EndpointStore.active;
   final idHp = _parseHostPort(ep.id, 21116);
 
   // 2) DNS（直配 IP 无需解析）
@@ -265,35 +265,34 @@ class _NetworkCheckDialogState extends State<_NetworkCheckDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Flexible(
-              child: ListView.separated(
-                shrinkWrap: true,
-                itemCount: _items.length,
-                separatorBuilder: (_, __) => const Divider(height: 12),
-                itemBuilder: (_, i) {
-                  final it = _items[i];
-                  return Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Icon(_icon(it.state), color: _color(it.state), size: 18),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(it.name,
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.w600)),
-                            const SizedBox(height: 2),
-                            Text(it.detail,
-                                style: const TextStyle(fontSize: 12)),
-                          ],
-                        ),
+            // shrinkWrap：条目少时弹窗高度自适应，超出对话框最大高度时内部滚动
+            ListView.separated(
+              shrinkWrap: true,
+              itemCount: _items.length,
+              separatorBuilder: (_, __) => const Divider(height: 12),
+              itemBuilder: (_, i) {
+                final it = _items[i];
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(_icon(it.state), color: _color(it.state), size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(it.name,
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.w600)),
+                          const SizedBox(height: 2),
+                          Text(it.detail,
+                              style: const TextStyle(fontSize: 12)),
+                        ],
                       ),
-                    ],
-                  );
-                },
-              ),
+                    ),
+                  ],
+                );
+              },
             ),
             if (_items.isEmpty)
               const Padding(
