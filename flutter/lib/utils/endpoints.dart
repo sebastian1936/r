@@ -52,7 +52,10 @@ void epDiag(String msg) {
   if (f == null) return;
   try {
     // 超过 1MB 直接截断重写，避免无限增长。
-    final mode = f.lengthSync() > 1024 * 1024 ? FileMode.write : FileMode.append;
+    // 必须先 existsSync：文件不存在时 lengthSync() 会抛 FileSystemException，
+    // 被下面 catch 吞掉，导致日志文件永远无法创建、首次写入静默失败。
+    final tooBig = f.existsSync() && f.lengthSync() > 1024 * 1024;
+    final mode = tooBig ? FileMode.write : FileMode.append;
     f.writeAsStringSync('$line\n', mode: mode, flush: true);
   } catch (_) {}
 }
