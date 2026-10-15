@@ -321,8 +321,9 @@ object AdbDiscovery {
         private var restartCount = 0
         @Volatile private var sawAnyService = false
 
-        /** 实际执行（重新）发起发现；先停旧会话，短暂延迟后由调用方安排，避免同 listener 占用冲突 */
-        private val startDiscovery = object : Runnable {
+        /** 实际执行（重新）发起发现；先停旧会话，短暂延迟后由调用方安排，避免同 listener 占用冲突。
+         *  显式声明 Runnable 类型：它与下方 listener 互相引用，Kotlin 类型推断会递归报错 */
+        private val startDiscovery: Runnable = object : Runnable {
             override fun run() {
                 if (!running) return
                 // 看门狗安排重开后可能立刻就收到了广播：栈是活的，不必再重启
