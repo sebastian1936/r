@@ -7,6 +7,7 @@ import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import java.io.IOException
 import java.net.InetSocketAddress
@@ -313,21 +314,22 @@ object AdbDiscovery {
                 ?.apply { setReferenceCounted(false) }
         }.getOrNull()
 
-        // 冷启动看门狗：部分 ROM 上 NsdManager 首轮发现 start 成功但整窗零回调，
-        // 需重开一轮发现会话才能收到广播。start 后该时长内没收到任何
-        // onServiceFound（栈活着与否的标志），自动重开一轮，最多 maxRestarts 轮。
-        private val watchdogMs = 8_000L
-        private val maxRestarts = 3
-        private var restartCount = 0
-        @Volatile private var sawAnyService = false
+        // 看门狗：配对发现器在 App 退后台后才建立时，部分 ROM（实测 ColorOS 16）
+        // 上 NsdManager 会出现 start 成功但零回调，或 found 后 resolve 永远失败。
+        // 解决手段是周期性重开发现会话（新会话会让系统 mdns 守护进程把已知服务
+        // 立刻重推一次，且重新发 PTR 查询）。以"拿到校验通过的有效端口"为唯一
+        // 成功信号——found 但 resolve 失败/陈旧记录都不算，会继续重开。
+        // shortService 前台服务有约 3 分钟寿命，时间窗取 150 秒留余量。
+        private val watchdogMs = 7_000L
+        private val maxWatchMs = 150_000L
+        private var startElapsed = 0L
+        @Volatile private var gotValidPort = false
 
         /** 实际执行（重新）发起发现；先停旧会话，短暂延迟后由调用方安排，避免同 listener 占用冲突。
          *  显式声明 Runnable 类型：它与下方 listener 互相引用，Kotlin 类型推断会递归报错 */
         private val startDiscovery: Runnable = object : Runnable {
             override fun run() {
-                if (!running) return
-                // 看门狗安排重开后可能立刻就收到了广播：栈是活的，不必再重启
-                if (sawAnyService) return
+                if (!running || gotValidPort) return
                 if (registered) {
                     runCatching { nsdManager.stopServiceDiscovery(listener) }
                     registered = false
@@ -337,8 +339,8 @@ object AdbDiscovery {
                         serviceType, NsdManager.PROTOCOL_DNS_SD, listener
                     )
                 } catch (e: Exception) {
-                    if (running && restartCount < maxRestarts) {
-                        restartCount++
+                    Log.d(TAG, "continuous discoverServices threw: ${e.javaClass.simpleName}, retry in 800ms")
+                    if (running && !gotValidPort) {
                         handler.postDelayed(this, 800)
                     }
                 }
@@ -347,25 +349,32 @@ object AdbDiscovery {
 
         private val watchdog = object : Runnable {
             override fun run() {
-                if (!running || sawAnyService) return
-                // start 成功但零回调（或回调全被多播过滤）：重开一轮发现会话
-                if (restartCount < maxRestarts) {
-                    restartCount++
-                    handler.postDelayed(startDiscovery, 300)
-                    handler.postDelayed(this, watchdogMs)
+                if (!running || gotValidPort) return
+                val elapsed = SystemClock.elapsedRealtime() - startElapsed
+                if (elapsed > maxWatchMs) {
+                    Log.d(TAG, "continuous watchdog gives up after ${elapsed}ms without valid port")
+                    return
                 }
+                // 没拿到有效端口（零回调 / found 后 resolve 失败 / 陈旧记录）：
+                // 重开一轮发现会话，并继续排下一次检查
+                Log.d(TAG, "continuous no valid port in ${watchdogMs}ms, restarting discovery")
+                handler.postDelayed(startDiscovery, 300)
+                handler.postDelayed(this, watchdogMs)
             }
         }
 
         private val listener = object : NsdManager.DiscoveryListener {
-            override fun onDiscoveryStarted(regType: String?) { registered = true }
+            override fun onDiscoveryStarted(regType: String?) {
+                registered = true
+                Log.d(TAG, "continuous discovery started ($serviceType)")
+            }
             override fun onDiscoveryStopped(serviceType: String?) { registered = false }
             override fun onStartDiscoveryFailed(serviceType: String?, errorCode: Int) {
                 registered = false
                 // 部分 ROM 冷启动/后台会失败（ERROR_MAX_LIMIT=4 / INTERNAL_ERROR=0），
-                // 不能空等：短退避后重开发现，重试额度与看门狗共用
-                if (running && restartCount < maxRestarts) {
-                    restartCount++
+                // 不空等：短退避后重开；看门狗还会持续兜底
+                Log.d(TAG, "continuous onStartDiscoveryFailed code=$errorCode, retry in 800ms")
+                if (running && !gotValidPort) {
                     handler.postDelayed(startDiscovery, 800)
                 }
             }
@@ -373,13 +382,16 @@ object AdbDiscovery {
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo?) {
                 if (!running || serviceInfo == null) return
-                // 收到任何服务广播即证明 mDNS 发现栈工作正常，看门狗无须再重开
-                sawAnyService = true
-                // NsdManager 同一时刻只允许一个未完成 resolve；失败忽略即可，服务广播会重复
+                // 注意：found 不代表可用（可能 resolve 失败或命中陈旧记录），
+                // 不能解除看门狗；只有 resolve+校验通过才算成功
+                Log.d(TAG, "continuous service found: ${serviceInfo.serviceName}")
+                // NsdManager 同一时刻只允许一个未完成 resolve；失败忽略即可，
+                // 看门狗重开会话后系统会把已知服务再推一次
                 runCatching { nsdManager.resolveService(serviceInfo, resolveListener) }
             }
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo?) {
+                Log.d(TAG, "continuous service lost: ${serviceInfo?.serviceName}")
                 if (serviceInfo?.serviceName == serviceName) {
                     serviceName = null
                     onLost?.invoke()
@@ -388,11 +400,20 @@ object AdbDiscovery {
         }
 
         private val resolveListener = object : NsdManager.ResolveListener {
-            override fun onResolveFailed(info: NsdServiceInfo?, errorCode: Int) {}
+            override fun onResolveFailed(info: NsdServiceInfo?, errorCode: Int) {
+                Log.d(TAG, "continuous resolve failed code=$errorCode for ${info?.serviceName}")
+            }
             override fun onServiceResolved(info: NsdServiceInfo?) {
                 if (!running || info == null) return
-                val service = toService(info) ?: return
+                val service = toService(info)
+                if (service == null) {
+                    Log.d(TAG, "continuous resolved but rejected (non-local/stale): ${info.host}:${info.port}")
+                    return
+                }
                 serviceName = info.serviceName
+                gotValidPort = true
+                handler.removeCallbacks(watchdog)
+                Log.d(TAG, "continuous valid port: ${service.port}")
                 onValidPort(service.port)
             }
         }
@@ -400,8 +421,8 @@ object AdbDiscovery {
         fun start() {
             if (running) return
             running = true
-            sawAnyService = false
-            restartCount = 0
+            gotValidPort = false
+            startElapsed = SystemClock.elapsedRealtime()
             acquireMulticastLock()
             handler.post {
                 if (running) {

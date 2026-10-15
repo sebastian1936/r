@@ -1281,12 +1281,15 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
       builder: (_) => const _EnvCheckDialog(autoContinue: true),
     );
     if (go != true) return;
-    // 先直达系统「无线调试」页（用户接着点「使用配对码配对设备」），
-    // 再发配对通知——用户在设置页直接下拉通知栏输入配对码即可
+    // 关键时序：必须在 App 仍处于前台时先启动配对发现服务（NsdManager 会话与
+    // 多播锁都在前台状态下建立，避开 ColorOS 等 ROM 对后台新建 mDNS 会话的
+    // 静默过滤），启动成功后再跳系统「无线调试」页。用户接着点
+    // 「使用配对码配对设备」，下拉通知栏输入即可
+    final ok = await _launchPairing();
+    if (!ok) return;
     try {
       await gFFI.invokeMethod("adb_open_env", "wireless_debug");
     } catch (_) {}
-    await _launchPairing();
   }
 
   /// 保活设置复查（已配对状态下也可随时打开清单调整自启动/电池等）。
@@ -1348,12 +1351,15 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
     }
   }
 
-  Future<void> _launchPairing() async {
+  /// 启动通知栏配对服务。成功（服务已在前台建立 mDNS 发现）返回 true；
+  /// 失败时自行弹出兜底配对对话框，返回 false（调用方不应再跳系统页）。
+  Future<bool> _launchPairing() async {
     try {
       await gFFI.invokeMethod("adb_start_pairing", null);
       showToast("请点「使用配对码配对设备」，看到 6 位码后下拉通知栏输入");
+      return true;
     } on PlatformException catch (e) {
-      if (!mounted) return;
+      if (!mounted) return false;
       showDialog<bool>(
         context: context,
         builder: (_) => _AdbPairDialog(
@@ -1367,8 +1373,9 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           _switchMode(true);
         }
       });
+      return false;
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted) return false;
       showDialog<bool>(
         context: context,
         builder: (_) => const _AdbPairDialog(),
@@ -1379,6 +1386,7 @@ class _AdbAuthSectionState extends State<AdbAuthSection>
           _switchMode(true);
         }
       });
+      return false;
     }
   }
 
