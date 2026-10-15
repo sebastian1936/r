@@ -1641,6 +1641,19 @@ pub async fn secure_tcp(conn: &mut Stream, key: &str) -> ResultType<()> {
     if use_ws() {
         return Ok(());
     }
+    // 混淆双栈探针：secure TCP 由服务端先发 key_exchange phase1，服务端无法
+    // 预判本端混淆帧版本。v2 客户端在等 phase1 前主动发一帧 1 字节探针，
+    // 服务端嗅探锁定后按 v2 回 phase1；存量 v1 客户端不发，服务端短超时
+    // （OBFS_TCP_PROBE_MS，默认 400ms）后回退 v1。探针内容无意义，服务端
+    // 预读后直接丢弃，绝不能进业务消息处理。发送失败不致命，继续原握手。
+    if Config::get_obfuscate_key().is_some() {
+        let probe = Bytes::from_static(&[0u8]);
+        match timeout(CONNECT_TIMEOUT, conn.send_bytes(probe)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => log::warn!("Failed to send obfs version probe: {e:?}"),
+            Err(e) => log::warn!("Obfs version probe send timeout: {e:?}"),
+        }
+    }
     let rs_pk = get_rs_pk(key);
     let Some(rs_pk) = rs_pk else {
         bail!("Handshake failed: invalid public key from rendezvous server");
