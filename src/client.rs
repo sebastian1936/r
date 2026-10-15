@@ -3460,11 +3460,22 @@ pub fn handle_login_error(
     interface: &impl Interface,
 ) -> bool {
     if err == LOGIN_MSG_PASSWORD_EMPTY {
-        let mut l = lc.write().unwrap();
-        l.password = Default::default();
-        l.waiting_manual_password = true;
-        drop(l);
-        interface.msgbox("input-password", "Password Required", "", "");
+        let already_waiting = {
+            let mut l = lc.write().unwrap();
+            let already = l.waiting_manual_password;
+            l.password = Default::default();
+            l.waiting_manual_password = true;
+            already
+        };
+        // 空密码是 handle_hash"边弹框边试探"发出的：密码框此刻已经在屏幕上。
+        // 再 msgbox 一次会让 Flutter 侧 enterPasswordDialog → dismissAll 重建
+        // 新空白框，打洞/中继弱网 RTT 内用户已敲入的密码被清空（表现为
+        // "密码没输完框自己刷新/像自动连接"）。仅当框未在等待（异常时序/
+        // 其他入口）时才补弹。WRONG 分支不受影响：那是用户主动提交后密码
+        // 确实错误，旧框此时已关闭，必须弹错误提示。
+        if !already_waiting {
+            interface.msgbox("input-password", "Password Required", "", "");
+        }
         true
     } else if err == LOGIN_MSG_PASSWORD_WRONG {
         let mut l = lc.write().unwrap();
@@ -3608,6 +3619,12 @@ pub async fn handle_hash(
     }
 
     let password = if password.is_empty() {
+        // 边弹框边发空密码（对端可能是"点击接受"模式）。此刻起即进入
+        // "等待手动输入"状态：纯密码模式对端回 EMPTY 时 handle_login_error
+        // 据此跳过二次弹框，避免弱网/中继 RTT 内 dismissAll 顶掉用户正在
+        // 输入的密码框（打洞/中继双线竞争下 RTT 可达数秒）。
+        // 对端若直接接受，PeerInfo 会在 handle_peer_info 中清除该标志。
+        lc.write().unwrap().waiting_manual_password = true;
         // login without password, the remote side can click accept
         interface.msgbox("input-password", "Password Required", "", "");
         Vec::new()
