@@ -383,6 +383,14 @@ class MainService : Service() {
     }
 
     private fun handleScreenStateChanged() {
+        // 用户主动关服后，服务实例可能因 MainActivity 仍 bind 而存活、onDestroy
+        // 不执行，本 receiver 也未注销。此时亮屏/解锁绝不能恢复录屏或重连信令，
+        // 否则 FFI.startService() 会清掉 stop-service 标记并重新注册上线，
+        // 表现为"关闭接受控制后主控依然能连上"。
+        if (serviceDestroyed) {
+            Log.i(logTag, "服务已关闭，忽略亮屏/解锁事件（不恢复录屏/信令）")
+            return
+        }
         if (!_isReady) {
             Log.i(logTag, "亮屏/解锁：尝试用缓存授权静默恢复录屏")
             if (tryRestoreMediaProjection()) {
@@ -470,6 +478,10 @@ class MainService : Service() {
 
     /** 触发 Rust 端 RendezvousMediator 重新注册信令服务器（幂等，带间隔去抖） */
     private fun restartRendezvousMediator() {
+        // 纵深防御：用户关服后任何保活/网络/亮屏路径都不得重新拉起信令。
+        // FFI.startService() 对应 Rust main_start_service()，会清空
+        // stop-service 选项并重新向 hbbs 注册，使设备在开关关闭状态下重新上线。
+        if (serviceDestroyed) return
         val now = SystemClock.elapsedRealtime()
         if (now - lastMediatorRestartMs < MIN_MEDIATOR_RESTART_INTERVAL_MS) {
             Log.d(logTag, "信令重连间隔去抖，跳过")
@@ -1223,6 +1235,11 @@ class MainService : Service() {
         serviceDestroyed = true
         _isReady = false
         _isAudioStart = false
+
+        // 纵深防御：无论从哪个入口调用 destroy，都保证 Rust 信令真正停止
+        // （stop-service=Y + 重启 mediator 后不再向 hbbs 注册）。
+        // 幂等，onTaskRemoved 路径重复调用无副作用。
+        runCatching { FFI.stopService() }
 
         stopCapture()
 
