@@ -301,17 +301,79 @@ object AdbDiscovery {
         private var registered = false
         @Volatile private var serviceName: String? = null
 
+        // 配对期 App 退在后台（前台是系统设置页），部分 ROM（实测 ColorOS/OriginOS）
+        // 的 WiFi 驱动在 App 不持多播锁时直接过滤入站 mDNS 多播，adbd 配对服务
+        // 进入页面时那一小撮主动广播会被整撮丢掉。全程持锁（非引用计数），
+        // stop/release 时释放。一次性 findFirst 路径同样持锁，此处对齐。
+        private val multicastLock = runCatching {
+            context.applicationContext
+                .getSystemService(Context.WIFI_SERVICE)
+                ?.let { it as? WifiManager }
+                ?.createMulticastLock("rustdesk_adb_mdns_cont")
+                ?.apply { setReferenceCounted(false) }
+        }.getOrNull()
+
+        // 冷启动看门狗：部分 ROM 上 NsdManager 首轮发现 start 成功但整窗零回调，
+        // 需重开一轮发现会话才能收到广播。start 后该时长内没收到任何
+        // onServiceFound（栈活着与否的标志），自动重开一轮，最多 maxRestarts 轮。
+        private val watchdogMs = 8_000L
+        private val maxRestarts = 3
+        private var restartCount = 0
+        @Volatile private var sawAnyService = false
+
+        /** 实际执行（重新）发起发现；先停旧会话，短暂延迟后由调用方安排，避免同 listener 占用冲突 */
+        private val startDiscovery = object : Runnable {
+            override fun run() {
+                if (!running) return
+                // 看门狗安排重开后可能立刻就收到了广播：栈是活的，不必再重启
+                if (sawAnyService) return
+                if (registered) {
+                    runCatching { nsdManager.stopServiceDiscovery(listener) }
+                    registered = false
+                }
+                try {
+                    nsdManager.discoverServices(
+                        serviceType, NsdManager.PROTOCOL_DNS_SD, listener
+                    )
+                } catch (e: Exception) {
+                    if (running && restartCount < maxRestarts) {
+                        restartCount++
+                        handler.postDelayed(this, 800)
+                    }
+                }
+            }
+        }
+
+        private val watchdog = object : Runnable {
+            override fun run() {
+                if (!running || sawAnyService) return
+                // start 成功但零回调（或回调全被多播过滤）：重开一轮发现会话
+                if (restartCount < maxRestarts) {
+                    restartCount++
+                    handler.postDelayed(startDiscovery, 300)
+                    handler.postDelayed(this, watchdogMs)
+                }
+            }
+        }
+
         private val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(regType: String?) { registered = true }
             override fun onDiscoveryStopped(serviceType: String?) { registered = false }
             override fun onStartDiscoveryFailed(serviceType: String?, errorCode: Int) {
                 registered = false
-                // 部分 ROM 后台时短暂失败，稍后系统会重试；仍保持 running 状态
+                // 部分 ROM 冷启动/后台会失败（ERROR_MAX_LIMIT=4 / INTERNAL_ERROR=0），
+                // 不能空等：短退避后重开发现，重试额度与看门狗共用
+                if (running && restartCount < maxRestarts) {
+                    restartCount++
+                    handler.postDelayed(startDiscovery, 800)
+                }
             }
             override fun onStopDiscoveryFailed(serviceType: String?, errorCode: Int) {}
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo?) {
                 if (!running || serviceInfo == null) return
+                // 收到任何服务广播即证明 mDNS 发现栈工作正常，看门狗无须再重开
+                sawAnyService = true
                 // NsdManager 同一时刻只允许一个未完成 resolve；失败忽略即可，服务广播会重复
                 runCatching { nsdManager.resolveService(serviceInfo, resolveListener) }
             }
@@ -337,30 +399,52 @@ object AdbDiscovery {
         fun start() {
             if (running) return
             running = true
+            sawAnyService = false
+            restartCount = 0
+            acquireMulticastLock()
             handler.post {
                 if (running) {
-                    runCatching { nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, listener) }
+                    startDiscovery.run()
+                    handler.postDelayed(watchdog, watchdogMs)
                 }
+            }
+        }
+
+        private fun acquireMulticastLock() {
+            runCatching {
+                multicastLock?.let { if (!it.isHeld) it.acquire() }
+            }
+        }
+
+        private fun releaseMulticastLock() {
+            runCatching {
+                multicastLock?.let { if (it.isHeld) it.release() }
             }
         }
 
         fun stop() {
             if (!running) return
             running = false
-            // registered 只在 handler 线程读写，整段 post 过去避免竞态
+            // registered/回调只在 handler 线程读写，整段 post 过去避免竞态
             handler.post {
+                handler.removeCallbacks(watchdog)
+                handler.removeCallbacks(startDiscovery)
                 if (registered) {
                     runCatching { nsdManager.stopServiceDiscovery(listener) }
                     registered = false
                 }
             }
             serviceName = null
+            releaseMulticastLock()
         }
 
         /** 服务彻底销毁时释放线程；之后不可再 start */
         fun release() {
             running = false
+            releaseMulticastLock()
             handler.post {
+                handler.removeCallbacks(watchdog)
+                handler.removeCallbacks(startDiscovery)
                 if (registered) {
                     runCatching { nsdManager.stopServiceDiscovery(listener) }
                     registered = false
