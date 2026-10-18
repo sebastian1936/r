@@ -5,6 +5,7 @@ import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
@@ -14,6 +15,7 @@ import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 
 /**
@@ -299,7 +301,6 @@ object AdbDiscovery {
         private val thread = HandlerThread("AdbNsdContinuous").apply { start() }
         private val handler = Handler(thread.looper)
         @Volatile private var running = false
-        private var registered = false
         @Volatile private var serviceName: String? = null
 
         // 配对期 App 退在后台（前台是系统设置页），部分 ROM（实测 ColorOS/OriginOS）
@@ -314,107 +315,215 @@ object AdbDiscovery {
                 ?.apply { setReferenceCounted(false) }
         }.getOrNull()
 
-        // 看门狗：配对发现器在 App 退后台后才建立时，部分 ROM（实测 ColorOS 16）
-        // 上 NsdManager 会出现 start 成功但零回调，或 found 后 resolve 永远失败。
-        // 解决手段是周期性重开发现会话（新会话会让系统 mdns 守护进程把已知服务
-        // 立刻重推一次，且重新发 PTR 查询）。以"拿到校验通过的有效端口"为唯一
-        // 成功信号——found 但 resolve 失败/陈旧记录都不算，会继续重开。
-        // shortService 前台服务有约 3 分钟寿命，时间窗取 150 秒留余量。
-        private val watchdogMs = 7_000L
+        // 看门狗 + 双通道发现，针对 ColorOS 16 / OriginOS 等 ROM 实测顽疾：
+        // 1) 系统 mdns 守护进程对"新建立的发现会话"会立即重推缓存里的已知服务，
+        //    但重开会话必须使用【全新的 listener 对象】——实测 ColorOS 16 上
+        //    stopServiceDiscovery 后用同一 listener 立刻 discoverServices，新会话
+        //    会被悄悄挂死（onDiscoveryStarted 照回调，之后零事件），怎么重开都
+        //    救不活，表现为首次配对永远"正在搜索"、重建发现器（第二次点击）才好。
+        // 2) API 34+ 额外注册 registerServiceInfoCallback：走系统服务另一条实现
+        //    路径，注册即推缓存、信息已解析（无需 resolveService），与经典通道
+        //    互为冗余，任一通道校验通过即成功。
+        // 以"拿到校验通过的有效端口"为唯一成功信号——found 但 resolve 失败/
+        // 陈旧记录都不算，会继续轮换。shortService 前台服务约 3 分钟寿命，窗取 150s。
+        private val watchdogMs = 6_000L
         private val maxWatchMs = 150_000L
         private var startElapsed = 0L
         @Volatile private var gotValidPort = false
 
-        /** 实际执行（重新）发起发现；先停旧会话，短暂延迟后由调用方安排，避免同 listener 占用冲突。
-         *  显式声明 Runnable 类型：它与下方 listener 互相引用，Kotlin 类型推断会递归报错 */
-        private val startDiscovery: Runnable = object : Runnable {
-            override fun run() {
-                if (!running || gotValidPort) return
-                if (registered) {
-                    runCatching { nsdManager.stopServiceDiscovery(listener) }
-                    registered = false
+        // ------------------------------------------------- 经典通道（按代轮换）
+        private class LegacySession(val gen: Int, val listener: NsdManager.DiscoveryListener) {
+            @Volatile var active = false
+        }
+        private var legacy: LegacySession? = null
+        private var legacyKickScheduled = false
+
+        private val kickLegacy = Runnable {
+            legacyKickScheduled = false
+            if (running && !gotValidPort) restartLegacy()
+        }
+
+        private fun scheduleKickLegacy(delayMs: Long) {
+            if (!running || gotValidPort || legacyKickScheduled) return
+            legacyKickScheduled = true
+            handler.postDelayed(kickLegacy, delayMs)
+        }
+
+        /**
+         * 用【全新 listener】开新一代发现会话，再异步停掉旧代；只在 handler 线程调用。
+         * 先建新后停旧：新会话注册的瞬间系统 mdns 就会把缓存里的已知服务重推一次，
+         * 这是 ColorOS 16 上唯一可靠的拿到配对服务的时机，不能先停后等。
+         * 新旧并存仅毫秒级，系统对同 App 发现会话有 ~10 个名额，并存最多 2 个。
+         */
+        private fun restartLegacy() {
+            if (!running || gotValidPort) return
+            val old = legacy
+            val newGen = (old?.gen ?: 0) + 1
+            startLegacy(newGen)
+            if (old != null && old.active) {
+                runCatching { nsdManager.stopServiceDiscovery(old.listener) }
+            }
+        }
+
+        private fun startLegacy(gen: Int) {
+            if (!running || gotValidPort) return
+            if (legacy?.gen == gen) return
+            val listener = object : NsdManager.DiscoveryListener {
+                override fun onDiscoveryStarted(regType: String?) {
+                    if (legacy?.gen == gen) {
+                        legacy?.active = true
+                        Log.d(TAG, "legacy gen#$gen started ($serviceType)")
+                    }
                 }
-                try {
-                    nsdManager.discoverServices(
-                        serviceType, NsdManager.PROTOCOL_DNS_SD, listener
-                    )
-                } catch (e: Exception) {
-                    Log.d(TAG, "continuous discoverServices threw: ${e.javaClass.simpleName}, retry in 800ms")
-                    if (running && !gotValidPort) {
-                        handler.postDelayed(this, 800)
+                override fun onDiscoveryStopped(st: String?) {
+                    Log.d(TAG, "legacy gen#$gen stopped")
+                }
+                override fun onStartDiscoveryFailed(st: String?, errorCode: Int) {
+                    Log.d(TAG, "legacy gen#$gen start failed code=$errorCode, retry in 800ms")
+                    if (legacy?.gen == gen) legacy?.active = false
+                    // ERROR_MAX_LIMIT=4 / INTERNAL_ERROR=0 等：退避重开
+                    scheduleKickLegacy(800)
+                }
+                override fun onStopDiscoveryFailed(st: String?, errorCode: Int) {
+                    Log.d(TAG, "legacy gen#$gen stop failed code=$errorCode")
+                    // 被替换的旧代停止失败会成为孤儿会话（堆积会撞系统发现名额
+                    // 上限 ERROR_MAX_LIMIT）：短延迟再停一次，最多自然重试一轮
+                    if (gen < (legacy?.gen ?: 0)) {
+                        handler.postDelayed({
+                            if (running && !gotValidPort && legacy?.gen != gen) {
+                                runCatching { nsdManager.stopServiceDiscovery(this) }
+                            }
+                        }, 500)
+                    }
+                }
+                override fun onServiceFound(serviceInfo: NsdServiceInfo?) {
+                    if (serviceInfo == null || !running || gotValidPort) return
+                    if (legacy?.gen != gen) return
+                    Log.d(TAG, "legacy gen#$gen found: ${serviceInfo.serviceName}")
+                    // 同一时刻只允许一个未完成 resolve；失败忽略，新一代会话会再推
+                    runCatching { nsdManager.resolveService(serviceInfo, resolveListener) }
+                }
+                override fun onServiceLost(serviceInfo: NsdServiceInfo?) {
+                    // 成功收口后停止会话的过程中旧代也可能收到 lost，
+                    // 不能让它把"请输入配对码"通知打回"正在搜索"
+                    if (gotValidPort || legacy?.gen != gen) return
+                    if (serviceInfo?.serviceName == serviceName) {
+                        serviceName = null
+                        onLost?.invoke()
                     }
                 }
             }
-        }
-
-        private val watchdog = object : Runnable {
-            override fun run() {
-                if (!running || gotValidPort) return
-                val elapsed = SystemClock.elapsedRealtime() - startElapsed
-                if (elapsed > maxWatchMs) {
-                    Log.d(TAG, "continuous watchdog gives up after ${elapsed}ms without valid port")
-                    return
-                }
-                // 没拿到有效端口（零回调 / found 后 resolve 失败 / 陈旧记录）：
-                // 重开一轮发现会话，并继续排下一次检查
-                Log.d(TAG, "continuous no valid port in ${watchdogMs}ms, restarting discovery")
-                handler.postDelayed(startDiscovery, 300)
-                handler.postDelayed(this, watchdogMs)
-            }
-        }
-
-        private val listener = object : NsdManager.DiscoveryListener {
-            override fun onDiscoveryStarted(regType: String?) {
-                registered = true
-                Log.d(TAG, "continuous discovery started ($serviceType)")
-            }
-            override fun onDiscoveryStopped(serviceType: String?) { registered = false }
-            override fun onStartDiscoveryFailed(serviceType: String?, errorCode: Int) {
-                registered = false
-                // 部分 ROM 冷启动/后台会失败（ERROR_MAX_LIMIT=4 / INTERNAL_ERROR=0），
-                // 不空等：短退避后重开；看门狗还会持续兜底
-                Log.d(TAG, "continuous onStartDiscoveryFailed code=$errorCode, retry in 800ms")
-                if (running && !gotValidPort) {
-                    handler.postDelayed(startDiscovery, 800)
-                }
-            }
-            override fun onStopDiscoveryFailed(serviceType: String?, errorCode: Int) {}
-
-            override fun onServiceFound(serviceInfo: NsdServiceInfo?) {
-                if (!running || serviceInfo == null) return
-                // 注意：found 不代表可用（可能 resolve 失败或命中陈旧记录），
-                // 不能解除看门狗；只有 resolve+校验通过才算成功
-                Log.d(TAG, "continuous service found: ${serviceInfo.serviceName}")
-                // NsdManager 同一时刻只允许一个未完成 resolve；失败忽略即可，
-                // 看门狗重开会话后系统会把已知服务再推一次
-                runCatching { nsdManager.resolveService(serviceInfo, resolveListener) }
-            }
-
-            override fun onServiceLost(serviceInfo: NsdServiceInfo?) {
-                Log.d(TAG, "continuous service lost: ${serviceInfo?.serviceName}")
-                if (serviceInfo?.serviceName == serviceName) {
-                    serviceName = null
-                    onLost?.invoke()
-                }
+            legacy = LegacySession(gen, listener)
+            try {
+                nsdManager.discoverServices(
+                    serviceType, NsdManager.PROTOCOL_DNS_SD, listener
+                )
+            } catch (e: Exception) {
+                Log.d(TAG, "legacy gen#$gen discover threw: ${e.javaClass.simpleName}, retry in 800ms")
+                legacy?.active = false
+                scheduleKickLegacy(800)
             }
         }
 
         private val resolveListener = object : NsdManager.ResolveListener {
             override fun onResolveFailed(info: NsdServiceInfo?, errorCode: Int) {
-                Log.d(TAG, "continuous resolve failed code=$errorCode for ${info?.serviceName}")
+                Log.d(TAG, "legacy resolve failed code=$errorCode for ${info?.serviceName}")
             }
             override fun onServiceResolved(info: NsdServiceInfo?) {
-                if (!running || info == null) return
+                if (!running || gotValidPort || info == null) return
                 val service = toService(info)
                 if (service == null) {
-                    Log.d(TAG, "continuous resolved but rejected (non-local/stale): ${info.host}:${info.port}")
+                    Log.d(TAG, "legacy resolved but rejected (non-local/stale): ${info.host}:${info.port}")
                     return
                 }
                 serviceName = info.serviceName
-                gotValidPort = true
-                handler.removeCallbacks(watchdog)
-                Log.d(TAG, "continuous valid port: ${service.port}")
-                onValidPort(service.port)
+                deliverValid(service.port, "legacy")
+            }
+        }
+
+        // --------------------------------------------- API34+ 新接口冗余通道
+        private var modern: ModernDiscovery? = null
+
+        @android.annotation.RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+        private inner class ModernDiscovery {
+            private var cb: NsdManager.ServiceInfoCallback? = null
+            // 所有回调派发到发现器专用 HandlerThread（toService 里有端口探测，
+            // 不能在主线程做网络操作）
+            private val executor = Executor { r -> handler.post(r) }
+
+            fun start() {
+                stop()
+                if (!running || gotValidPort) return
+                val callback = object : NsdManager.ServiceInfoCallback {
+                    override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {
+                        Log.d(TAG, "modern register failed code=$errorCode")
+                    }
+                    override fun onServiceInfoCallbackUnregistered() {}
+                    override fun onServiceUpdated(info: NsdServiceInfo?) {
+                        if (!running || gotValidPort || info == null) return
+                        val svc = toService(info) ?: run {
+                            Log.d(TAG, "modern updated but rejected (non-local/stale): ${info.host}:${info.port}")
+                            return
+                        }
+                        serviceName = info.serviceName
+                        deliverValid(svc.port, "modern(api34)")
+                    }
+                    override fun onServiceLost(info: NsdServiceInfo?) {}
+                }
+                cb = callback
+                try {
+                    nsdManager.registerServiceInfoCallback(
+                        NsdServiceInfo().apply { serviceType = this@Continuous.serviceType },
+                        NsdManager.PROTOCOL_DNS_SD, executor, callback
+                    )
+                    Log.d(TAG, "modern ServiceInfoCallback registered ($serviceType)")
+                } catch (e: Exception) {
+                    Log.d(TAG, "modern register threw: ${e.javaClass.simpleName}")
+                }
+            }
+
+            fun stop() {
+                val c = cb ?: return
+                cb = null
+                // 无条件注销（runCatching 兜底重复/未注册完成的竞态）；
+                // 不用 active 标志位——旧注册的异步 unregistered 回调会
+                // 误清新注册的状态
+                runCatching { nsdManager.unregisterServiceInfoCallback(c) }
+            }
+        }
+
+        /** 任一通道校验通过后的统一收口 */
+        private fun deliverValid(port: Int, source: String) {
+            if (!running || gotValidPort) return
+            gotValidPort = true
+            Log.i(TAG, "valid pairing port $port via $source")
+            handler.removeCallbacks(watchdog)
+            handler.removeCallbacks(kickLegacy)
+            handler.post { stopSessions() }
+            onValidPort(port)
+        }
+
+        private fun stopSessions() {
+            legacy?.let { s ->
+                if (s.active) runCatching { nsdManager.stopServiceDiscovery(s.listener) }
+            }
+            legacy = null
+            modern?.stop()
+        }
+
+        private val watchdog = object : Runnable {
+            override fun run() {
+                if (!running || gotValidPort) return
+                if (SystemClock.elapsedRealtime() - startElapsed > maxWatchMs) {
+                    Log.d(TAG, "continuous watchdog gives up (no valid port in ${maxWatchMs}ms)")
+                    return
+                }
+                // 周期性轮换：新会话让系统重推缓存服务、重发 PTR 查询；
+                // 经典通道换新 listener，新接口通道重新注册
+                Log.d(TAG, "watchdog: rotating discovery sessions")
+                modern?.start()
+                restartLegacy()
+                handler.postDelayed(this, watchdogMs)
             }
         }
 
@@ -425,10 +534,15 @@ object AdbDiscovery {
             startElapsed = SystemClock.elapsedRealtime()
             acquireMulticastLock()
             handler.post {
-                if (running) {
-                    startDiscovery.run()
-                    handler.postDelayed(watchdog, watchdogMs)
+                if (!running) return@post
+                // API34+ 新接口通道（Find X7/ColorOS 16 等机型的关键冗余路径）
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    if (modern == null) modern = ModernDiscovery()
+                    modern?.start()
                 }
+                // 经典通道第一代
+                restartLegacy()
+                handler.postDelayed(watchdog, watchdogMs)
             }
         }
 
@@ -447,14 +561,11 @@ object AdbDiscovery {
         fun stop() {
             if (!running) return
             running = false
-            // registered/回调只在 handler 线程读写，整段 post 过去避免竞态
+            // 会话/回调只在 handler 线程读写，整段 post 过去避免竞态
             handler.post {
                 handler.removeCallbacks(watchdog)
-                handler.removeCallbacks(startDiscovery)
-                if (registered) {
-                    runCatching { nsdManager.stopServiceDiscovery(listener) }
-                    registered = false
-                }
+                handler.removeCallbacks(kickLegacy)
+                stopSessions()
             }
             serviceName = null
             releaseMulticastLock()
@@ -466,11 +577,8 @@ object AdbDiscovery {
             releaseMulticastLock()
             handler.post {
                 handler.removeCallbacks(watchdog)
-                handler.removeCallbacks(startDiscovery)
-                if (registered) {
-                    runCatching { nsdManager.stopServiceDiscovery(listener) }
-                    registered = false
-                }
+                handler.removeCallbacks(kickLegacy)
+                stopSessions()
                 thread.quitSafely()
             }
         }

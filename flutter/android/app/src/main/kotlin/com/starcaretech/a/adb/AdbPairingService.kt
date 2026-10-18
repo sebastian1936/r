@@ -104,14 +104,19 @@ class AdbPairingService : Service() {
             busy = false
             currentPort = -1
             promoteForeground(searchingNotification())
-            if (discovery == null) {
-                discovery = AdbDiscovery.Continuous(
-                    this,
-                    AdbDiscovery.TYPE_PAIRING,
-                    onValidPort = { port -> onPairingPortFound(port) },
-                    onLost = { onPairingServiceLost() }
-                )
-            }
+            // 每次点击都【全新重建】发现器，而不是复用已在跑的实例：
+            // ColorOS 16 实测同进程内长期运行/经历过 stop-restart 的 mDNS
+            // 会话可能被系统静默挂死（零事件），只有新实例（新 HandlerThread +
+            // 新 listener）注册时系统 mdns 才会把缓存中的配对服务立即推上来——
+            // 这正是此前"第一次搜索转圈、第二次点才行"的真实生效路径，
+            // 现在第一次点击就主动走这条路径
+            discovery?.release()
+            discovery = AdbDiscovery.Continuous(
+                this,
+                AdbDiscovery.TYPE_PAIRING,
+                onValidPort = { port -> onPairingPortFound(port) },
+                onLost = { onPairingServiceLost() }
+            )
             discovery?.start()
         } catch (e: Exception) {
             // 任何启动异常都发失败通知，绝不能让服务静默死掉、通知栏空空如也
