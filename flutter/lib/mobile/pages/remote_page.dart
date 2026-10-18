@@ -66,6 +66,8 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   bool _showGestureHelp = false;
   String _value = '';
   Orientation? _currentOrientation;
+  // 是否由工具栏按钮手动锁定了横屏（不跟随重力感应）
+  bool _landscapeLocked = false;
   double _viewInsetsBottom = 0;
 
   Timer? _timerDidChangeMetrics;
@@ -144,6 +146,10 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     _timer?.cancel();
     _timerDidChangeMetrics?.cancel();
     gFFI.dialogManager.dismissAll();
+    // 解除手动横屏锁定，避免离开远程页后整个 App 仍被锁在横屏
+    if (_landscapeLocked) {
+      await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+    }
     await SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual,
         overlays: SystemUiOverlay.values);
     if (!isWeb) {
@@ -155,6 +161,26 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     // The inner logic of `on_voice_call_closed` will check if the voice call is active.
     // Only one client is considered here for now.
     gFFI.chatModel.onVoiceCallClosed("End connetion");
+  }
+
+  // 手动切换横屏锁定：跟随重力感应 <-> 锁定横屏
+  Future<void> _toggleLandscapeLock() async {
+    if (_landscapeLocked) {
+      // 恢复：竖屏 + 左右横屏，重新交给重力感应
+      await SystemChrome.setPreferredOrientations(const [
+        DeviceOrientation.portraitUp,
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+      setState(() => _landscapeLocked = false);
+    } else {
+      // 锁定横屏（左右均可），不再跟随重力感应
+      await SystemChrome.setPreferredOrientations(const [
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+      setState(() => _landscapeLocked = true);
+    }
   }
 
   @override
@@ -496,6 +522,17 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                       },
                     )
                   ] +
+                  (isWeb
+                      ? <Widget>[]
+                      : <Widget>[
+                          IconButton(
+                            color: Colors.white,
+                            icon: Icon(_landscapeLocked
+                                ? Icons.screen_lock_landscape
+                                : Icons.screen_rotation),
+                            onPressed: _toggleLandscapeLock,
+                          ),
+                        ]) +
                   (isWebDesktop || ffiModel.viewOnly || !ffiModel.keyboard
                       ? []
                       : gFFI.ffiModel.isPeerAndroid
