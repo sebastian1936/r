@@ -10,6 +10,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
 import android.util.Log
+import androidx.annotation.RequiresApi
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
@@ -444,7 +445,7 @@ object AdbDiscovery {
         // --------------------------------------------- API34+ 新接口冗余通道
         private var modern: ModernDiscovery? = null
 
-        @android.annotation.RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+        @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
         private inner class ModernDiscovery {
             private var cb: NsdManager.ServiceInfoCallback? = null
             // 所有回调派发到发现器专用 HandlerThread（toService 里有端口探测，
@@ -454,13 +455,15 @@ object AdbDiscovery {
             fun start() {
                 stop()
                 if (!running || gotValidPort) return
+                // ServiceInfoCallback 准确签名（CI 编译报错定位）：
+                // onServiceUpdated(NsdServiceInfo) / onServiceLost() 无参
                 val callback = object : NsdManager.ServiceInfoCallback {
                     override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {
                         Log.d(TAG, "modern register failed code=$errorCode")
                     }
                     override fun onServiceInfoCallbackUnregistered() {}
-                    override fun onServiceUpdated(info: NsdServiceInfo?) {
-                        if (!running || gotValidPort || info == null) return
+                    override fun onServiceUpdated(info: NsdServiceInfo) {
+                        if (!running || gotValidPort) return
                         val svc = toService(info) ?: run {
                             Log.d(TAG, "modern updated but rejected (non-local/stale): ${info.host}:${info.port}")
                             return
@@ -468,13 +471,13 @@ object AdbDiscovery {
                         serviceName = info.serviceName
                         deliverValid(svc.port, "modern(api34)")
                     }
-                    override fun onServiceLost(info: NsdServiceInfo?) {}
+                    override fun onServiceLost() {}
                 }
                 cb = callback
                 try {
                     nsdManager.registerServiceInfoCallback(
                         NsdServiceInfo().apply { serviceType = this@Continuous.serviceType },
-                        NsdManager.PROTOCOL_DNS_SD, executor, callback
+                        executor, callback
                     )
                     Log.d(TAG, "modern ServiceInfoCallback registered ($serviceType)")
                 } catch (e: Exception) {
