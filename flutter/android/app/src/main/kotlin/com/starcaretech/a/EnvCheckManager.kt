@@ -114,12 +114,6 @@ object EnvCheckManager {
             if (isMiui) {
                 items += Item("miui_adb_secure", STATUS_UNKNOWN)
             }
-            // ColorOS（OPPO/一加/realme）：没有统一的「USB 调试（安全设置）」，
-            // 控制 adb shell 授权能力的是开发者选项底部的「禁止权限监控」（需重启），
-            // 状态同样无任何 API 可读，恒 unknown 由用户手动确认。
-            if (isOppo) {
-                items += Item("oppo_disable_monitor", STATUS_UNKNOWN)
-            }
             // vivo / iQOO：对应开关为「USB 模拟点击」
             if (isVivo) {
                 items += Item("vivo_usb_simulate", STATUS_UNKNOWN)
@@ -441,7 +435,7 @@ object EnvCheckManager {
 
             // 这些开关都在开发者选项里：未解锁时同样先去「关于手机」
             "adb_master", "miui_adb_secure",
-            "oppo_disable_monitor", "vivo_usb_simulate" ->
+            "vivo_usb_simulate" ->
                 devSettingsEntry(appContext)
 
             "notification" -> openNotificationSettings(appContext)
