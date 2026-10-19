@@ -148,8 +148,12 @@ class MainService : Service() {
                         translate("Share screen")
                     }
                     if (authorized) {
-                        if (!isFileTransfer && !isStart) {
-                            startCapture()
+                        if (!isFileTransfer) {
+                            // 新连接到达：取消尚未执行的迟到 stop_capture，防止误杀新会话
+                            keepAliveHandler.removeCallbacks(pendingStopCaptureRunnable)
+                            if (!isStart) {
+                                startCapture()
+                            }
                         }
                         onClientAuthorizedNotification(id, type, username, peerId)
                     } else {
@@ -194,9 +198,10 @@ class MainService : Service() {
             }
             "stop_capture" -> {
                 Log.d(logTag, "from rust:stop_capture")
-                // 客户端主动断开，不要再因录屏失效标记自动续采集
-                resumeWanted = false
-                stopCapture()
+                // 不立即执行：延迟防抖（见 pendingStopCaptureRunnable 注释）；
+                // resumeWanted 推迟到真正执行时再清——被新连接取消则保留
+                keepAliveHandler.removeCallbacks(pendingStopCaptureRunnable)
+                keepAliveHandler.postDelayed(pendingStopCaptureRunnable, STOP_CAPTURE_DEBOUNCE_MS)
             }
             "half_scale" -> {
                 val halfScale = arg1.toBoolean()
@@ -236,10 +241,29 @@ class MainService : Service() {
     private var lastMediatorRestartMs = 0L
     private val networkRestartRunnable = Runnable { restartRendezvousMediator() }
 
+    /**
+     * 迟到 stop_capture 防抖：弱网下连接亚秒级断开重连时，Rust 侧旧连接的
+     * remove 与新连接的 add 在不同线程执行且无全局顺序，stop_capture 可能晚于
+     * 新连接的 add_connection 到达。延迟执行给新连接一个取消窗口，避免迟到的
+     * stop 误杀刚建立的新采集会话——交错释放 surface 会连带触发 VirtualDisplay
+     * 异常，被误判成授权失效后接受控制开关会被关闭。
+     */
+    private val pendingStopCaptureRunnable = Runnable {
+        Log.i(logTag, "延迟 stop_capture 到期：期间无新连接，执行停止采集")
+        resumeWanted = false
+        stopCapture()
+    }
+
     companion object {
+        // Rust 侧跨线程轮询 is_start/is_ready、多线程写状态，需保证可见性
+        @Volatile
         private var _isReady = false // media permission ready status
+        @Volatile
         private var _isStart = false // screen capture start status
         private var _isAudioStart = false // audio capture start status
+
+        /** 迟到 stop_capture 防抖窗口：覆盖弱网下断开→重连的亚秒级竞态 */
+        private const val STOP_CAPTURE_DEBOUNCE_MS = 400L
 
         // 录屏授权失效时的全屏引导通知（区别于常驻前台服务通知 DEFAULT_NOTIFY_ID）
         const val RECOVERY_NOTIFY_ID = 2
@@ -546,6 +570,8 @@ class MainService : Service() {
 
     private fun releaseKeepAlive() {
         keepAliveHandler.removeCallbacks(networkRestartRunnable)
+        // 服务销毁/释放时撤掉尚未执行的迟到 stop（destroy 自身已同步 stopCapture）
+        keepAliveHandler.removeCallbacks(pendingStopCaptureRunnable)
         runCatching { cpuWakeLock?.takeIf { it.isHeld }?.release() }
         runCatching { wifiLock?.takeIf { it.isHeld }?.release() }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -1130,6 +1156,10 @@ class MainService : Service() {
         return audioRecordHandle.onVoiceCallClosed(mediaProjection)
     }
 
+    // 与 stopCapture/applyProjection 共用同一把实例锁：Rust 侧启停调用来自不同
+    // 线程，不加锁时迟到的 stopCapture 可能交错进 startCapture 中段，把新会话
+    // 刚建好的 surface/imageReader 释放掉（内建锁可重入，同线程嵌套调用安全）
+    @Synchronized
     fun startCapture(): Boolean {
         if (isStart) {
             return true
@@ -1322,10 +1352,24 @@ class MainService : Service() {
             onProjectionInvalid()
             false
         } catch (e: IllegalStateException) {
-            // 部分 ROM 在 projection 已停止时 createVirtualDisplay 抛 IllegalStateException
-            Log.w(logTag, "createOrSetVirtualDisplay: got IllegalStateException, projection stopped")
-            onProjectionInvalid()
-            false
+            // 部分 ROM 在 projection 已停止时 createVirtualDisplay 抛 IllegalStateException；
+            // 也可能只是启停交错下的 VirtualDisplay 复用状态抖动。先释放旧 display 用
+            // 同一 projection 原子重建一次，仍失败才判定授权失效——避免一次瞬时异常
+            // 就把录屏会话判死（接受控制开关被连带关闭、还要用户重新授权）
+            Log.w(logTag, "createOrSetVirtualDisplay: IllegalStateException, retry once with same projection", e)
+            runCatching { virtualDisplay?.release() }
+            virtualDisplay = try {
+                mp.createVirtualDisplay(
+                    "StarcareVD",
+                    SCREEN_INFO.width, SCREEN_INFO.height, SCREEN_INFO.dpi, VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                    s, null, null
+                )
+            } catch (e2: Exception) {
+                Log.w(logTag, "createVirtualDisplay retry fail, projection invalid", e2)
+                onProjectionInvalid()
+                null
+            }
+            virtualDisplay != null
         }
     }
 
