@@ -30,12 +30,27 @@ class PermissionRequestTransparentActivity: Activity() {
         super.onCreate(savedInstanceState)
         Log.d(logTag, "onCreate PermissionRequestTransparentActivity: intent.action: ${intent.action}")
 
-        if (intent.action != ACT_REQUEST_MEDIA_PROJECTION
-            || !MainService.beginProjectionRequest()) {
-            // 已有授权请求在途（重复实例/重入触发）：不做任何事直接关掉
-            Log.i(logTag, "授权请求已在途或 action 非法，关闭重复的透明页")
+        if (intent.action != ACT_REQUEST_MEDIA_PROJECTION) {
+            Log.i(logTag, "action 非法，关闭透明页")
+            finish()
+            return
+        }
+        // 兜底防御：服务已持有有效录屏会话时（残留全屏通知误触、国产 ROM
+        // 对全屏 Intent 的重复展开、多触发源重复 startActivity），绝不重弹
+        // 系统确认框——重弹会新建 MediaProjection 顶掉正在进行的被控采集，
+        // 并把整个 App 带到前台（MIUI/OriginOS 上表现为"一被远程就弹前台"）。
+        if (MainService.hasActiveProjection()) {
+            Log.i(logTag, "录屏会话已存活，忽略重复的授权请求，直接关闭透明页")
             com.starcaretech.a.adb.AdbAuthManager.trace(
-                applicationContext, "录屏透明页：闸门未抢到/action 非法，直接 finish")
+                applicationContext, "录屏透明页：会话已存活，跳过重复弹窗直接 finish")
+            finish()
+            return
+        }
+        if (!MainService.beginProjectionRequest()) {
+            // 已有授权请求在途（重复实例/重入触发）：不做任何事直接关掉
+            Log.i(logTag, "授权请求已在途，关闭重复的透明页")
+            com.starcaretech.a.adb.AdbAuthManager.trace(
+                applicationContext, "录屏透明页：闸门未抢到，直接 finish")
             finish()
             return
         }

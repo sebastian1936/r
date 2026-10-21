@@ -274,6 +274,14 @@ class MainService : Service() {
         val isAudioStart: Boolean
             get() = _isAudioStart
 
+        /**
+         * 服务当前是否已持有有效的 MediaProjection 会话。
+         * 供授权透明页在弹系统确认框前兜底：会话已存活时（残留全屏通知
+         * 误触、重复 startActivity）直接放弃，绝不重弹确认框顶掉正在进行
+         * 的被控采集（重弹会新建会话并把 App 带到前台）。
+         */
+        fun hasActiveProjection(): Boolean = aliveInstance?.mediaProjection != null
+
         /** MainService 进程内存活事实：进程外看门狗（Job/无障碍）据此判断是否需要拉起 */
         @JvmStatic
         @Volatile
@@ -598,7 +606,20 @@ class MainService : Service() {
     // notification
     private lateinit var notificationManager: NotificationManager
     private lateinit var notificationChannel: String
-    private lateinit var notificationBuilder: NotificationCompat.Builder
+
+    /**
+     * 每条通知必须使用全新 Builder。
+     * NotificationCompat.Builder 设置过的字段（尤其 fullScreenIntent/category）
+     * 在 build() 之后不会清除：曾因全服务共用一个 builder，录屏恢复通知的
+     * 全屏 Intent（指向授权透明页 + CATEGORY_CALL）残留到后续所有通知上，
+     * 被控连接通知在 MIUI/OriginOS 被系统按来电类通知直接展开，每次被远程
+     * 都把 RustDesk 强行拉到前台。
+     */
+    private fun newNotificationBuilder(): NotificationCompat.Builder =
+        NotificationCompat.Builder(this, notificationChannel)
+            // smallIcon 为通知必备项：连接类通知此前靠共享 builder 残留的
+            // 图标"继承"，独立 builder 必须显式设置，否则 notify 不显示
+            .setSmallIcon(R.mipmap.ic_stat_logo)
 
     override fun onCreate() {
         super.onCreate()
@@ -1093,7 +1114,7 @@ class MainService : Service() {
                 this, 0, fullScreenTarget,
                 FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE
             )
-            val notification = notificationBuilder
+            val notification = newNotificationBuilder()
                 .setOngoing(false)
                 .setSmallIcon(R.mipmap.ic_stat_logo)
                 .setPriority(NotificationCompat.PRIORITY_MAX)
@@ -1436,7 +1457,6 @@ class MainService : Service() {
         } else {
             ""
         }
-        notificationBuilder = NotificationCompat.Builder(this, notificationChannel)
     }
 
     @SuppressLint("UnspecifiedImmutableFlag")
@@ -1452,7 +1472,7 @@ class MainService : Service() {
         } else {
             PendingIntent.getActivity(this, 0, intent, FLAG_UPDATE_CURRENT)
         }
-        val notification = notificationBuilder
+        val notification = newNotificationBuilder()
             .setOngoing(true)
             .setSmallIcon(R.mipmap.ic_stat_logo)
             .setDefaults(Notification.DEFAULT_ALL)
@@ -1474,7 +1494,7 @@ class MainService : Service() {
         username: String,
         peerId: String
     ) {
-        val notification = notificationBuilder
+        val notification = newNotificationBuilder()
             .setOngoing(false)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setContentTitle(translate("Do you accept?"))
@@ -1493,7 +1513,7 @@ class MainService : Service() {
         peerId: String
     ) {
         cancelNotification(clientID)
-        val notification = notificationBuilder
+        val notification = newNotificationBuilder()
             .setOngoing(false)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setContentTitle("$type ${translate("Established")}")
@@ -1508,7 +1528,7 @@ class MainService : Service() {
         username: String,
         peerId: String
     ) {
-        val notification = notificationBuilder
+        val notification = newNotificationBuilder()
             .setOngoing(false)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setContentTitle(translate("Do you accept?"))
@@ -1541,7 +1561,7 @@ class MainService : Service() {
     private fun setTextNotification(_title: String?, _text: String?) {
         val title = _title ?: DEFAULT_NOTIFY_TITLE
         val text = _text ?: translate(DEFAULT_NOTIFY_TEXT)
-        val notification = notificationBuilder
+        val notification = newNotificationBuilder()
             .clearActions()
             .setStyle(null)
             .setContentTitle(title)
