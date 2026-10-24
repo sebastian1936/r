@@ -1871,6 +1871,16 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
           "不打开会出现「配对成功但授权失败」",
       true,
     ],
+    "oppo_permission_monitor": [
+      "禁止权限监控（OPPO/一加/realme 必开）",
+      "到开发者选项列表「最底部」打开「禁止权限监控」（部分版本叫「禁用系统优化」），"
+          "不打开会出现「配对成功但授权失败」。找不到时：①在设置顶部搜索"
+          "「权限监控」尝试直达；②个别机型中文界面不显示该开关，临时把系统"
+          "语言切成 English，到 Developer options 底部打开 Disable permission "
+          "monitoring（或 Disable system optimization，警告弹窗选 Turn on "
+          "anyway），开完再切回中文，开关会保持生效",
+      true,
+    ],
     "wifi_connected": [
       "已连接 Wi-Fi",
       "手机先连上 Wi-Fi（不要求能上网，热点/路由器均可）。"

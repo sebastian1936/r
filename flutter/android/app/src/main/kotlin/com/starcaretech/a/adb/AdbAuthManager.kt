@@ -520,20 +520,27 @@ object AdbAuthManager {
         val xiaomi = "· 小米 / 红米（澎湃OS/MIUI）：打开「USB 调试（安全设置）」（与「USB 调试」是两个开关）。" +
             "该开关需联网到小米服务器校验：必须插 SIM、关 Wi-Fi 用移动数据、并已登录小米账号；" +
             "若开关已显示开启仍报此错，请关掉它、用流量重新打开后立刻重试"
-        // ColorOS（OPPO/一加/realme）没有小米那样的「USB 调试（安全设置）」，
-        // 也无需用户额外开启任何安全开关，故不再单独给 OPPO 段落，
-        // 命中品牌时统一落到「其他品牌」的通用指引
+        // ColorOS（OPPO/一加/realme）对应开关是「禁止权限监控」，位于开发者
+        // 选项列表最底部，部分固件中文名是「禁用系统优化」；个别固件中文界面
+        // 直接隐藏该开关，需临时切英文开启（2026-10 realme UI 5.0 实测）
+        val coloros = "· OPPO / 一加 / realme（ColorOS）：到开发者选项列表「最底部」" +
+            "打开「禁止权限监控」（部分版本名为「禁用系统优化」），警告弹窗选仍要开启。" +
+            "列表里找不到时：先在设置顶部搜索「权限监控」；个别固件中文界面隐藏了它，" +
+            "把系统语言临时切成 English，在 Developer options 底部打开 " +
+            "「Disable permission monitoring」（或「Disable system optimization」），" +
+            "警告弹窗选 Turn on anyway，开完可切回中文"
         val vivo = "· vivo / iQOO（OriginOS）：打开「USB 模拟点击」（部分版本名为「安全调试」）"
         val huawei = "· 华为 / 荣耀：打开「仅充电模式下允许 ADB 调试」"
         val other = "· 其他品牌：在开发者选项中找「安全 / 权限 / 模拟点击」类开关"
         val lead = when (EnvCheckManager.brandKey) {
             "xiaomi" -> xiaomi
+            "oppo" -> coloros
             "vivo" -> vivo
             "huawei" -> huawei
             "honor" -> huawei
             else -> other
         }
-        val rest = listOf(xiaomi, vivo, huawei, other).filter { it != lead }
+        val rest = listOf(xiaomi, coloros, vivo, huawei, other).filter { it != lead }
         return "配对成功，但系统禁止 ADB 授权。请按下面第 1 条操作后重试（不同品牌开关位置不同）：\n" +
             lead + "\n" + rest.joinToString("\n")
     }

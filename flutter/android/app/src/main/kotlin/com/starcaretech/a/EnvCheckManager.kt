@@ -118,6 +118,13 @@ object EnvCheckManager {
             if (isVivo) {
                 items += Item("vivo_usb_simulate", STATUS_UNKNOWN)
             }
+            // OPPO / 一加 / realme（ColorOS）：对应开关为「禁止权限监控」，
+            // 在开发者选项列表最底部（部分固件名「禁用系统优化」，个别固件
+            // 中文界面隐藏需切英文开启）。该开关状态无任何 API 可读
+            // （Settings/provider/AppOps 都不暴露），恒 unknown 由用户手动确认
+            if (isOppo) {
+                items += Item("oppo_permission_monitor", STATUS_UNKNOWN)
+            }
             // 无线调试必须在已连接 Wi-Fi 时才能打开/保持运行，放在它前面
             // 先排查（系统在未连 Wi-Fi 时会直接灰掉或自动关闭无线调试）
             items += Item("wifi_connected", checkWifi(context))
@@ -435,7 +442,7 @@ object EnvCheckManager {
 
             // 这些开关都在开发者选项里：未解锁时同样先去「关于手机」
             "adb_master", "miui_adb_secure",
-            "vivo_usb_simulate" ->
+            "vivo_usb_simulate", "oppo_permission_monitor" ->
                 devSettingsEntry(appContext)
 
             "notification" -> openNotificationSettings(appContext)
