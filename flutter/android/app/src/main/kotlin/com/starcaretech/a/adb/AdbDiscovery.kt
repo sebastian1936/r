@@ -15,6 +15,7 @@ import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
+import java.net.Socket
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
@@ -53,31 +54,69 @@ object AdbDiscovery {
      */
     private const val PREFS = "adb_auth"
     private const val KEY_LAST_CONNECT_PORT = "last_connect_port"
+    /**
+     * 上次成功连接所用 host。手动输入兜底机型上 connect 端口只在 wlan 地址可达、
+     * 回环探不到（如 OriginOS Y35），必须连同 host 一起缓存，重连才能复用。
+     * 旧版本只存过端口、无此键时按 127.0.0.1 处理（与旧行为一致）。
+     */
+    private const val KEY_LAST_CONNECT_HOST = "last_connect_host"
 
     @Volatile
     private var memPort: Int? = null
 
-    /** 取缓存端口（内存优先，其次持久化存储）；使用前必须重新 bind 探活 */
-    fun cachedPort(context: Context): Int? {
-        memPort?.let { return it }
+    /** 取缓存端口（内存优先，其次持久化存储）；使用前必须重新探活 */
+    fun cachedPort(context: Context): Int? = cachedEndpoint(context)?.port
+
+    /**
+     * 缓存的连接端点（含 host）。读取时实时探活：
+     *  - 回环地址：ServerSocket bind 探测（不与 adbd 建立半截连接）
+     *  - 其他地址（手动输入的 wlan IP）：短超时真实 TCP 连接探测
+     * 端口随无线调试重启会变，探活失败即视为无缓存。
+     */
+    fun cachedEndpoint(context: Context): DiscoveredService? {
         val app = context.applicationContext
-        return runCatching {
-            val sp = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            val p = sp.getInt(KEY_LAST_CONNECT_PORT, 0)
-            if (p > 0) p else null
-        }.getOrNull()?.also { memPort = it }
+        val sp = runCatching {
+            app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        }.getOrNull() ?: return null
+        val port = memPort ?: runCatching {
+            sp.getInt(KEY_LAST_CONNECT_PORT, 0).takeIf { it > 0 }
+        }.getOrNull()?.also { memPort = it } ?: return null
+        val host = runCatching {
+            sp.getString(KEY_LAST_CONNECT_HOST, null)
+        }.getOrNull()?.takeIf { it.isNotBlank() } ?: "127.0.0.1"
+        val alive = if (host == "127.0.0.1" || host == "localhost") {
+            isLoopbackPortListening(port)
+        } else {
+            isTcpReachable(host, port, 400)
+        }
+        return if (alive) DiscoveredService("cached", host, port, emptyMap()) else null
     }
 
-    fun rememberConnectPort(context: Context, port: Int) {
-        if (port <= 0) return
+    fun rememberConnectPort(context: Context, port: Int) =
+        rememberConnectEndpoint(context, "127.0.0.1", port)
+
+    fun rememberConnectEndpoint(context: Context, host: String, port: Int) {
+        if (port <= 0 || host.isBlank()) return
         memPort = port
         runCatching {
             context.applicationContext
                 .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit()
                 .putInt(KEY_LAST_CONNECT_PORT, port)
+                .putString(KEY_LAST_CONNECT_HOST, host)
                 .apply()
         }
+    }
+
+    /**
+     * 对非回环地址做短超时真实 TCP 连接探测（用于手动输入的 wlan IP）。
+     * 仅确认端口有服务应答；是否真是 adbd 由后续 ADB 协议握手验证。
+     */
+    fun isTcpReachable(host: String, port: Int, timeoutMs: Int = 500): Boolean = try {
+        Socket().use { it.connect(InetSocketAddress(host, port), timeoutMs) }
+        true
+    } catch (e: Exception) {
+        false
     }
 
     class DiscoveredService(
@@ -135,9 +174,8 @@ object AdbDiscovery {
         timeoutMs: Long = 3_500L,
         extraRoundMs: Long = 0L
     ): Int? {
-        cachedPort(context)?.let { p ->
-            if (isLoopbackPortListening(p)) return p
-        }
+        // cachedEndpoint 内部已按 host 类型探活（回环 bind / wlan TCP）
+        cachedEndpoint(context)?.let { return it.port }
         var s = findFirst(context, TYPE_CONNECT, timeoutMs = timeoutMs)
         if (s == null && extraRoundMs > 0) {
             Log.i(TAG, "首轮 mDNS 未发现 connect 服务，${extraRoundMs}ms 内重开一轮发现")

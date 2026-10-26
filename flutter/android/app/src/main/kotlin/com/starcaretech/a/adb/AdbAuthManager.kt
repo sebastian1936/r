@@ -44,6 +44,16 @@ object AdbAuthManager {
      */
     data class GrantResult(val guid: String, val shellDirect: Boolean)
 
+    /**
+     * mDNS 两轮都发现不到 connect 服务时的人工兜底：向用户索取无线调试
+     * 主页面显示的「IP:端口」（与配对弹窗里的配对端口不是同一个）。
+     * 在工作线程被调用，实现方需要阻塞到用户输入完成或超时；返回 host to port，
+     * 用户放弃/超时返回 null。由配对前台服务以通知栏 RemoteInput 实现。
+     */
+    fun interface ManualConnectProvider {
+        fun requestConnectEndpoint(): Pair<String, Int>?
+    }
+
     private const val MARKER = "__ADB_SHELL_MARKER__"
 
     /**
@@ -138,7 +148,13 @@ object AdbAuthManager {
      * @param pairingHost 配对服务地址（一般 127.0.0.1）
      * @param pairingPort 系统无线调试配对页显示的端口（或 mDNS 扫描得到）
      */
-    fun pairAndGrant(context: Context, pairingCode: String, pairingHost: String = "127.0.0.1", pairingPort: Int): GrantResult {
+    fun pairAndGrant(
+        context: Context,
+        pairingCode: String,
+        pairingHost: String = "127.0.0.1",
+        pairingPort: Int,
+        manualConnect: ManualConnectProvider? = null
+    ): GrantResult {
         val identity = AdbKeyStore.getOrCreate(context)
         diag(context, buildString {
             appendLine("pairAndGrant start pairingPort=$pairingPort")
@@ -176,7 +192,7 @@ object AdbAuthManager {
 
         // 2. pm grant（标准路径）。connect 端口每轮都重新 mDNS 发现，
         //    自动跳过 NsdManager 的陈旧记录。
-        val grantRun = runShellWithRetry(context, identity) {
+        val grantRun = runShellWithRetry(context, identity, manualConnect) {
             "pm grant ${context.packageName} $PERM_WRITE_SECURE_SETTINGS"
         }
         if (!grantRun.connected) {
@@ -216,7 +232,7 @@ object AdbAuthManager {
         //     WRITE_SECURE_SETTINGS，可以直接 settings put secure 开启无障碍——
         //     Shizuku 生态的免 root 工具普遍用这个通道。
         val directResult = try {
-            shellDirectEnableAccessibility(context, identity)
+            shellDirectEnableAccessibility(context, identity, manualConnect = manualConnect)
         } catch (e: Exception) {
             Log.w(TAG, "shell 直写兜底失败", e)
             DirectResult(false, "connect_error", e.chainText())
@@ -268,6 +284,7 @@ object AdbAuthManager {
     private fun runShellWithRetry(
         context: Context,
         identity: AdbKeyStore.Identity,
+        manualConnect: ManualConnectProvider?,
         command: () -> String
     ): ShellRun {
         val cmd = command()
@@ -281,9 +298,34 @@ object AdbAuthManager {
             Log.w(TAG, "第 $attempt/2 次未发现有效的 connect 服务")
             attempts.add(
                 "第 $attempt 次：mDNS 未发现有效的 connect 服务（无记录或端口未监听）。\n" +
-                "请打开「无线调试」页面停留几秒后重试"
+                    "请打开「无线调试」页面停留几秒后重试"
             )
             if (attempt < 2) Thread.sleep(1500)
+        }
+        // mDNS 两轮全无（实测 OriginOS/vivo 等 ROM 对 connect 服务的 query
+        // 响应整窗丢失）：请用户照抄无线调试【主页面】显示的 IP:端口，
+        // TCP 探活通过后直接作为连接目标，并连同 host 持久化供后续重连复用
+        if (target == null && manualConnect != null) {
+            Log.i(TAG, "mDNS 两轮未发现 connect 服务，请求用户手动输入连接地址")
+            diag(context, "connect discovery failed, request manual endpoint")
+            val manual = runCatching { manualConnect.requestConnectEndpoint() }.getOrNull()
+            if (manual != null) {
+                val (h, p) = manual
+                if (AdbDiscovery.isTcpReachable(h, p, 1_500)) {
+                    AdbDiscovery.rememberConnectEndpoint(context, h, p)
+                    target = AdbDiscovery.DiscoveredService("manual", h, p, emptyMap())
+                    attempts.add("已使用手动输入的连接地址 $h:$p")
+                    diag(context, "manual connect endpoint reachable: $h:$p")
+                } else {
+                    attempts.add(
+                        "手动地址 $h:$p 无法连接（端口未开放或已失效）。\n" +
+                            "请确认照抄的是「无线调试」主页面（不是配对码弹窗）上的 IP 地址和端口"
+                    )
+                    diag(context, "manual connect endpoint unreachable: $h:$p")
+                }
+            } else {
+                attempts.add("未在限定时间内收到手动输入的连接地址")
+            }
         }
         if (target == null) return ShellRun(connected = false, attempts = attempts)
 
@@ -326,7 +368,8 @@ object AdbAuthManager {
     private fun shellDirectEnableAccessibility(
         context: Context,
         identity: AdbKeyStore.Identity,
-        force: Boolean = false
+        force: Boolean = false,
+        manualConnect: ManualConnectProvider? = null
     ): DirectResult {
         val comp = accessibilityComponent(context)
         // 组件名只含 [a-z0-9./]，直接内联安全；其余全部用 sh 变量，避免转义问题
@@ -392,7 +435,7 @@ object AdbAuthManager {
             settings get secure enabled_accessibility_services
         """.trimIndent()
 
-        val run = runShellWithRetry(context, identity) { script }
+        val run = runShellWithRetry(context, identity, manualConnect) { script }
         if (!run.connected) {
             Log.w(TAG, "shell 直写时连接 adbd 失败：\n${run.attempts.joinToString("\n")}")
             val joined = run.attempts.joinToString("\n")
@@ -805,8 +848,9 @@ object AdbAuthManager {
     ) {
         if (isWriteSecureSettingsGranted(context)) return
         val t0 = android.os.SystemClock.elapsedRealtime()
+        // 能走到这里说明此前 shell 通道刚连成功，缓存端点必命中，无需手动提供者
         val run = try {
-            runShellWithRetry(context, identity) {
+            runShellWithRetry(context, identity, null) {
                 "pm grant ${context.packageName} $PERM_WRITE_SECURE_SETTINGS"
             }
         } catch (e: Exception) {
@@ -980,22 +1024,21 @@ object AdbAuthManager {
     }
 
     private fun discoverConnect(context: Context, scanTimeoutMs: Long = 15_000L): AdbDiscovery.DiscoveredService? {
-        // 0) 先探活上次成功用过的端口：部分 ROM 重开无线调试会复用同一端口，
-        //    命中可跳过 NsdManager 冷启动的数秒延迟（不命中代价仅一次 bind）。
-        //    端口已持久化：App 被划掉重开、无线调试未重启时直接命中，无需 mDNS
-        AdbDiscovery.cachedPort(context)?.let { p ->
-            if (AdbDiscovery.isLoopbackPortListening(p)) {
-                Log.i(TAG, "discoverConnect：命中缓存端口 :$p，直接使用")
-                return AdbDiscovery.DiscoveredService("cached", "127.0.0.1", p, emptyMap())
-            }
+        // 0) 先探活上次成功用过的端点：部分 ROM 重开无线调试会复用同一端口，
+        //    命中可跳过 NsdManager 冷启动的数秒延迟（不命中代价仅一次探测）。
+        //    端点已持久化：App 被划掉重开、无线调试未重启时直接命中，无需 mDNS。
+        //    手动输入机型缓存的是 wlan IP，cachedEndpoint 内部按地址类型探活。
+        AdbDiscovery.cachedEndpoint(context)?.let {
+            Log.i(TAG, "discoverConnect：命中缓存端点 ${it.host}:${it.port}，直接使用")
+            return it
         }
-        // 只从 mDNS 获取端口，host 强制 127.0.0.1（本机连本机回环最可靠）。
+        // 从 mDNS 获取端口，host 强制 127.0.0.1（本机连本机回环最可靠）。
         // findFirst 已做"本机网卡地址 + 127.0.0.1 端口存活"双重校验，自动跳过陈旧记录。
         // 单个连续发现窗口（不反复 stop/restart discovery）：
         // NsdManager 冷启动本身就要几秒，连续窗口比"多次短窗重启扫描"命中率高。
         val s = AdbDiscovery.findFirst(context, AdbDiscovery.TYPE_CONNECT, timeoutMs = scanTimeoutMs)
         if (s != null) {
-            AdbDiscovery.rememberConnectPort(context, s.port)
+            AdbDiscovery.rememberConnectEndpoint(context, "127.0.0.1", s.port)
             return AdbDiscovery.DiscoveredService(s.serviceName, "127.0.0.1", s.port, s.attributes)
         }
         // 兜底：部分 ROM（或旧版无线调试）监听固定 5555，同样要求端口真的在监听

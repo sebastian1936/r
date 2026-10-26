@@ -25,8 +25,13 @@ import kotlin.concurrent.thread
  * 配对码不会失效；RemoteInput 的输入框也由 SystemUI 提供，全程不把任何 Activity
  * 切到前台。用户只需：打开配对页 → 下拉通知栏 → 输入 6 位码 → 点发送。
  *
- * 端口不需要用户输入：服务在后台持续 mDNS 扫描 _adb-tls-pairing._tcp，
+ * 端口默认不需要用户输入：服务在后台持续 mDNS 扫描 _adb-tls-pairing._tcp，
  * 发现有效端口后把端口写进 RemoteInput 的 PendingIntent，回传时直接使用。
+ *
+ * 兜底：部分 ROM（实测 ColorOS/realme UI）上 NsdManager 可能始终不把配对
+ * 服务送上来，通知一直停在"正在搜索"。此时通知上提供「手动输入」：用户照抄
+ * 系统配对页显示的「IP 地址和端口」（形如 192.168.1.5:37211）直接回传，
+ * 完全跳过 mDNS；配对连接对该地址发起（TLS 不校验主机名，局域网直连同机 adbd）。
  */
 class AdbPairingService : Service() {
 
@@ -39,13 +44,25 @@ class AdbPairingService : Service() {
         private const val ACTION_REPLY = "com.starcaretech.a.adb.REPLY"
         private const val ACTION_STOP = "com.starcaretech.a.adb.STOP"
         private const val ACTION_RETRY = "com.starcaretech.a.adb.RETRY"
+        // mDNS 始终扫不到配对端口时的兜底：用户照抄系统配对页显示的
+        // 「IP:端口」，通过通知栏 RemoteInput 直接回传，跳过服务发现
+        private const val ACTION_MANUAL_ADDR = "com.starcaretech.a.adb.MANUAL_ADDR"
+        // 配对成功但 mDNS 发现不到 connect 服务时的第二阶段兜底：
+        // 用户照抄无线调试【主页面】显示的「IP:端口」回传
+        private const val ACTION_MANUAL_CONNECT = "com.starcaretech.a.adb.MANUAL_CONNECT"
         // 用户放弃配对，回退到传统手动授权（手动开无障碍+录屏）。
         // 由失败通知动作以 Activity PendingIntent extra 传给 MainActivity
         const val EXTRA_MANUAL_FALLBACK = "manual_fallback"
         private const val ACTION_MANUAL_ACTIVITY = "com.starcaretech.a.adb.MANUAL_FALLBACK"
 
         private const val EXTRA_PORT = "port"
+        private const val EXTRA_HOST = "host"
         private const val KEY_CODE = "pairing_code"
+        private const val KEY_ADDR = "manual_addr"
+        private const val KEY_CONNECT_ADDR = "manual_connect_addr"
+
+        /** 第二阶段手动输入连接地址的最长等待（shortService 前台类型总时长约 3 分钟） */
+        private const val MANUAL_CONNECT_WAIT_MS = 110_000L
 
         fun startIntent(context: Context): Intent =
             Intent(context, AdbPairingService::class.java).setAction(ACTION_START)
@@ -75,9 +92,28 @@ class AdbPairingService : Service() {
     @Volatile
     private var currentPort = -1
 
+    /** 当前配对地址：自动发现固定 127.0.0.1；手动兜底时为用户填写的局域网 IP */
+    @Volatile
+    private var currentHost = "127.0.0.1"
+
+    /** 用户已改用手动输入地址端口：停止 mDNS 发现，忽略此后迟到的发现回调 */
+    @Volatile
+    private var manualMode = false
+
     /** 正在配对/授权，忽略重复的 discovery 回调 */
     @Volatile
     private var busy = false
+
+    /** 第二阶段（connect 端点）手动输入的同步原语：授权工作线程阻塞等待通知栏回传 */
+    @Volatile
+    private var connectLatch = java.util.concurrent.CountDownLatch(1)
+
+    @Volatile
+    private var connectEndpoint: Pair<String, Int>? = null
+
+    /** 正在等待用户回传 connect 地址：格式错误时刷新同一通知让用户重输，不解除等待 */
+    @Volatile
+    private var connectRequestActive = false
 
     override fun onCreate() {
         super.onCreate()
@@ -88,6 +124,8 @@ class AdbPairingService : Service() {
         when (intent?.action) {
             ACTION_START, ACTION_RETRY -> beginSearch()
             ACTION_REPLY -> handleReply(intent)
+            ACTION_MANUAL_ADDR -> handleManualAddr(intent)
+            ACTION_MANUAL_CONNECT -> handleManualConnect(intent)
             ACTION_STOP -> {
                 finishAndStop(removeNotification = true)
                 return START_NOT_STICKY
@@ -102,7 +140,12 @@ class AdbPairingService : Service() {
     private fun beginSearch() {
         try {
             busy = false
+            manualMode = false
             currentPort = -1
+            currentHost = "127.0.0.1"
+            connectEndpoint = null
+            connectRequestActive = false
+            connectLatch = java.util.concurrent.CountDownLatch(1)
             promoteForeground(searchingNotification())
             // 每次点击都【全新重建】发现器，而不是复用已在跑的实例：
             // ColorOS 16 实测同进程内长期运行/经历过 stop-restart 的 mDNS
@@ -157,20 +200,110 @@ class AdbPairingService : Service() {
     }
 
     private fun onPairingPortFound(port: Int) {
-        if (busy) return
+        if (busy || manualMode) return
         if (port == currentPort) return
         currentPort = port
+        currentHost = "127.0.0.1"
         Log.i(TAG, "发现配对服务端口: $port")
         getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, inputNotification(port))
+            .notify(NOTIFICATION_ID, inputNotification(currentHost, port))
     }
 
     private fun onPairingServiceLost() {
-        if (busy) return
+        if (busy || manualMode) return
         currentPort = -1
         Log.i(TAG, "配对服务消失，恢复搜索状态通知")
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID, searchingNotification())
+    }
+
+    // ---------------------------------------------------- 手动地址兜底（免 mDNS）
+
+    /**
+     * 用户通过通知栏手动回传系统配对页显示的「IP:端口」。
+     * 走 getForegroundService 回传，先满足 Android 12+ 的 5 秒 startForeground 要求。
+     */
+    private fun handleManualAddr(intent: Intent) {
+        promoteForeground(searchingNotification())
+        if (busy) return
+        val raw = RemoteInput.getResultsFromIntent(intent)
+            ?.getCharSequence(KEY_ADDR)?.toString()?.trim().orEmpty()
+        val parsed = parseHostPort(raw)
+        if (parsed == null) {
+            Log.w(TAG, "手动地址无法解析: \"$raw\"")
+            getSystemService(NotificationManager::class.java)
+                .notify(NOTIFICATION_ID, manualAddrErrorNotification(raw))
+            return
+        }
+        val (host, port) = parsed
+        manualMode = true
+        currentHost = host
+        currentPort = port
+        Log.i(TAG, "使用手动配对地址: $host:$port，停止 mDNS 发现")
+        discovery?.stop()
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIFICATION_ID, inputNotification(host, port))
+    }
+
+    /**
+     * 解析用户照抄的配对页地址。支持「192.168.1.5:37211」和「192.168.1.5 37211」
+     * 两种写法（冒号/空格分隔）。系统配对页显示的一律是 IPv4，这里也只接受 IPv4，
+     * 拒绝主机名/IPv6，避免随手输错后在 TLS 连接处白白等 10 秒超时。
+     * @return host to port；格式不合法返回 null
+     */
+    private fun parseHostPort(input: String): Pair<String, Int>? {
+        if (input.isBlank()) return null
+        // 最后一个冒号或空白作为分隔；端口取末尾 2~5 位数字
+        val match = Regex("^(.+?)[\\s:]+(\\d{2,5})$").find(input) ?: return null
+        val host = match.groupValues[1].trim().removePrefix("http://").removePrefix("https://")
+        val port = match.groupValues[2].toInt()
+        val ipv4 = Regex("^(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$")
+            .find(host) ?: return null
+        if (ipv4.groupValues.drop(1).any { it.toInt() > 255 }) return null
+        if (port !in 1024..65535) return null
+        return host to port
+    }
+
+    // ---------------------------------------- 第二阶段兜底：手动输入 connect 地址
+
+    /**
+     * 授权工作线程（pairAndGrant 内）在 mDNS 两轮找不到 connect 服务时调用：
+     * 发通知请用户照抄无线调试【主页面】地址，阻塞等待回传或超时。
+     */
+    private val manualConnectProvider = AdbAuthManager.ManualConnectProvider {
+        connectEndpoint = null
+        connectLatch = java.util.concurrent.CountDownLatch(1)
+        connectRequestActive = true
+        promoteForeground(manualConnectNotification(null))
+        val signalled = try {
+            connectLatch.await(MANUAL_CONNECT_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (e: InterruptedException) {
+            false
+        }
+        connectRequestActive = false
+        val ep = connectEndpoint
+        Log.i(TAG, "手动 connect 等待结束：signalled=$signalled endpoint=$ep")
+        ep
+    }
+
+    /** 通知栏回传无线调试主页面地址；格式错误时刷新通知让用户重输，不解除等待 */
+    private fun handleManualConnect(intent: Intent) {
+        promoteForeground(workingNotification())
+        if (!connectRequestActive) return
+        val raw = RemoteInput.getResultsFromIntent(intent)
+            ?.getCharSequence(KEY_CONNECT_ADDR)?.toString()?.trim().orEmpty()
+        val parsed = parseHostPort(raw)
+        if (parsed == null) {
+            Log.w(TAG, "手动连接地址无法解析: \"$raw\"")
+            getSystemService(NotificationManager::class.java)
+                .notify(NOTIFICATION_ID, manualConnectNotification(raw))
+            return
+        }
+        connectEndpoint = parsed
+        connectRequestActive = false
+        connectLatch.countDown()
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIFICATION_ID, workingNotification())
     }
 
     // ---------------------------------------------------------------- 输入回传
@@ -182,6 +315,7 @@ class AdbPairingService : Service() {
         val code = RemoteInput.getResultsFromIntent(intent)
             ?.getCharSequence(KEY_CODE)?.toString()?.trim().orEmpty()
         val port = intent.getIntExtra(EXTRA_PORT, currentPort).takeIf { it > 0 } ?: currentPort
+        val host = intent.getStringExtra(EXTRA_HOST)?.takeIf { it.isNotBlank() } ?: currentHost
 
         if (!code.matches(Regex("\\d{6}"))) {
             postResult(
@@ -194,7 +328,7 @@ class AdbPairingService : Service() {
         if (port <= 0) {
             postResult(
                 success = false,
-                shortText = "未获取到配对端口，请重新打开配对页后点重试",
+                shortText = "未获取到配对端口，请重新打开配对页后点重试，或点「手动输入」照抄页面地址",
                 detail = null
             )
             return
@@ -207,8 +341,11 @@ class AdbPairingService : Service() {
         thread(name = "adb-pair-grant") {
             try {
                 // 完整闭环：配对 → 发现 connect 端口 → pm grant / shell 直写兜底 → 验证
+                // host：自动发现时固定 127.0.0.1；手动兜底时为用户填写的局域网 IP
+                // manualConnectProvider：mDNS 找不到 connect 服务时，通知栏向用户
+                // 索取无线调试主页面地址（第二阶段兜底）
                 val r = AdbAuthManager.pairAndGrant(
-                    applicationContext, code, "127.0.0.1", port
+                    applicationContext, code, host, port, manualConnectProvider
                 )
                 postResult(
                     success = true,
@@ -240,7 +377,37 @@ class AdbPairingService : Service() {
     private fun searchingNotification(): Notification =
         baseBuilder()
             .setContentTitle("正在搜索无线调试配对服务…")
-            .setContentText("请打开系统「无线调试 → 使用配对码配对设备」页面")
+            .setContentText("请打开系统「无线调试 → 使用配对码配对设备」页面；一直搜不到可点「手动输入」")
+            .setStyle(
+                Notification.BigTextStyle().bigText(
+                    "1. 打开系统「无线调试 → 使用配对码配对设备」页面\n" +
+                        "2. 页面上有 6 位配对码和「IP 地址和端口」（形如 192.168.1.5:37211）\n" +
+                        "3. 一直搜不到时点下方「手动输入」照填地址端口，再输入配对码\n\n" +
+                        "怕抄错？建议先用另一部手机把整个配对页拍下来，或把地址、端口、配对码写在纸上，对照输入"
+                )
+            )
+            .addAction(manualAddrAction())
+            .addAction(stopAction())
+            .build()
+
+    /** 手动地址解析失败时的提示通知：保留输入入口，允许用户照着重输 */
+    private fun manualAddrErrorNotification(rawInput: String): Notification =
+        baseBuilder()
+            .setContentTitle("地址格式不正确，请重新输入")
+            .setContentText(
+                "请照抄系统配对页上「IP 地址和端口」那一整行，形如 192.168.1.5:37211" +
+                    if (rawInput.isNotBlank()) "（刚才收到：\"$rawInput\"）" else ""
+            )
+            .setStyle(
+                Notification.BigTextStyle()
+                    .bigText(
+                        "请照抄系统配对页上「IP 地址和端口」那一整行，形如 192.168.1.5:37211。\n" +
+                            "注意：\n· IP 和端口之间用英文冒号或空格\n· 配对页必须保持显示，别退出\n" +
+                            "· 建议先用另一部手机拍照，或写在纸上对照输入\n" +
+                            if (rawInput.isNotBlank()) "刚才收到：\"$rawInput\"" else ""
+                    )
+            )
+            .addAction(manualAddrAction())
             .addAction(stopAction())
             .build()
 
@@ -250,7 +417,7 @@ class AdbPairingService : Service() {
             .setContentText("请勿关闭系统无线调试页面")
             .build()
 
-    private fun inputNotification(port: Int): Notification {
+    private fun inputNotification(host: String, port: Int): Notification {
         val remoteInput = RemoteInput.Builder(KEY_CODE)
             .setLabel("输入 6 位配对码")
             .build()
@@ -258,6 +425,7 @@ class AdbPairingService : Service() {
         val replyIntent = Intent(this, AdbPairingService::class.java)
             .setAction(ACTION_REPLY)
             .putExtra(EXTRA_PORT, port)
+            .putExtra(EXTRA_HOST, host)
         val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         } else {
@@ -271,9 +439,76 @@ class AdbPairingService : Service() {
 
         return baseBuilder()
             .setContentTitle("请输入配对码")
-            .setContentText("保持系统配对页显示，下拉通知栏点下方按钮输入 6 位码")
+            .setContentText("目标 $host:$port；保持系统配对页显示，点下方按钮输入 6 位码")
             .addAction(action)
+            .addAction(manualAddrAction())
             .addAction(stopAction())
+            .build()
+    }
+
+    /** 手动输入配对页「IP:端口」的通知动作（RemoteInput 直填，不拉起任何界面） */
+    private fun manualAddrAction(): Notification.Action {
+        val remoteInput = RemoteInput.Builder(KEY_ADDR)
+            // 输入框内联提示文字不宜过长（部分 ROM 只显示一行）：
+            // 完整的拍照/抄纸条说明放在通知展开正文里
+            .setLabel("照填 IP:端口，如 192.168.1.5:37211")
+            .build()
+
+        val intent = Intent(this, AdbPairingService::class.java)
+            .setAction(ACTION_MANUAL_ADDR)
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        // getForegroundService：回传发生在 App 后台（系统设置页在前台），
+        // Android 12+ 要求 5 秒内 startForeground
+        val pi = PendingIntent.getForegroundService(this, 14, intent, flags)
+
+        return Notification.Action.Builder(null, "手动输入", pi)
+            .addRemoteInput(remoteInput)
+            .build()
+    }
+
+    /**
+     * 第二阶段通知：配对已成功，索取无线调试【主页面】的连接地址。
+     * 必须强调"不是配对弹窗里的端口"，两处端口数字不同，用户极易抄混。
+     */
+    private fun manualConnectNotification(badRaw: String?): Notification =
+        baseBuilder()
+            .setContentTitle("配对成功，请输入连接地址（最后一步）")
+            .setContentText("退出配对码弹窗，照抄「无线调试」主页面上的 IP 地址和端口")
+            .setStyle(
+                Notification.BigTextStyle().bigText(
+                    "配对已成功，还差最后一步：\n" +
+                        "1. 点返回退出配对码弹窗，回到「无线调试」主页面\n" +
+                        "2. 把主页面上显示的「IP 地址和端口」照填到下方输入框，形如 192.168.1.5:42117\n" +
+                        "注意：这是主页面上的端口，和刚才配对弹窗里的端口【不是同一个】\n" +
+                        "怕抄错？先用另一部手机把主页面拍下来，或写在纸上对照输入" +
+                        if (!badRaw.isNullOrBlank()) "\n\n刚才收到的格式不对：\"$badRaw\"，请重新输入" else ""
+                )
+            )
+            .addAction(manualConnectAction())
+            .addAction(stopAction())
+            .build()
+
+    /** 手动输入无线调试主页面「IP:端口」的通知动作 */
+    private fun manualConnectAction(): Notification.Action {
+        val remoteInput = RemoteInput.Builder(KEY_CONNECT_ADDR)
+            .setLabel("主页面 IP:端口，如 192.168.1.5:42117")
+            .build()
+
+        val intent = Intent(this, AdbPairingService::class.java)
+            .setAction(ACTION_MANUAL_CONNECT)
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        val pi = PendingIntent.getForegroundService(this, 15, intent, flags)
+
+        return Notification.Action.Builder(null, "输入连接地址", pi)
+            .addRemoteInput(remoteInput)
             .build()
     }
 
@@ -338,6 +573,9 @@ class AdbPairingService : Service() {
 
     private fun finishAndStop(removeNotification: Boolean) {
         discovery?.stop()
+        // 用户取消/服务收尾时解除第二阶段手动输入的阻塞等待（endpoint 保持 null）
+        connectRequestActive = false
+        connectLatch.countDown()
         try {
             if (!removeNotification && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 // DETACH：结果通知脱离前台服务生命周期保留在通知栏（本服务实际只在 API30+ 运行）
