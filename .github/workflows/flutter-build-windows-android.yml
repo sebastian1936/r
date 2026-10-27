@@ -506,8 +506,13 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # GitHub runner 到 Ubuntu apt 源（Azure CDN）偶发 TCP 挂起：连接建立但
+          # 不传数据，apt 默认无数据超时会干等（实测此步从正常 40s 卡到 85 分钟）。
+          # 加数据超时+重试，卡住 20s 即断开重连，最多重试 5 次；
+          # --no-install-recommends 只装硬依赖，减少下载量，显式列出的 dev 包不受影响。
+          echo 'Acquire::Retries "5"; Acquire::http::Timeout "20"; Acquire::https::Timeout "20";' | sudo tee /etc/apt/apt.conf.d/99ci-timeouts
           sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get install -y --no-install-recommends \
                clang \
                cmake \
                curl \
