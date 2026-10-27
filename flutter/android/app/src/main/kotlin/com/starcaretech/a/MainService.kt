@@ -82,6 +82,8 @@ const val FRAME_STALL_THRESHOLD_MS = 6_000L
 const val FRAME_STALL_GRACE_MS = 8_000L
 const val STALL_REBUILD_WINDOW_MS = 60_000L
 const val STALL_REBUILD_MAX = 2
+// 无事件静默探针：息屏恢复后这么久仍无帧，且重建链未触发，主动上传诊断（只传一次）
+const val SILENT_NO_FRAME_MS = 15_000L
 // VirtualDisplay.onResumed 若发生在本次采集启动后该窗口内，视为我们自己
 // stop/start 切 surface 引起，不触发停滞判定（防止重连后静态桌面误重建）
 const val SELF_RESUME_SUPPRESS_MS = 3_000L
@@ -426,13 +428,13 @@ class MainService : Service() {
     private val screenStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
-                Intent.ACTION_SCREEN_ON, Intent.ACTION_USER_PRESENT ->
-                    handleScreenStateChanged()
+                Intent.ACTION_SCREEN_ON -> handleScreenStateChanged("broadcast_screen_on")
+                Intent.ACTION_USER_PRESENT -> handleScreenStateChanged("broadcast_user_present")
             }
         }
     }
 
-    private fun handleScreenStateChanged() {
+    private fun handleScreenStateChanged(source: String = "broadcast") {
         // 用户主动关服后，服务实例可能因 MainActivity 仍 bind 而存活、onDestroy
         // 不执行，本 receiver 也未注销。此时亮屏/解锁绝不能恢复录屏或重连信令，
         // 否则 FFI.startService() 会清掉 stop-service 标记并重新注册上线，
@@ -442,14 +444,16 @@ class MainService : Service() {
             return
         }
         // 亮屏/解锁后开始等帧：部分 ROM（红米 Android16 实测）解锁后
-        // projection 未失效但帧流不恢复，由帧看门狗在阈值后软重建采集链
+        // projection 未失效但帧流不恢复，由帧看门狗在阈值后软重建采集链。
+        // 留痕广播到达事实——若云端只见 poll flip 不见 broadcast，即 ROM 掐广播
+        captureDiag(
+            "screen event src=$source isStart=$isStart hasProjection=${mediaProjection != null} " +
+                "interactive=${powerManager.isInteractive} locked=${keyguardManager?.isKeyguardLocked}"
+        )
         if (isStart && mediaProjection != null && powerManager.isInteractive) {
-            val now = SystemClock.elapsedRealtime()
-            awaitingFramesSinceMs = now
-            serviceHandler?.let { h ->
-                h.removeCallbacks(frameStallCheckOnce)
-                // 给系统渲染/解锁动画 3s 恢复时间，再做首次停滞校验
-                h.postDelayed(frameStallCheckOnce, 3_000L)
+            // 停在锁屏页（SCREEN_ON 但未解锁）时先不判，等 USER_PRESENT/轮询解锁翻转
+            if (keyguardManager?.isKeyguardLocked != true) {
+                beginAwaitingFrames(source)
             }
         }
         if (!_isReady) {
@@ -637,13 +641,16 @@ class MainService : Service() {
     /** 最近一次收到屏幕帧的时刻（onImageAvailable 实际取到 image 时更新，仅用于日志） */
     @Volatile
     private var lastFrameElapsedMs = 0L
+    /** 采集进程累计收到的帧数（诊断用：区分"帧没到采集链"与"帧到了但下游断"） */
+    @Volatile
+    private var frameTotalCounter = 0L
     /** 本次采集启动时刻，启动初期给宽限，避免冷启动慢被误判 */
     @Volatile
     private var captureStartedMs = 0L
     /**
      * 非 0 表示正在等待屏幕恢复后的首批帧（值为等待起点）。
-     * 仅由亮屏/解锁/VirtualDisplay.onResumed 置位、收到任意帧清零；
-     * 为 0 时看门狗不判定——静态画面无帧属正常，避免误杀。
+     * 由亮屏/解锁广播、VirtualDisplay.onResumed、或看门狗轮询到的屏幕状态翻转置位，
+     * 收到任意帧清零；为 0 时不做重建判定——静态画面无帧属正常，避免误杀。
      */
     @Volatile
     private var awaitingFramesSinceMs = 0L
@@ -653,12 +660,111 @@ class MainService : Service() {
     @Volatile
     private var stallWindowStartMs = 0L
 
+    // —— 不依赖系统广播/回调的轮询兜底（国产 ROM 可能掐掉 SCREEN_ON/USER_PRESENT
+    // 或不回调 VirtualDisplay.onResumed）：看门狗每 tick 直接读系统状态比对翻转 ——
+    @Volatile
+    private var prevInteractive: Boolean = true
+    @Volatile
+    private var prevKeyguardLocked: Boolean = false
+    /** 本次采集期间是否观察到息屏（tick 轮询到 interactive=false 即置位，startCapture 复位）。
+     *  仅用于给"无事件静默探针"门控，保证从未息屏的纯静态桌面不会被误报 */
+    @Volatile
+    private var screenOffSeenDuringCapture = false
+    /** 同一次无帧现场静默上报只发一次，帧流恢复后复位 */
+    @Volatile
+    private var silentProbeFired = false
+
     private val frameStallCheckOnce = Runnable { runCatching { checkFrameStall() } }
 
     private val frameWatchdogRunnable = object : Runnable {
         override fun run() {
+            // 顺序：先轮询屏幕翻转（可能置等帧状态），再跑停滞判定与静默探针
+            runCatching { pollScreenStateFlip() }
             runCatching { checkFrameStall() }
+            runCatching { silentNoFrameProbe() }
             serviceHandler?.postDelayed(this, FRAME_WATCHDOG_INTERVAL_MS)
+        }
+    }
+
+    /** 统一置位"等待恢复后首批帧"并留痕（来源用于诊断哪条触发链生效） */
+    private fun beginAwaitingFrames(source: String) {
+        if (!isStart || mediaProjection == null) return
+        val now = SystemClock.elapsedRealtime()
+        val already = awaitingFramesSinceMs != 0L
+        awaitingFramesSinceMs = now
+        captureDiag(
+            "await begin src=$source already=$already interactive=${powerManager.isInteractive} " +
+                "locked=${keyguardManager?.isKeyguardLocked} totalFrames=$frameTotalCounter " +
+                "lastFrameAge=${now - lastFrameElapsedMs}ms"
+        )
+        serviceHandler?.let { h ->
+            h.removeCallbacks(frameStallCheckOnce)
+            h.postDelayed(frameStallCheckOnce, 3_000L)
+        }
+    }
+
+    /** 采集链诊断：写 AdbAuthManager 诊断缓冲（随任意一次 DiagUploader 上报带上云端） */
+    private fun captureDiag(text: String) {
+        runCatching {
+            com.starcaretech.a.adb.AdbAuthManager.trace(applicationContext, "capture: $text")
+        }
+    }
+
+    /** 采集链异常：立即静默上传诊断现场（不等 ADB 授权失败触发点） */
+    private fun reportCaptureStall(reason: String) {
+        runCatching {
+            com.starcaretech.a.adb.DiagUploader.reportAsync(
+                applicationContext, "capture_stall", reason
+            )
+        }
+    }
+
+    /**
+     * 轮询屏幕交互/锁屏状态翻转。不依赖广播：即使 ROM 掐掉 SCREEN_ON/USER_PRESENT，
+     * 3s 粒度的轮询也能在亮屏/解锁后识别恢复并进入等帧判定。
+     */
+    private fun pollScreenStateFlip() {
+        if (serviceDestroyed) return
+        val interactive = powerManager.isInteractive
+        val locked = keyguardManager?.isKeyguardLocked == true
+        if (!interactive) screenOffSeenDuringCapture = true
+        if (isStart && mediaProjection != null) {
+            if (!prevInteractive && interactive) {
+                captureDiag("poll flip: screen off->on（广播可能被 ROM 限制，轮询兜底生效）")
+                if (!locked) beginAwaitingFrames("poll_screen_on")
+            }
+            if (prevKeyguardLocked && !locked && interactive) {
+                captureDiag("poll flip: keyguard locked->unlocked")
+                beginAwaitingFrames("poll_unlock")
+            }
+        }
+        prevInteractive = interactive
+        prevKeyguardLocked = locked
+    }
+
+    /**
+     * 无事件静默探针（只诊断、不重建）：本次采集期间观察到过息屏，亮屏解锁后
+     * 超过 [SILENT_NO_FRAME_MS] 仍一帧未来（且系统广播/onResumed 触发链因
+     * ROM 限制等原因没走到重建），主动上传一次现场。覆盖"看门狗活着但没动作"。
+     * 注意：帧持续到达 Kotlin 但主控无画面（下游 Rust 编码/传输嫌疑）不触发本探针，
+     * 那种情况 lastFrameAge 一直很小，需后续在 Rust 侧加编码帧时间戳才能确诊。
+     */
+    private fun silentNoFrameProbe() {
+        if (silentProbeFired) return
+        if (!isStart || mediaProjection == null) return
+        if (!powerManager.isInteractive) return
+        if (keyguardManager?.isKeyguardLocked == true) return
+        val now = SystemClock.elapsedRealtime()
+        if (!screenOffSeenDuringCapture) return
+        if (now - captureStartedMs < SILENT_NO_FRAME_MS) return
+        val lastAge = now - lastFrameElapsedMs
+        if (lastFrameElapsedMs == 0L || lastAge > SILENT_NO_FRAME_MS) {
+            silentProbeFired = true
+            captureDiag(
+                "silent probe: 息屏恢复后 ${lastAge}ms 无帧（awaiting=${awaitingFramesSinceMs != 0L}）" +
+                    "totalFrames=$frameTotalCounter —— 帧未到采集链且重建链未触发"
+            )
+            reportCaptureStall("no_frame_silent")
         }
     }
 
@@ -670,6 +776,7 @@ class MainService : Service() {
     private val virtualDisplayCallback = object : VirtualDisplay.Callback() {
         override fun onPaused() {
             Log.i(logTag, "VirtualDisplay onPaused（通常为锁屏，息屏期间不做停滞判定）")
+            captureDiag("vd onPaused")
         }
 
         override fun onResumed() {
@@ -680,12 +787,11 @@ class MainService : Service() {
             val sinceStart = SystemClock.elapsedRealtime() - captureStartedMs
             val selfCaused = sinceStart < SELF_RESUME_SUPPRESS_MS
             Log.i(logTag, "VirtualDisplay onResumed（sinceStart=${sinceStart}ms selfCaused=$selfCaused）")
-            if (!selfCaused && isStart && mediaProjection != null) {
-                awaitingFramesSinceMs = SystemClock.elapsedRealtime()
-                serviceHandler?.let { h ->
-                    h.removeCallbacks(frameStallCheckOnce)
-                    h.postDelayed(frameStallCheckOnce, 3_000L)
-                }
+            captureDiag("vd onResumed sinceStart=${sinceStart}ms selfCaused=$selfCaused")
+            if (!selfCaused && isStart && mediaProjection != null
+                && powerManager.isInteractive && keyguardManager?.isKeyguardLocked != true
+            ) {
+                beginAwaitingFrames("vd_resumed")
             }
         }
     }
@@ -1099,32 +1205,36 @@ class MainService : Service() {
             stallWindowStartMs = now
             stallRebuildCount = 0
         }
+        val frameAgeMs = now - lastFrameElapsedMs
         if (stallRebuildCount >= STALL_REBUILD_MAX) {
             Log.w(
                 logTag,
                 "屏幕恢复后 ${now - awaitingSince}ms 无帧，已软重建 $stallRebuildCount 次仍无帧，" +
                     "判定 MediaProjection 僵尸（onStop 丢失），转重新授权流程"
             )
-            com.starcaretech.a.adb.AdbAuthManager.trace(
-                applicationContext,
-                "frame stall: 重建耗尽，invalidate projection（lastFrame 距今 ${now - lastFrameElapsedMs}ms）"
+            captureDiag(
+                "frame stall: 重建耗尽，invalidate projection（无帧 ${now - awaitingSince}ms，" +
+                    "lastFrameAge=${frameAgeMs}ms totalFrames=$frameTotalCounter）"
             )
             awaitingFramesSinceMs = 0L
+            // onProjectionInvalid(fromStall=true) 内部会 trace 引导方式并立即上传
             // onProjectionInvalid 会 stopCapture、置 resumeWanted，授权恢复后自动续采集
-            onProjectionInvalid()
+            onProjectionInvalid(fromStall = true)
             return
         }
 
         stallRebuildCount++
         Log.w(
             logTag,
-            "屏幕恢复后 ${now - awaitingSince}ms 无帧（最后一帧距今 ${now - lastFrameElapsedMs}ms），" +
+            "屏幕恢复后 ${now - awaitingSince}ms 无帧（最后一帧距今 ${frameAgeMs}ms），" +
                 "第 $stallRebuildCount/$STALL_REBUILD_MAX 次软重建采集链"
         )
-        com.starcaretech.a.adb.AdbAuthManager.trace(
-            applicationContext,
-            "frame stall ${now - awaitingSince}ms，软重建 #$stallRebuildCount"
+        captureDiag(
+            "frame stall 无帧 ${now - awaitingSince}ms（lastFrameAge=${frameAgeMs}ms，" +
+                "totalFrames=$frameTotalCounter），软重建 #$stallRebuildCount"
         )
+        // 第一次确认僵死就上传，重建结果由后续 recovered / reauth 日志串起来
+        reportCaptureStall("soft_rebuild_$stallRebuildCount")
         // 强制丢弃可能已被 ROM 冻结的 VirtualDisplay（而不是 setSurface(null) 复用），
         // 用现存 projection 全新创建；若 projection 实际已被收回，
         // createVirtualDisplay 抛 SecurityException 会自动转入重新授权
@@ -1136,6 +1246,8 @@ class MainService : Service() {
             awaitingFramesSinceMs = SystemClock.elapsedRealtime()
         } else {
             Log.w(logTag, "帧停滞软重建：startCapture 返回 false（按现有失败路径处理）")
+            captureDiag("frame stall: 软重建后 startCapture=false，走既有失效路径")
+            reportCaptureStall("rebuild_start_failed")
         }
     }
 
@@ -1145,7 +1257,7 @@ class MainService : Service() {
      * 对"建立即死"的连续失败做熔断：不再自动弹系统确认框（否则崩溃恢复/token 半死后
      * 会形成 允许→onStop→再弹 的无限循环），只保留通知由用户手动点重试。
      */
-    private fun onProjectionInvalid() {
+    private fun onProjectionInvalid(fromStall: Boolean = false) {
         if (serviceDestroyed) {
             Log.d(logTag, "服务已销毁，忽略 MediaProjection 失效回调")
             return
@@ -1172,7 +1284,20 @@ class MainService : Service() {
             shortLivedProjectionFailures = 0
             false
         }
-        promptProjectionRecovery(fused)
+        if (fromStall) {
+            // 关键现场：走到这说明软重建也救不回。用户能否无感恢复取决于引导结局：
+            // 被控时 App 在后台通常得到 background_notice——只发通知等人点，
+            // 这正是"30 秒仍无画面"的典型落点
+            val outcome = promptProjectionRecovery(fused)
+            captureDiag(
+                "projection invalidated（帧停滞升级）：lived=${livedMs}ms fused=$fused " +
+                    "interactive=${powerManager.isInteractive} locked=${keyguardManager?.isKeyguardLocked} " +
+                    "totalFrames=$frameTotalCounter outcome=$outcome"
+            )
+            reportCaptureStall("reauth_$outcome")
+        } else {
+            promptProjectionRecovery(fused)
+        }
     }
 
     /** 记录一次"建立即死/授权失败"，返回是否已熔断（应停止自动弹窗） */
@@ -1198,10 +1323,12 @@ class MainService : Service() {
      *
      * @param fused true=已熔断：不自动拉起系统确认框（避免无限循环弹框），
      *              只发/更新通知，由用户主动点击重试
+     * @return 本次引导的结局标识（诊断用）：in_flight / fused_notice /
+     *  already_ready / background_notice / debounced / auto_prompt_started / auto_prompt_blocked
      */
-    private fun promptProjectionRecovery(fused: Boolean) {
+    private fun promptProjectionRecovery(fused: Boolean): String {
         if (serviceDestroyed) {
-            return
+            return "service_destroyed"
         }
         // 系统录屏确认框已在屏幕上等待操作时（含 Android14+「整个屏幕/
         // 指定应用」选择式弹窗用户阅读选择的几秒）：弹窗本身就是引导，
@@ -1211,7 +1338,7 @@ class MainService : Service() {
         // 成功会撤通知，取消会释放闸门，后续触发才会重新引导。
         if (projectionRequestInFlight) {
             Log.i(logTag, "录屏授权请求在途（系统确认框显示中），跳过恢复通知与重复弹窗")
-            return
+            return "in_flight"
         }
         val intent = Intent(this, PermissionRequestTransparentActivity::class.java).apply {
             action = ACT_REQUEST_MEDIA_PROJECTION
@@ -1222,10 +1349,10 @@ class MainService : Service() {
 
         if (fused) {
             Log.w(logTag, "录屏会话连续短命失效，已熔断自动弹窗，仅保留通知供手动重试")
-            return
+            return "fused_notice"
         }
         if (_isReady || mediaProjection != null) {
-            return
+            return "already_ready"
         }
         val keyguardManager =
             getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
@@ -1237,7 +1364,9 @@ class MainService : Service() {
                 logTag,
                 "非可交互前台（亮屏=$screenOn 解锁=$unlocked 前台=$foreground），仅通知引导，不自动弹录屏框"
             )
-            return
+            // 被控时 App 必然在后台：这是"30 秒仍无画面"的典型结局——
+            // 只发了恢复通知，需要人点通知（或无障碍后续拉起）才能弹系统确认框
+            return "background_notice(on=$screenOn,unlocked=$unlocked,fg=$foreground)"
         }
         // 注意：全局在途闸门由 PermissionRequestTransparentActivity 持有，
         // Service 端不能先占位——否则透明页 onCreate 抢闸门必败直接 finish，
@@ -1247,13 +1376,15 @@ class MainService : Service() {
         val now = SystemClock.elapsedRealtime()
         if (now - lastAutoPromptMs < 3_000L) {
             Log.i(logTag, "3s 内已发起过录屏授权引导，忽略重复请求")
-            return
+            return "debounced"
         }
         lastAutoPromptMs = now
-        try {
+        return try {
             startActivity(intent)
+            "auto_prompt_started"
         } catch (e: Exception) {
             Log.w(logTag, "后台拉起授权页被系统拦截，改由全屏通知引导", e)
+            "auto_prompt_blocked:${e.javaClass.simpleName}"
         }
     }
 
@@ -1315,14 +1446,22 @@ class MainService : Service() {
                             // If not call acquireLatestImage, listener will not be called again
                             imageReader.acquireLatestImage().use { image ->
                                 if (image == null || !isStart) return@setOnImageAvailableListener
+                                val frameNow = SystemClock.elapsedRealtime()
+                                frameTotalCounter++
                                 // 帧流存活证据：看门狗据此解除"亮屏后等帧"状态
                                 if (awaitingFramesSinceMs != 0L) {
+                                    val waitedMs = frameNow - awaitingFramesSinceMs
                                     // 恢复事件后的首批帧到达：采集链自愈确认，清零熔断计数
                                     awaitingFramesSinceMs = 0L
                                     stallRebuildCount = 0
                                     stallWindowStartMs = 0L
+                                    silentProbeFired = false
+                                    captureDiag(
+                                        "frames recovered：等待 ${waitedMs}ms 后首批帧到达，" +
+                                            "totalFrames=$frameTotalCounter"
+                                    )
                                 }
-                                lastFrameElapsedMs = SystemClock.elapsedRealtime()
+                                lastFrameElapsedMs = frameNow
                                 val planes = image.planes
                                 val buffer = planes[0].buffer
                                 buffer.rewind()
@@ -1412,10 +1551,17 @@ class MainService : Service() {
         MainActivity.rdClipboardManager?.setCaptureStarted(_isStart)
         // 启动帧停滞看门狗：只做巡检，是否判定由"亮屏/onResumed 后等帧"状态门控
         captureStartedMs = SystemClock.elapsedRealtime()
+        silentProbeFired = false
         serviceHandler?.let { h ->
             h.removeCallbacks(frameWatchdogRunnable)
             h.postDelayed(frameWatchdogRunnable, FRAME_WATCHDOG_INTERVAL_MS)
         }
+        // 构建标识：任何一次 capture_stall 上报带上此行，即可确认用户装的是含
+        // 看门狗+轮询兜底+静默探针的新包（DiagUploader 另自带 ver_code 可交叉验证）
+        captureDiag(
+            "watchdog armed sdk=${Build.VERSION.SDK_INT} reuseVD=$reuseVirtualDisplay " +
+                "tick=${FRAME_WATCHDOG_INTERVAL_MS}ms stall=${FRAME_STALL_THRESHOLD_MS}ms"
+        )
         return true
     }
 
