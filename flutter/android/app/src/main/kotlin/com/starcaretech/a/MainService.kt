@@ -72,6 +72,20 @@ const val PROJECTION_STABLE_LIFETIME_MS = 20_000L
 const val PROJECTION_FUSE_WINDOW_MS = 60_000L
 const val PROJECTION_FUSE_MAX_FAILURES = 2
 
+// 帧停滞看门狗：仅在屏幕经历过「息屏→亮屏/解锁」或 VirtualDisplay onResumed
+// 之后才开始判定（部分 ROM 静态画面本就不持续推帧，纯无帧不能作为判据）。
+// tick 3s；恢复事件后 6s 一帧没来即判定采集链僵死；采集刚（重）建给 8s 宽限；
+// 60s 窗口内最多软重建 2 次，仍无帧则判 projection 僵尸、走重新授权。
+// 实际时间线（解锁后）：~6s 第一次软重建 → ~17s 第二次 → ~26s 重新授权
+const val FRAME_WATCHDOG_INTERVAL_MS = 3_000L
+const val FRAME_STALL_THRESHOLD_MS = 6_000L
+const val FRAME_STALL_GRACE_MS = 8_000L
+const val STALL_REBUILD_WINDOW_MS = 60_000L
+const val STALL_REBUILD_MAX = 2
+// VirtualDisplay.onResumed 若发生在本次采集启动后该窗口内，视为我们自己
+// stop/start 切 surface 引起，不触发停滞判定（防止重连后静态桌面误重建）
+const val SELF_RESUME_SUPPRESS_MS = 3_000L
+
 const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_VP9
 
 // video const
@@ -220,6 +234,10 @@ class MainService : Service() {
     private var serviceHandler: Handler? = null
 
     private val powerManager: PowerManager by lazy { applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager }
+    /** 锁屏页（未解锁）期间镜像行为各 ROM 不一，帧看门狗此时不做停滞判定 */
+    private val keyguardManager: KeyguardManager? by lazy {
+        applicationContext.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+    }
     private val wakeLock: PowerManager.WakeLock by lazy { powerManager.newWakeLock(PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.SCREEN_BRIGHT_WAKE_LOCK, "starcare:wakelock")}
 
     // "保持屏幕开启"：服务运行期间的常驻亮屏锁（不带 ACQUIRE_CAUSES_WAKEUP：
@@ -423,6 +441,17 @@ class MainService : Service() {
             Log.i(logTag, "服务已关闭，忽略亮屏/解锁事件（不恢复录屏/信令）")
             return
         }
+        // 亮屏/解锁后开始等帧：部分 ROM（红米 Android16 实测）解锁后
+        // projection 未失效但帧流不恢复，由帧看门狗在阈值后软重建采集链
+        if (isStart && mediaProjection != null && powerManager.isInteractive) {
+            val now = SystemClock.elapsedRealtime()
+            awaitingFramesSinceMs = now
+            serviceHandler?.let { h ->
+                h.removeCallbacks(frameStallCheckOnce)
+                // 给系统渲染/解锁动画 3s 恢复时间，再做首次停滞校验
+                h.postDelayed(frameStallCheckOnce, 3_000L)
+            }
+        }
         if (!_isReady) {
             Log.i(logTag, "亮屏/解锁：尝试用缓存授权静默恢复录屏")
             if (tryRestoreMediaProjection()) {
@@ -599,6 +628,67 @@ class MainService : Service() {
     private var videoEncoder: MediaCodec? = null
     private var imageReader: ImageReader? = null
     private var virtualDisplay: VirtualDisplay? = null
+
+    // ===================== 帧停滞看门狗 =====================
+    // 僵尸会话场景（红米 Turbo 5 Max / Android 16 实测）：锁屏再亮屏后
+    // MediaProjection 未被收回（系统"正在录屏"通知还在、onStop 不回调、
+    // createVirtualDisplay 也不抛异常），但 VirtualDisplay/ImageReader 已
+    // 停止供帧，主控一直"等待画面传输"，本应用既检测不到也不提示。
+    /** 最近一次收到屏幕帧的时刻（onImageAvailable 实际取到 image 时更新，仅用于日志） */
+    @Volatile
+    private var lastFrameElapsedMs = 0L
+    /** 本次采集启动时刻，启动初期给宽限，避免冷启动慢被误判 */
+    @Volatile
+    private var captureStartedMs = 0L
+    /**
+     * 非 0 表示正在等待屏幕恢复后的首批帧（值为等待起点）。
+     * 仅由亮屏/解锁/VirtualDisplay.onResumed 置位、收到任意帧清零；
+     * 为 0 时看门狗不判定——静态画面无帧属正常，避免误杀。
+     */
+    @Volatile
+    private var awaitingFramesSinceMs = 0L
+    /** 时间窗内僵尸重建次数与窗口起点（重建多次仍无帧则升级为重新授权） */
+    @Volatile
+    private var stallRebuildCount = 0
+    @Volatile
+    private var stallWindowStartMs = 0L
+
+    private val frameStallCheckOnce = Runnable { runCatching { checkFrameStall() } }
+
+    private val frameWatchdogRunnable = object : Runnable {
+        override fun run() {
+            runCatching { checkFrameStall() }
+            serviceHandler?.postDelayed(this, FRAME_WATCHDOG_INTERVAL_MS)
+        }
+    }
+
+    /**
+     * VirtualDisplay 生命周期回调（onPaused/onResumed 仅 API33+ 会回调，
+     * 低版本注册无副作用）。部分 ROM 锁屏暂停镜像、解锁后不真正恢复，
+     * onResumed 只代表系统"意图恢复"，必须以帧流是否真的回来为准。
+     */
+    private val virtualDisplayCallback = object : VirtualDisplay.Callback() {
+        override fun onPaused() {
+            Log.i(logTag, "VirtualDisplay onPaused（通常为锁屏，息屏期间不做停滞判定）")
+        }
+
+        override fun onResumed() {
+            // 客户端断开/重连时 stopCapture/startCapture 会 setSurface(null)->setSurface(s)，
+            // 同样触发 onResumed；这种"我们自己切 surface"距本次采集启动很近，
+            // 不能置等帧状态（重连后静态桌面本就可能长时间无帧，会误判重建）。
+            // 只有采集已稳定运行后、系统侧（锁屏）自发的 resume 才需要校验。
+            val sinceStart = SystemClock.elapsedRealtime() - captureStartedMs
+            val selfCaused = sinceStart < SELF_RESUME_SUPPRESS_MS
+            Log.i(logTag, "VirtualDisplay onResumed（sinceStart=${sinceStart}ms selfCaused=$selfCaused）")
+            if (!selfCaused && isStart && mediaProjection != null) {
+                awaitingFramesSinceMs = SystemClock.elapsedRealtime()
+                serviceHandler?.let { h ->
+                    h.removeCallbacks(frameStallCheckOnce)
+                    h.postDelayed(frameStallCheckOnce, 3_000L)
+                }
+            }
+        }
+    }
 
     // audio
     private val audioRecordHandle = AudioRecordHandle(this, { isStart }, { isAudioStart })
@@ -980,6 +1070,69 @@ class MainService : Service() {
     }
 
     /**
+     * 帧停滞检测（serviceHandler 周期调用 / 亮屏、VirtualDisplay.onResumed 后追加调用）。
+     *
+     * 只在以下条件全部满足时判定采集链僵死：
+     *  - 采集进行中（isStart）且 projection 对象还在；
+     *  - 屏幕处于交互态（息屏/AOD 不出帧是正常的）；
+     *  - 经历过亮屏/解锁/onResumed 事件且之后一帧都没收到（awaitingFramesSinceMs≠0）；
+     *  - 已超过启动宽限与无帧阈值。
+     * 纯静态画面（从未息屏）不会触发，避免把"画面不动"误判成故障。
+     *
+     * 处置分两级：先强制释放并重建 VirtualDisplay/ImageReader（复用现存 projection，
+     * 无授权弹窗，主控连接不断）；窗口内重建 [STALL_REBUILD_MAX] 次仍无帧，
+     * 判定 projection 已僵尸（onStop 丢失），走 [onProjectionInvalid] 重新授权。
+     */
+    private fun checkFrameStall() {
+        if (serviceDestroyed || !isStart || mediaProjection == null) return
+        // 息屏（含 AOD）期间不供帧属正常，不判定也不重建
+        if (!powerManager.isInteractive) return
+        val awaitingSince = awaitingFramesSinceMs
+        if (awaitingSince == 0L) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - captureStartedMs < FRAME_STALL_GRACE_MS) return
+        if (now - awaitingSince < FRAME_STALL_THRESHOLD_MS) return
+
+        if (now - stallWindowStartMs > STALL_REBUILD_WINDOW_MS) {
+            stallWindowStartMs = now
+            stallRebuildCount = 0
+        }
+        if (stallRebuildCount >= STALL_REBUILD_MAX) {
+            Log.w(
+                logTag,
+                "屏幕恢复后 ${now - awaitingSince}ms 无帧，已软重建 $stallRebuildCount 次仍无帧，" +
+                    "判定 MediaProjection 僵尸（onStop 丢失），转重新授权流程"
+            )
+            com.starcaretech.a.adb.AdbAuthManager.trace(
+                applicationContext,
+                "frame stall: 重建耗尽，invalidate projection（lastFrame 距今 ${now - lastFrameElapsedMs}ms）"
+            )
+            awaitingFramesSinceMs = 0L
+            // onProjectionInvalid 会 stopCapture、置 resumeWanted，授权恢复后自动续采集
+            onProjectionInvalid()
+            return
+        }
+
+        stallRebuildCount++
+        Log.w(
+            logTag,
+            "屏幕恢复后 ${now - awaitingSince}ms 无帧（最后一帧距今 ${now - lastFrameElapsedMs}ms），" +
+                "第 $stallRebuildCount/$STALL_REBUILD_MAX 次软重建采集链"
+        )
+        com.starcaretech.a.adb.AdbAuthManager.trace(
+            applicationContext,
+            "frame stall ${now - awaitingSince}ms，软重建 #$stallRebuildCount"
+        )
+        // 强制丢弃可能已被 ROM 冻结的 VirtualDisplay（而不是 setSurface(null) 复用），
+        // 用现存 projection 全新创建；若 projection 实际已被收回，
+        // createVirtualDisplay 抛 SecurityException 会自动转入重新授权
+        stopCapture(forceReleaseDisplay = true)
+        if (!startCapture()) {
+            Log.w(logTag, "帧停滞软重建：startCapture 返回 false（按现有失败路径处理）")
+        }
+    }
+
+    /**
      * MediaProjection 会话失效（Callback.onStop 或 createVirtualDisplay 抛 SecurityException）。
      * 释放采集资源、同步状态，并重新拉起用户确认流程。
      * 对"建立即死"的连续失败做熔断：不再自动弹系统确认框（否则崩溃恢复/token 半死后
@@ -1155,6 +1308,14 @@ class MainService : Service() {
                             // If not call acquireLatestImage, listener will not be called again
                             imageReader.acquireLatestImage().use { image ->
                                 if (image == null || !isStart) return@setOnImageAvailableListener
+                                // 帧流存活证据：看门狗据此解除"亮屏后等帧"状态
+                                if (awaitingFramesSinceMs != 0L) {
+                                    // 恢复事件后的首批帧到达：采集链自愈确认，清零熔断计数
+                                    awaitingFramesSinceMs = 0L
+                                    stallRebuildCount = 0
+                                    stallWindowStartMs = 0L
+                                }
+                                lastFrameElapsedMs = SystemClock.elapsedRealtime()
                                 val planes = image.planes
                                 val buffer = planes[0].buffer
                                 buffer.rewind()
@@ -1200,6 +1361,11 @@ class MainService : Service() {
             return false
         }
 
+        // 必须在任何 setSurface/createVirtualDisplay 之前刷新：这些调用可能立刻
+        // 把 onResumed 回调投递给 serviceHandler，回调据此判断是不是"我们自己
+        // 切 surface"（@Volatile 保证回调线程先看到本次时间戳而非上一轮旧值）
+        captureStartedMs = SystemClock.elapsedRealtime()
+
         updateScreenInfo(resources.configuration.orientation)
         Log.d(logTag, "Start Capture")
         surface = createSurface()
@@ -1237,12 +1403,24 @@ class MainService : Service() {
         _isStart = true
         FFI.setFrameRawEnable("video",true)
         MainActivity.rdClipboardManager?.setCaptureStarted(_isStart)
+        // 启动帧停滞看门狗：只做巡检，是否判定由"亮屏/onResumed 后等帧"状态门控
+        captureStartedMs = SystemClock.elapsedRealtime()
+        serviceHandler?.let { h ->
+            h.removeCallbacks(frameWatchdogRunnable)
+            h.postDelayed(frameWatchdogRunnable, FRAME_WATCHDOG_INTERVAL_MS)
+        }
         return true
     }
 
     @Synchronized
     fun stopCapture() {
         Log.d(logTag, "Stop Capture")
+        // 停止帧停滞巡检与一切待执行的单次校验
+        serviceHandler?.let { h ->
+            h.removeCallbacks(frameWatchdogRunnable)
+            h.removeCallbacks(frameStallCheckOnce)
+        }
+        awaitingFramesSinceMs = 0L
         FFI.setFrameRawEnable("video",false)
         _isStart = false
         MainActivity.rdClipboardManager?.setCaptureStarted(_isStart)
@@ -1275,6 +1453,94 @@ class MainService : Service() {
         // release audio
         _isAudioStart = false
         audioRecordHandle.tryReleaseAudio()
+    }
+
+    /**
+     * 帧停滞判定（由 serviceHandler 周期/单次调度）。
+     * 门控：仅在亮屏/解锁/onResumed 后置了 [awaitingFramesSinceMs] 才判定，
+     * 静态画面与息屏期间无帧均属正常，不会误杀。
+     * 处置阶梯：窗口内先软重建整条采集链（连复用的 VirtualDisplay 一起重建），
+     * 连续 [STALL_REBUILD_MAX] 次仍无帧，判定 projection 本身僵尸，走
+     * [onProjectionInvalid] 的重新授权流程（前台自动点确认/后台发恢复通知）。
+     * 全程约 26 秒，避免主控长时间停在"等待画面传输"。
+     */
+    private fun checkFrameStall() {
+        if (serviceDestroyed) return
+        val awaiting = awaitingFramesSinceMs
+        if (awaiting == 0L) return
+        if (!isStart || mediaProjection == null) {
+            // 采集已被其他路径停掉，无需再等
+            awaitingFramesSinceMs = 0L
+            return
+        }
+        // 息屏（未解锁）期间屏幕本身无渲染，不判定
+        if (!powerManager.isInteractive) return
+        // 停在锁屏页（亮屏但未解锁）时镜像行为 ROM 各异，等 USER_PRESENT 后再判
+        if (keyguardManager?.isKeyguardLocked == true) return
+        val now = SystemClock.elapsedRealtime()
+        // 采集链刚（重）建，给足冷启动宽限
+        if (now - captureStartedMs < FRAME_STALL_GRACE_MS) return
+        val stalledForMs = now - awaiting
+        if (stalledForMs < FRAME_STALL_THRESHOLD_MS) return
+
+        // —— 确认僵死，开始处置 ——
+        awaitingFramesSinceMs = 0L
+        if (stallWindowStartMs == 0L || now - stallWindowStartMs > STALL_REBUILD_WINDOW_MS) {
+            stallWindowStartMs = now
+            stallRebuildCount = 0
+        }
+        if (stallRebuildCount < STALL_REBUILD_MAX) {
+            stallRebuildCount++
+            com.starcaretech.a.adb.AdbAuthManager.trace(
+                applicationContext,
+                "frame stall #$stallRebuildCount：亮屏后 ${stalledForMs}ms 无帧，软重建采集链"
+            )
+            Log.w(logTag, "frame stall #$stallRebuildCount：${stalledForMs}ms 无帧，软重建采集链")
+            val ok = rebuildCaptureAfterStall()
+            if (ok) {
+                // 重建后继续等帧：新链首帧到达会自动清零；收不到则下一轮再判
+                captureStartedMs = SystemClock.elapsedRealtime()
+                awaitingFramesSinceMs = captureStartedMs
+            }
+            // 重建失败时 startCapture 内部已走失效引导/置 resumeWanted，这里不重复处理
+        } else {
+            com.starcaretech.a.adb.AdbAuthManager.trace(
+                applicationContext,
+                "frame stall：软重建 $stallRebuildCount 次仍无帧，判定 projection 僵尸，重新授权"
+            )
+            Log.e(logTag, "frame stall：软重建 $stallRebuildCount 次仍无帧，按 projection 失效处理")
+            stallRebuildCount = 0
+            stallWindowStartMs = 0L
+            // onProjectionInvalid 会 stopCapture（含取消看门狗调度）并拉起重授权
+            onProjectionInvalid()
+        }
+    }
+
+    /**
+     * 不重新授权、用现有 projection 强制重建整条采集链。
+     * 关键：SDK>33 常规 stopCapture 只 setSurface(null) 复用 VirtualDisplay，
+     * 僵尸往往就出在 display 层，这里必须把它 release 后重新 createVirtualDisplay。
+     */
+    @Synchronized
+    private fun rebuildCaptureAfterStall(): Boolean {
+        if (!isStart || mediaProjection == null) return false
+        FFI.setFrameRawEnable("video", false)
+        _isStart = false
+        MainActivity.rdClipboardManager?.setCaptureStarted(false)
+        // 强制释放全部采集资源（含被复用的 VirtualDisplay、ImageReader、Surface）
+        runCatching { virtualDisplay?.release() }
+        virtualDisplay = null
+        runCatching { imageReader?.close() }
+        imageReader = null
+        videoEncoder?.let { enc ->
+            runCatching { enc.signalEndOfInputStream() }
+            runCatching { enc.stop() }
+            runCatching { enc.release() }
+        }
+        videoEncoder = null
+        runCatching { surface?.release() }
+        surface = null
+        return startCapture()
     }
 
     fun destroy() {
@@ -1363,7 +1629,9 @@ class MainService : Service() {
                 virtualDisplay = mp.createVirtualDisplay(
                     "StarcareVD",
                     SCREEN_INFO.width, SCREEN_INFO.height, SCREEN_INFO.dpi, VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    s, null, null
+                    // 注册生命周期回调：onPaused/onResumed（API33+）用于识别
+                    // 锁屏暂停镜像后"假恢复"的僵尸 VirtualDisplay
+                    s, virtualDisplayCallback, serviceHandler
                 )
             }
             true
@@ -1383,7 +1651,7 @@ class MainService : Service() {
                 mp.createVirtualDisplay(
                     "StarcareVD",
                     SCREEN_INFO.width, SCREEN_INFO.height, SCREEN_INFO.dpi, VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    s, null, null
+                    s, virtualDisplayCallback, serviceHandler
                 )
             } catch (e2: Exception) {
                 Log.w(logTag, "createVirtualDisplay retry fail, projection invalid", e2)
