@@ -93,6 +93,10 @@ const val NO_FRAME_EVER_MS = 10_000L
 // VirtualDisplay.onResumed 若发生在本次采集启动后该窗口内，视为我们自己
 // stop/start 切 surface 引起，不触发停滞判定（防止重连后静态桌面误重建）
 const val SELF_RESUME_SUPPRESS_MS = 3_000L
+// 主控连入时主动亮屏的持续时长：覆盖帧停滞看门狗两次软重建+等帧窗口
+// （最坏时间线约 26s），之后无人操作随系统正常灭屏；期间任意触摸事件
+// 再按原逻辑续 5s
+const val SCREEN_WAKE_ON_CONNECT_MS = 30_000L
 
 const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_VP9
 
@@ -173,6 +177,9 @@ class MainService : Service() {
                         if (!isFileTransfer) {
                             // 新连接到达：取消尚未执行的迟到 stop_capture，防止误杀新会话
                             keepAliveHandler.removeCallbacks(pendingStopCaptureRunnable)
+                            // 被控息屏待机时先主动亮屏：否则采集链僵死后主控无画面、
+                            // 无法产生触摸事件，旧逻辑的"触摸才亮屏"永远触发不了
+                            wakeUpScreenOnConnect()
                             if (!isStart) {
                                 startCapture()
                             }
@@ -1984,6 +1991,33 @@ class MainService : Service() {
             .setContentText(text)
             .build()
         notificationManager.notify(DEFAULT_NOTIFY_ID, notification)
+    }
+
+    /**
+     * 主控授权连入时主动点亮被控屏幕。
+     * 旧逻辑只在收到远程触摸事件时才亮屏（[rustPointerInput]），但息屏后
+     * 采集链若已被 ROM 冻结，主控无画面可操作、永远不会产生触摸事件，形成
+     * 死循环。在连入这一刻主动亮屏，帧停滞看门狗才能捕获亮屏沿并恢复供帧。
+     * - 仅屏幕熄灭时动作，亮屏中重复连入/重连零打扰
+     * - 持锁 [SCREEN_WAKE_ON_CONNECT_MS] 覆盖看门狗处置窗口，超时自动释放，
+     *   不做连接期间常亮（避免异常耗电），后续触摸事件按原逻辑续 5s
+     * - 只点亮、不绕过锁屏密码（系统安全边界）：无密码机主控可上滑进桌面，
+     *   有密码机停在锁屏页，锁屏页同样供帧
+     */
+    private fun wakeUpScreenOnConnect() {
+        if (powerManager.isInteractive) return
+        runCatching {
+            if (wakeLock.isHeld) wakeLock.release()
+            wakeLock.acquire(SCREEN_WAKE_ON_CONNECT_MS)
+            Log.i(logTag, "主控连入：唤醒亮屏 ${SCREEN_WAKE_ON_CONNECT_MS}ms")
+            captureDiag(
+                "connect: 主动亮屏 interactive_after=${powerManager.isInteractive} " +
+                    "locked=${keyguardManager?.isKeyguardLocked}"
+            )
+        }.onFailure {
+            Log.w(logTag, "主控连入唤醒亮屏失败（可能被 ROM 省电策略限制）", it)
+            captureDiag("connect: 主动亮屏失败 ${it.javaClass.simpleName}: ${it.message}")
+        }
     }
 
     /**
