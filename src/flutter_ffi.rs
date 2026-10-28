@@ -2941,4 +2941,25 @@ pub mod server_side {
     ) {
         crate::server::set_call_input_locked(locked != 0);
     }
+
+    /// 供 Android 原生层在不经过 Flutter engine 的情况下写入选项，与 Dart 端
+    /// mainSetOption 完全同一路径：enable-keyboard 会落盘并经
+    /// switch_permission_all 实时同步给所有在线主控（典型场景：连入时
+    /// 无障碍自愈成功，而被控 App UI 未创建、MethodChannel 不存在）。
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_setOption(
+        env: JNIEnv,
+        _class: JClass,
+        key: JString,
+        value: JString,
+    ) {
+        let mut env = env;
+        if let (Ok(key), Ok(value)) = (env.get_string(&key), env.get_string(&value)) {
+            let key: String = key.into();
+            let value: String = value.into();
+            if !key.is_empty() {
+                crate::flutter_ffi::main_set_option(key, value);
+            }
+        }
+    }
 }

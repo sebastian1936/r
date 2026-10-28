@@ -73,6 +73,22 @@ class InputService : AccessibilityService() {
         val isOpen: Boolean
             get() = ctx != null
 
+        /**
+         * 无障碍真实绑定状态变化时同步给 Flutter：驱动被控端输入开关与
+         * enable-keyboard 选项，主控端扳手菜单（返回/主页/任务）据此显隐。
+         * 夜间 ROM 回收后服务被重绑/解绑都会实时推送，不必等下次连入。
+         * Flutter engine 未启动时 channel 为 null，静默跳过——该场景由
+         * MainService 连入自愈后经 FFI.setOption 直写 Rust 兜底。
+         */
+        fun reportInputStateChanged(open: Boolean) {
+            runCatching {
+                MainActivity.flutterMethodChannel?.invokeMethod(
+                    "on_state_changed",
+                    mapOf("name" to "input", "value" to open.toString())
+                )
+            }
+        }
+
         // ---- 系统录屏授权弹窗自动点击的安全闸门 ----
         // 仅当本应用主动发起 MediaProjection 授权（透明授权页拉起系统确认框）
         // 前后 20 秒内才允许点击，绝不触碰任何其他界面的按钮
@@ -991,6 +1007,9 @@ class InputService : AccessibilityService() {
         StartWatchdog.stage("InputService.onServiceConnected: 拉起看门狗前")
         startServiceWatchdog()
         StartWatchdog.stage("InputService.onServiceConnected: done")
+        // 绑定事实同步给 Flutter/在线主控：夜间被 ROM 解绑后，自愈/系统
+        // 重绑成功时扳手菜单的返回/主页/任务键当场恢复，无需重连
+        reportInputStateChanged(true)
     }
 
     private val watchdogTick = object : Runnable {
@@ -1021,6 +1040,9 @@ class InputService : AccessibilityService() {
         runCatching { watchdogHandler.removeCallbacks(watchdogTick) }
         ctx = null
         super.onDestroy()
+        // 解绑事实同步：扳手菜单按键随真实绑定状态消失；
+        // 若随后被自愈拉回，onServiceConnected 会再推 true
+        reportInputStateChanged(false)
     }
 
     override fun onInterrupt() {}

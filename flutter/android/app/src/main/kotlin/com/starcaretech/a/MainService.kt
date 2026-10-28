@@ -176,6 +176,9 @@ class MainService : Service() {
                             if (!isStart) {
                                 startCapture()
                             }
+                            // 夜间 ROM 回收后无障碍可能未绑定：不等 60s 轮询，
+                            // 连入即恢复，成功后扳手菜单按键当场回来
+                            healInputOnConnect()
                         }
                         onClientAuthorizedNotification(id, type, username, peerId)
                     } else {
@@ -293,6 +296,13 @@ class MainService : Service() {
 
         // 录屏授权失效时的全屏引导通知（区别于常驻前台服务通知 DEFAULT_NOTIFY_ID）
         const val RECOVERY_NOTIFY_ID = 2
+        // 无障碍连入自愈失败的引导通知（区别于录屏恢复通知）
+        const val INPUT_RECOVERY_NOTIFY_ID = 3
+
+        /** 连入自愈两次尝试的最小间隔，防弱网重连/多个主控连入时重复扫描 */
+        private const val INPUT_HEAL_THROTTLE_MS = 60_000L
+        @Volatile
+        private var lastInputHealElapsedMs = 0L
         val isReady: Boolean
             get() = _isReady
         val isStart: Boolean
@@ -1974,5 +1984,112 @@ class MainService : Service() {
             .setContentText(text)
             .build()
         notificationManager.notify(DEFAULT_NOTIFY_ID, notification)
+    }
+
+    /**
+     * 主控连入时的无障碍自愈。
+     * 真实故障：被控放一晚上（息屏/Doze/ROM 省电）后 InputService 被解绑，
+     * 进程内 AdbSelfHeal 的 60s 轮询在深度休眠下迟迟不跑，主控连入后扳手
+     * 菜单的返回/主页/任务键整次会话缺失。
+     * - pm_grant 设备：本地写名单/强制重绑，离线、瞬时
+     * - shell_direct 设备：无线调试仍开着则经 adbd 恢复，并自动尝试升级 pm_grant
+     * 60s 节流防弱网重连/多个主控连入时重复扫描；恢复失败发通知引导手动开启。
+     */
+    private fun healInputOnConnect() {
+        if (InputService.isOpen) return
+        // 仅对曾完成无线调试授权（或已持 WSS）的设备自愈：从未配对的纯手动
+        // 设备自动恢复本就无通道，对从未开启输入控制的用户发通知更是骚扰
+        if (!com.starcaretech.a.adb.AdbAuthManager.isPaired(applicationContext) &&
+            !com.starcaretech.a.adb.AdbAuthManager.isWriteSecureSettingsGranted(applicationContext)
+        ) {
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastInputHealElapsedMs < INPUT_HEAL_THROTTLE_MS) {
+            Log.d(logTag, "连入无障碍自愈：节流窗口内跳过")
+            return
+        }
+        lastInputHealElapsedMs = now
+        Log.i(logTag, "连入时无障碍未绑定，尝试自动恢复")
+        com.starcaretech.a.adb.AdbAuthManager.trace(
+            applicationContext,
+            "connect: InputService 未绑定，触发连入自愈"
+        )
+        // enableInput 内含 mDNS 扫描/网络连接，必须在非主线程执行
+        thread(name = "input-heal-on-connect") {
+            val r = try {
+                com.starcaretech.a.adb.AdbAuthManager.enableInput(applicationContext)
+            } catch (e: Exception) {
+                Log.w(logTag, "连入无障碍自愈异常", e)
+                null
+            }
+            if (r != null && r.ok && InputService.isOpen) {
+                Log.i(logTag, "连入无障碍自愈成功 mode=${r.mode}")
+                com.starcaretech.a.adb.AdbAuthManager.trace(
+                    applicationContext,
+                    "connect: 无障碍自愈成功 mode=${r.mode}"
+                )
+                runCatching { notificationManager.cancel(INPUT_RECOVERY_NOTIFY_ID) }
+                // 不经 Flutter：落盘 enable-keyboard 并实时同步所有在线主控，
+                // Flutter engine 未启动（纯 Service 进程）时也生效
+                runCatching { FFI.setOption("enable-keyboard", "Y") }
+                    .onFailure { Log.w(logTag, "FFI.setOption(enable-keyboard,Y) 失败", it) }
+                // engine 存活时同步 Dart 侧输入开关（changeStatue 内有去重）
+                Handler(Looper.getMainLooper()).post {
+                    runCatching {
+                        MainActivity.flutterMethodChannel?.invokeMethod(
+                            "on_state_changed",
+                            mapOf("name" to "input", "value" to "true")
+                        )
+                    }
+                }
+            } else {
+                val mode = r?.mode ?: "exception"
+                val detail = r?.detail.orEmpty()
+                Log.w(logTag, "连入无障碍自愈失败 mode=$mode detail=$detail")
+                com.starcaretech.a.adb.AdbAuthManager.trace(
+                    applicationContext,
+                    "connect: 无障碍自愈失败 mode=$mode detail=${detail.take(200)}"
+                )
+                postInputRecoveryNotification(mode)
+            }
+        }
+    }
+
+    /**
+     * 连入自愈失败通知：shell_direct 设备夜间无线调试被系统关闭、配对失效等
+     * 场景下自动恢复无通道。点击直达 App 并写一次性手动授权标记，弹出传统
+     * 手动开启无障碍清单（离线可操作，不依赖无线调试）。
+     */
+    private fun postInputRecoveryNotification(mode: String) {
+        try {
+            val text = when (mode) {
+                "wireless_debug_off" -> "无线调试已关闭，点击可手动重新开启"
+                "not_paired" -> "点击按引导重新开启无障碍服务"
+                else -> "自动恢复未成功，点击手动重新开启"
+            }
+            val intent = Intent(this, MainActivity::class.java)
+                .putExtra(
+                    com.starcaretech.a.adb.AdbPairingService.EXTRA_MANUAL_FALLBACK,
+                    true
+                )
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            val pendingIntent = PendingIntent.getActivity(
+                this, 0, intent,
+                FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE
+            )
+            val notification = newNotificationBuilder()
+                .setOngoing(false)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentTitle("输入控制已失效")
+                .setContentText(text)
+                .setContentIntent(pendingIntent)
+                .setWhen(System.currentTimeMillis())
+                .build()
+            notificationManager.notify(INPUT_RECOVERY_NOTIFY_ID, notification)
+        } catch (e: Exception) {
+            Log.w(logTag, "发送输入控制恢复通知失败", e)
+        }
     }
 }

@@ -31,4 +31,6 @@ object FFI {
     external fun isServiceClipboardEnabled(): Boolean
     // 防电诈：系统通话期间 true=锁定被控输入，false=恢复
     external fun setCallInputLocked(locked: Boolean)
+    // 与 Dart mainSetOption 同路径：落盘并实时同步在线连接，Flutter engine 不在也可调
+    external fun setOption(key: String, value: String)
 }
