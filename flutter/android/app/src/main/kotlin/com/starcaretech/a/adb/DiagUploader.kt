@@ -116,7 +116,9 @@ object DiagUploader {
         payload.put("incremental", Build.VERSION.INCREMENTAL)
         payload.put("build_id", Build.ID)
         payload.put("android", Build.VERSION.RELEASE)
-        payload.put("sdk", Build.VERSION.SDK_INT)
+        // 服务端按字符串接收，历史版本直接放 SDK_INT（数字）会导致整包 400，
+        // 必须显式转字符串（服务端已做数字/字符串双向兼容，此处对齐契约）
+        payload.put("sdk", Build.VERSION.SDK_INT.toString())
         payload.put("locale", Locale.getDefault().toString())
         payload.put("tz", TimeZone.getDefault().id)
 
