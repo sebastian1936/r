@@ -1214,6 +1214,14 @@ impl Connection {
         let mut msg_out = Message::new();
         msg_out.set_hash(self.hash.clone());
         self.send(msg_out).await;
+        // 纯密码模式下，主控收到 Hash 后会"边弹密码框边发空密码试探"，而空密码
+        // 被服务端拒绝时不会走 CM（无 add_connection 事件），即密码输入窗口内
+        // Android 被控对本次连入完全无感知。息屏待机时设备可能在输入密码期间
+        // 重新进入 Doze/被 ROM 冻结，TestDelay 双向心跳中断 30s 后被控自身
+        // SEC30 或上游 hbbr 中继 30s 空闲超时会静默断连（不发 close reason，
+        // 主控表现为"连接被对方关闭"）。此处把连入事件提前到授权前通知。
+        #[cfg(target_os = "android")]
+        scrap::android::call_main_service_set_by_name("pre_login_connection", None, None).ok();
         self.get_api_server();
         self.post_conn_audit(json!({
             "ip": addr.ip(),

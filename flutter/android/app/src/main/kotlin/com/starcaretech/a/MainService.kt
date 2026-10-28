@@ -97,6 +97,11 @@ const val SELF_RESUME_SUPPRESS_MS = 3_000L
 // （最坏时间线约 26s），之后无人操作随系统正常灭屏；期间任意触摸事件
 // 再按原逻辑续 5s
 const val SCREEN_WAKE_ON_CONNECT_MS = 30_000L
+// 授权前（密码输入窗口）亮屏保活时长：纯密码模式下空密码试探不产生
+// add_connection 事件，由 Rust on_open 的 pre_login_connection 提前通知。
+// 必须显著大于被控/中继两侧 30s 静默断连阈值，给慢速手动输入留足余量；
+// 授权成功后会被 30s 连入亮屏锁顶替，上限封顶避免异常耗电
+const val SCREEN_WAKE_PRE_LOGIN_MS = 120_000L
 
 const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_VP9
 
@@ -160,6 +165,11 @@ class MainService : Service() {
     @Keep
     fun rustSetByName(name: String, arg1: String, arg2: String) {
         when (name) {
+            // Rust 服务端 on_open：TCP/中继连接刚建立、密码框还在主控端，
+            // 此时还没有 add_connection 事件。息屏待机设备须在这一步就亮屏
+            // 保活，否则用户慢慢输密码期间被控重新 Doze/被冻结，心跳静默 30s
+            // 后连接被被控或中继静默掐断（主控提示"连接被对方关闭"）。
+            "pre_login_connection" -> wakeUpScreenPreLogin()
             "add_connection" -> {
                 try {
                     val jsonObject = JSONObject(arg1)
@@ -2017,6 +2027,34 @@ class MainService : Service() {
         }.onFailure {
             Log.w(logTag, "主控连入唤醒亮屏失败（可能被 ROM 省电策略限制）", it)
             captureDiag("connect: 主动亮屏失败 ${it.javaClass.simpleName}: ${it.message}")
+        }
+    }
+
+    /**
+     * 授权前连入（密码输入窗口）的亮屏保活，由 Rust on_open 的
+     * pre_login_connection 触发。
+     * 纯密码模式下空密码试探不走 CM，MainService 收不到 add_connection，
+     * 唯一能感知"主控已在密码框前"的时机就是 TCP/中继连接建立。此时若不
+     * 亮屏，息屏设备会在用户输密码的几十秒里重新 Doze/被 ROM 冻结，
+     * TestDelay 心跳静默满 30s 即被被控自身或 hbbr 中继静默断连，主控端
+     * 只看到"连接被对方关闭"；快速粘贴抢在 30s 内完成则无此问题。
+     * - 持锁 [SCREEN_WAKE_PRE_LOGIN_MS]，远大于两侧 30s 断连阈值
+     * - 授权成功后 [wakeUpScreenOnConnect] 会立即用 30s 锁顶替本锁
+     * - 打洞/中继竞争可能产生多个 on_open，重复调用仅续期，封顶 120s
+     */
+    private fun wakeUpScreenPreLogin() {
+        if (powerManager.isInteractive) return
+        runCatching {
+            if (wakeLock.isHeld) wakeLock.release()
+            wakeLock.acquire(SCREEN_WAKE_PRE_LOGIN_MS)
+            Log.i(logTag, "登录前连入：亮屏保活 ${SCREEN_WAKE_PRE_LOGIN_MS}ms（密码输入窗口）")
+            captureDiag(
+                "connect: 登录前亮屏保活 interactive_after=${powerManager.isInteractive} " +
+                    "locked=${keyguardManager?.isKeyguardLocked}"
+            )
+        }.onFailure {
+            Log.w(logTag, "登录前连入亮屏保活失败（可能被 ROM 省电策略限制）", it)
+            captureDiag("connect: 登录前亮屏保活失败 ${it.javaClass.simpleName}: ${it.message}")
         }
     }
 
