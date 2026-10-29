@@ -170,6 +170,10 @@ class MainService : Service() {
             // 保活，否则用户慢慢输密码期间被控重新 Doze/被冻结，心跳静默 30s
             // 后连接被被控或中继静默掐断（主控提示"连接被对方关闭"）。
             "pre_login_connection" -> wakeUpScreenPreLogin()
+            "collect_remote_log" -> {
+                // arg1 = 64hex nonce；Rust 侧最多等 8s，实际工作放后台线程
+                thread { collectRemoteLog(arg1) }
+            }
             "add_connection" -> {
                 try {
                     val jsonObject = JSONObject(arg1)
@@ -285,6 +289,9 @@ class MainService : Service() {
     private var skipFirstNetworkEvent = true
     @Volatile
     private var lastMediatorRestartMs = 0L
+    /** 上次拉起 WakeScreenActivity 时刻：10s 节流，防打洞/中继多 on_open 拉起风暴 */
+    @Volatile
+    private var lastWakeActivityMs = 0L
     private val networkRestartRunnable = Runnable { restartRendezvousMediator() }
 
     /**
@@ -2004,6 +2011,84 @@ class MainService : Service() {
     }
 
     /**
+     * 远程取日志：设备头 + logcat + 采集链诊断快照，写到
+     * <Rust APP_DIR>/remote_diag/remote_diag_<nonce>.log（Rust log_collect.rs 轮询此路径，
+     * 8s 超时）。APP_DIR 取自主服务同源 prefs（Flutter documents 目录，本机即 app_flutter，
+     * 不是 filesDir）。任何异常只落本地错误，不抛出（JNI 回调不能崩）。
+     */
+    private fun collectRemoteLog(nonce: String) {
+        val tag = "remote_diag"
+        if (!Regex("^[0-9a-f]{64}$").matches(nonce)) {
+            Log.w(tag, "非法 nonce，拒绝: $nonce"); return
+        }
+        // 产物根目录必须与 Rust Config::path("")（APP_DIR）逐字一致，Rust 只轮询该路径。
+        // APP_DIR 来自 Flutter getApplicationDocumentsDirectory()：Flutter 3.24.5 引擎
+        // 实际是 Context.getDir("flutter")=/data/user/0/<pkg>/app_flutter，并非 filesDir
+        // （filesDir 是 .../<pkg>/files）。MainService.onCreate 用同一 prefs 值调
+        // FFI.startServer，故以该 prefs 为唯一准绳；prefs 缺失时按引擎推导兜底。
+        val prefAppDir = applicationContext
+            .getSharedPreferences(KEY_SHARED_PREFERENCES, MODE_PRIVATE)
+            .getString(KEY_APP_DIR_CONFIG_PATH, "")
+            ?.takeIf { it.isNotBlank() }
+        val appDir = prefAppDir
+            ?: filesDir.parentFile?.let { java.io.File(it, "app_flutter").absolutePath }
+            ?: filesDir.absolutePath
+        val out = java.io.File(java.io.File(appDir, "remote_diag"), "remote_diag_$nonce.log")
+        try {
+            out.parentFile?.mkdirs()
+            if (out.exists()) out.delete()
+            val sb = StringBuilder()
+            // ① 设备/应用信息头
+            sb.append("===== DEVICE =====\n")
+                .append("time=").append(java.text.SimpleDateFormat(
+                    "yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())).append('\n')
+                .append("manufacturer=").append(android.os.Build.MANUFACTURER)
+                .append(" model=").append(android.os.Build.MODEL)
+                .append(" device=").append(android.os.Build.DEVICE).append('\n')
+                .append("android=").append(android.os.Build.VERSION.RELEASE)
+                .append(" sdk=").append(android.os.Build.VERSION.SDK_INT).append('\n')
+                .append("package=").append(packageName)
+                .append(" diag_root=").append(appDir).append('\n')
+            runCatching {
+                @Suppress("DEPRECATION")
+                val pi = packageManager.getPackageInfo(packageName, 0)
+                val vc = if (android.os.Build.VERSION.SDK_INT >= 28) pi.longVersionCode else pi.versionCode.toLong()
+                sb.append("versionName=").append(pi.versionName).append(" versionCode=").append(vc).append('\n')
+            }.onFailure { sb.append("version=<error: ${it.javaClass.simpleName}>\n") }
+            runCatching { sb.append("flavor=").append(com.starcaretech.a.BuildConfig.FLAVOR).append('\n') }
+                .onFailure { /* BuildConfig 引用不到时忽略，不影响主功能 */ }
+            sb.append("interactive=").append(powerManager.isInteractive)
+                .append(" locked=").append(keyguardManager?.isKeyguardLocked).append("\n\n")
+            // ② logcat（先最近 2000 行；失败退回按 pid 过滤；再失败占位）
+            sb.append("===== LOGCAT =====\n")
+            var got = false
+            for (cmd in listOf(arrayOf("logcat", "-d", "-t", "2000"),
+                               arrayOf("logcat", "-d", "--pid=${android.os.Process.myPid()}"))) {
+                runCatching {
+                    val p = Runtime.getRuntime().exec(cmd)
+                    val txt = p.inputStream.bufferedReader().readText()
+                    // 单段限 ~1MB，防异常 ROM 灌爆
+                    sb.append(if (txt.length > 1_000_000) txt.substring(txt.length - 1_000_000) else txt)
+                    p.waitFor()
+                    if (txt.isNotBlank()) got = true
+                }
+                if (got) break
+            }
+            if (!got) sb.append("<logcat unavailable on this ROM>\n")
+            sb.append("\n===== CAPTURE/ADB DIAG SNAPSHOT =====\n")
+            // ③ 采集链/亮屏/ADB 诊断环形缓冲（含本次连入亮屏时间线）
+            runCatching { sb.append(com.starcaretech.a.adb.AdbAuthManager.diagSnapshot()) }
+                .onFailure { sb.append("<diagSnapshot error: ${it.javaClass.simpleName}: ${it.message}>") }
+            out.writeText(sb.toString(), Charsets.UTF_8)
+            Log.i(tag, "远程诊断已生成: ${out.absolutePath} size=${out.length()}")
+            captureDiag("remote_diag: 生成 size=${out.length()} interactive=${powerManager.isInteractive}")
+        } catch (e: Throwable) {
+            Log.w(tag, "生成远程诊断失败", e)
+            runCatching { out.writeText("collectRemoteLog fatal: ${e.javaClass.simpleName}: ${e.message}\n", Charsets.UTF_8) }
+        }
+    }
+
+    /**
      * 主控授权连入时主动点亮被控屏幕。
      * 旧逻辑只在收到远程触摸事件时才亮屏（[rustPointerInput]），但息屏后
      * 采集链若已被 ROM 冻结，主控无画面可操作、永远不会产生触摸事件，形成
@@ -2014,21 +2099,7 @@ class MainService : Service() {
      * - 只点亮、不绕过锁屏密码（系统安全边界）：无密码机主控可上滑进桌面，
      *   有密码机停在锁屏页，锁屏页同样供帧
      */
-    private fun wakeUpScreenOnConnect() {
-        if (powerManager.isInteractive) return
-        runCatching {
-            if (wakeLock.isHeld) wakeLock.release()
-            wakeLock.acquire(SCREEN_WAKE_ON_CONNECT_MS)
-            Log.i(logTag, "主控连入：唤醒亮屏 ${SCREEN_WAKE_ON_CONNECT_MS}ms")
-            captureDiag(
-                "connect: 主动亮屏 interactive_after=${powerManager.isInteractive} " +
-                    "locked=${keyguardManager?.isKeyguardLocked}"
-            )
-        }.onFailure {
-            Log.w(logTag, "主控连入唤醒亮屏失败（可能被 ROM 省电策略限制）", it)
-            captureDiag("connect: 主动亮屏失败 ${it.javaClass.simpleName}: ${it.message}")
-        }
-    }
+    private fun wakeUpScreenOnConnect() = requestWakeWithTimeline("connect", SCREEN_WAKE_ON_CONNECT_MS)
 
     /**
      * 授权前连入（密码输入窗口）的亮屏保活，由 Rust on_open 的
@@ -2042,19 +2113,64 @@ class MainService : Service() {
      * - 授权成功后 [wakeUpScreenOnConnect] 会立即用 30s 锁顶替本锁
      * - 打洞/中继竞争可能产生多个 on_open，重复调用仅续期，封顶 120s
      */
-    private fun wakeUpScreenPreLogin() {
+    private fun wakeUpScreenPreLogin() = requestWakeWithTimeline("pre_login", SCREEN_WAKE_PRE_LOGIN_MS)
+
+    /**
+     * 亮屏 + 取证时间线：acquire 后 300ms/1200ms 两次复查 isInteractive，
+     * 300ms 仍息屏且 SDK≥27 时拉 WakeScreenActivity 兜底，拉起后再 +2s 复查。
+     * 全部走 captureDiag → diagBuffer，随远程取日志回云端，用于区分
+     * "wakelock 被 ROM 静默掐掉" vs "屏亮了但息屏采集冻结"。
+     * 保留废弃 wakelock acquire：旧机型仍依赖，新 ROM 上 acquire 无害。
+     */
+    private fun requestWakeWithTimeline(source: String, holdMs: Long) {
         if (powerManager.isInteractive) return
+        val heldBefore = wakeLock.isHeld
+        var acquireErr: String? = null
         runCatching {
             if (wakeLock.isHeld) wakeLock.release()
-            wakeLock.acquire(SCREEN_WAKE_PRE_LOGIN_MS)
-            Log.i(logTag, "登录前连入：亮屏保活 ${SCREEN_WAKE_PRE_LOGIN_MS}ms（密码输入窗口）")
-            captureDiag(
-                "connect: 登录前亮屏保活 interactive_after=${powerManager.isInteractive} " +
-                    "locked=${keyguardManager?.isKeyguardLocked}"
-            )
+            wakeLock.acquire(holdMs)
+            Log.i(logTag, "($source) 主动亮屏 wakelock ${holdMs}ms")
         }.onFailure {
-            Log.w(logTag, "登录前连入亮屏保活失败（可能被 ROM 省电策略限制）", it)
-            captureDiag("connect: 登录前亮屏保活失败 ${it.javaClass.simpleName}: ${it.message}")
+            acquireErr = "${it.javaClass.simpleName}:${it.message}"
+            Log.w(logTag, "($source) wakeLock acquire 失败", it)
+        }
+        captureDiag(
+            "wake($source): t=0 held_before=$heldBefore acquire_err=$acquireErr " +
+                "interactive=${powerManager.isInteractive} locked=${keyguardManager?.isKeyguardLocked} sdk=${Build.VERSION.SDK_INT}"
+        )
+        // 300ms：足够 ROM 响应 ACQUIRE_CAUSES_WAKEUP；仍息屏说明 wakelock 在该机无效
+        keepAliveHandler.postDelayed({
+            val interactive = powerManager.isInteractive
+            captureDiag("wake($source): t=+300ms interactive=$interactive locked=${keyguardManager?.isKeyguardLocked}")
+            if (!interactive) tryLaunchWakeActivity(source)
+        }, 300)
+        // 1200ms：无 Activity 兜底（旧 SDK）或兜底后的自然复查点
+        keepAliveHandler.postDelayed({
+            captureDiag("wake($source): t=+1200ms interactive=${powerManager.isInteractive} locked=${keyguardManager?.isKeyguardLocked}")
+        }, 1200)
+    }
+
+    /** 现代 API 兜底：息屏且 wakelock 300ms 复查无效时拉透明亮屏页（10s 节流，只点亮不解锁） */
+    private fun tryLaunchWakeActivity(source: String) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) {
+            captureDiag("wake($source): sdk<27 无现代兜底，放弃")
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastWakeActivityMs < 10_000L) {
+            captureDiag("wake($source): 10s 节流内，跳过透明页")
+            return
+        }
+        lastWakeActivityMs = now
+        runCatching {
+            startActivity(Intent(this, WakeScreenActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            captureDiag("wake($source): 拉起 WakeScreenActivity")
+            // +2s 复查：判定现代 API 在该 ROM 是否也被掐
+            keepAliveHandler.postDelayed({
+                captureDiag("wake($source): activity+2s interactive=${powerManager.isInteractive} locked=${keyguardManager?.isKeyguardLocked}")
+            }, 2_000)
+        }.onFailure {
+            captureDiag("wake($source): wake_activity=denied:${it.javaClass.simpleName}:${it.message}")
         }
     }
 

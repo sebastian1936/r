@@ -6,6 +6,8 @@ use serde_json::{Map, Value};
 pub mod account;
 pub mod downloader;
 mod http_client;
+#[cfg(not(target_os = "ios"))]
+pub mod log_collect;
 pub mod record_upload;
 pub mod sync;
 pub use http_client::{

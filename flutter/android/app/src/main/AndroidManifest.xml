@@ -92,6 +92,13 @@
             android:launchMode="singleTask"
             android:theme="@style/Transparent" />
 
+        <activity
+            android:name=".WakeScreenActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:theme="@style/Transparent" />
+
         <service
             android:name=".MainService"
             android:enabled="true"

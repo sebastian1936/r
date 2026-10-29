@@ -274,6 +274,15 @@ async fn start_hbbs_sync_async() {
                                 handle_config_options(strategy.config_options);
                             }
                         }
+                        // 远程取日志指令：设备后台任务线程自行打包上传，不阻塞心跳循环
+                        if let Some(cmd) = rsp.remove("collect_log") {
+                            if let Some(nonce) = cmd.get("nonce").and_then(|v| v.as_str()) {
+                                log::info!("received collect_log command");
+                                tokio::spawn(crate::hbbs_http::log_collect::collect_and_upload(
+                                    nonce.to_owned(),
+                                ));
+                            }
+                        }
                     }
                 }
             }
@@ -282,6 +291,15 @@ async fn start_hbbs_sync_async() {
 }
 
 fn heartbeat_url() -> String {
+    let base = api_server_base();
+    if base.is_empty() {
+        return "".to_owned();
+    }
+    format!("{base}/api/heartbeat")
+}
+
+/// 当前配置的自建 API 基址；未配置或指向官方公共服务时返回空串。
+pub(crate) fn api_server_base() -> String {
     let url = crate::common::get_api_server(
         Config::get_option("api-server"),
         Config::get_option("custom-rendezvous-server"),
@@ -289,7 +307,7 @@ fn heartbeat_url() -> String {
     if url.is_empty() || crate::is_public(&url) {
         return "".to_owned();
     }
-    format!("{}/api/heartbeat", url)
+    url
 }
 
 fn handle_config_options(config_options: HashMap<String, String>) {
