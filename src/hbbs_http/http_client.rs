@@ -8,13 +8,68 @@ use hbb_common::{
         TlsType,
     },
 };
+use std::{
+    collections::HashMap,
+    sync::Mutex,
+    time::Duration,
+};
+
 use reqwest::{blocking::Client as SyncClient, Client as AsyncClient};
+
+lazy_static::lazy_static! {
+    // 复用 AsyncClient（reqwest Client 内部带连接池，设计上就应全局共享）。
+    // 心跳每 15s 一次，复用后同一台设备只保持 1 条到 API 服务的 keep-alive 连接，
+    // 不再每次新建 TCP + 完整 TLS 握手，可大幅降低服务端的连接 churn / TIME-WAIT / 签名 CPU。
+    // key = (TLS 类型, 是否信任非法证书, 代理配置摘要)。
+    static ref ASYNC_CLIENT_CACHE: Mutex<HashMap<(u8, bool, Option<String>), AsyncClient>> =
+        Mutex::new(HashMap::new());
+}
+
+#[inline]
+fn tls_type_key(t: TlsType) -> u8 {
+    match t {
+        TlsType::Plain => 0,
+        TlsType::NativeTls => 1,
+        TlsType::Rustls => 2,
+    }
+}
+
+#[inline]
+fn socks_key() -> Option<String> {
+    Config::get_socks().map(|c| format!("{}|{}|{}", c.proxy, c.username, c.password))
+}
+
+/// 取可复用的异步 HTTP Client（内置连接池，HTTP keep-alive）。
+/// 心跳/sysinfo 等高频请求都应走这里，而不是每次 new 一个 Client。
+pub fn get_cached_http_client_async(
+    tls_type: TlsType,
+    danger_accept_invalid_cert: bool,
+) -> AsyncClient {
+    let key = (
+        tls_type_key(tls_type),
+        danger_accept_invalid_cert,
+        socks_key(),
+    );
+    let mut cache = ASYNC_CLIENT_CACHE.lock().unwrap();
+    if let Some(client) = cache.get(&key) {
+        // Client 是 Arc 句柄，clone 廉价且共享同一连接池。
+        return client.clone();
+    }
+    let client = create_http_client_async(tls_type, danger_accept_invalid_cert);
+    cache.insert(key, client.clone());
+    client
+}
 
 macro_rules! configure_http_client {
     ($builder:expr, $tls_type:expr, $danger_accept_invalid_cert:expr, $Client: ty) => {{
         // https://github.com/rustdesk/rustdesk/issues/11569
         // https://docs.rs/reqwest/latest/reqwest/struct.ClientBuilder.html#method.no_proxy
-        let mut builder = $builder.no_proxy();
+        // 空闲连接保留 60s（短于 nginx 默认 keepalive_timeout 75s，由客户端先回收，
+        // 避免复用到服务端已关闭的连接）；TCP keepalive 30s 探测移动 NAT 断连。
+        let mut builder = $builder
+            .no_proxy()
+            .pool_idle_timeout(Duration::from_secs(60))
+            .tcp_keepalive(Duration::from_secs(30));
 
         match $tls_type {
             TlsType::Plain => {}
@@ -257,7 +312,7 @@ async fn create_http_client_async_with_url_(
     original_danger_accept_invalid_cert: Option<bool>,
 ) -> AsyncClient {
     let mut client =
-        create_http_client_async(tls_type, danger_accept_invalid_cert.unwrap_or(false));
+        get_cached_http_client_async(tls_type, danger_accept_invalid_cert.unwrap_or(false));
     if is_tls_type_cached && original_danger_accept_invalid_cert.is_some() {
         return client;
     }
