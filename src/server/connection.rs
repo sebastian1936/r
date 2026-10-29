@@ -363,6 +363,9 @@ impl Subscriber for ConnInner {
 }
 
 const TEST_DELAY_TIMEOUT: Duration = Duration::from_secs(1);
+// TestDelay 探测发出后等待主控回显的最长时间。正常 RTT 内必回；超过此时长
+// 视为 ping/pong 单包在弱网/NAT/中继上丢失，下一秒重新发起探测。
+const TEST_DELAY_RESEND: Duration = Duration::from_secs(3);
 const SEC30: Duration = Duration::from_secs(30);
 const H1: Duration = Duration::from_secs(3600);
 const MILLI1: Duration = Duration::from_millis(1);
@@ -908,6 +911,21 @@ impl Connection {
                     if last_recv_time.elapsed() >= SEC30 {
                         conn.on_close("Timeout", true).await;
                         break;
+                    }
+                    // 心跳丢包重发：TestDelay 是停等探测，旧逻辑在回显到达前
+                    // 不会发新探测。一旦 ping/pong 任一单包在弱网、NAT 设备或
+                    // 中继链路上丢失，last_test_delay 永久卡在 Some，双方再无
+                    // 任何报文往来；密码输入窗口（登录前除心跳外零流量）满 30s
+                    // 即被本分支静默断开，主控只看到"Reset by the peer/连接被
+                    // 对方关闭"，且手动慢慢输密码必现、快速粘贴则正常。超过
+                    // TEST_DELAY_RESEND 未收回显则作废本轮，下一行重新发起探测，
+                    // 30s 断连窗口内有多次自愈机会。登录后的视频/输入流量本就
+                    // 持续刷新 last_recv_time，此改动只影响空闲/登录前阶段。
+                    if let Some(t) = conn.last_test_delay {
+                        if t.elapsed() >= TEST_DELAY_RESEND {
+                            log::debug!("TestDelay reply lost, resending probe");
+                            conn.last_test_delay = None;
+                        }
                     }
                     // The control end will jump out of the loop after receiving LoginResponse and will not reply to the TestDelay
                     if conn.last_test_delay.is_none() && !(conn.port_forward_socket.is_some() && conn.authorized) {
