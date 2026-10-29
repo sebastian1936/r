@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Process
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import com.starcaretech.a.adb.AdbPairingService
@@ -212,6 +213,8 @@ object EnvCheckManager {
      *  - 键不可读且两轮探测均无服务：返回 UNKNOWN 而非 OFF——mDNS 收不到
      *    不等于开关没开（误报会硬拦配对入口），UNKNOWN 在清单里不阻塞
      *    "开始配对"；用户真没开时，配对阶段扫 pairing 服务还会再拦一次。
+     *  - 实测探测代价高（4s+3s NsdManager），结果走 [probeWirelessDebugCached]
+     *    的短 TTL 缓存，Dart 高频刷新清单时不重复探测。
      */
     private fun wirelessDebugStatus(context: Context): String {
         var raw: String? = null
@@ -225,21 +228,67 @@ object EnvCheckManager {
             readThrew = true
             Log.w(TAG, "read adb_wifi fail, fallback to mDNS probe", e)
         }
-        val port = try {
-            com.starcaretech.a.adb.AdbDiscovery.quickProbeConnectPort(
-                context, timeoutMs = 4_000L, extraRoundMs = 3_000L
-            )
-        } catch (e: Throwable) {
-            Log.w(TAG, "probe wireless debug service fail", e)
-            null
+        return probeWirelessDebugCached(context, raw, readThrew)
+    }
+
+    // mDNS 实测无线调试状态代价很高（4s+3s NsdManager 发现）。Dart 端每次
+    // 页面可见/生命周期回调都会拉一次 envInfo，实测日志中三星 1s 内连探 3 次、
+    // 小米 1 分钟内探 15 次：费电，且多个 NsdManager 发现并发会互相丢响应。
+    // 探测结果按短 TTL 缓存；TTL 窗口内的并发调用在同一把锁上合并为一次探测
+    //（后来的线程等首个线程探完直接读结果，即 single-flight）。仅用于引导
+    // 清单展示；enableInput 前的实时预检走 AdbAuthManager.isWirelessDebugEnabled，
+    // 不经过此缓存，用户刚打开无线调试不会被旧结果挡住。
+    private const val WIRELESS_PROBE_TTL_MS = 8_000L
+    private val wirelessProbeLock = Any()
+
+    private class WirelessProbe(val status: String, val atMs: Long)
+
+    @Volatile
+    private var wirelessProbeCache: WirelessProbe? = null
+
+    /**
+     * 带 TTL 缓存 + single-flight 的 mDNS 实测。只可能返回
+     * [STATUS_OK]/[STATUS_UNKNOWN]（设置键明确可读的快路径在调用处处理）。
+     */
+    private fun probeWirelessDebugCached(
+        context: Context,
+        raw: String?,
+        readThrew: Boolean
+    ): String {
+        SystemClock.elapsedRealtime().let { now ->
+            wirelessProbeCache?.let {
+                if (now - it.atMs < WIRELESS_PROBE_TTL_MS) {
+                    Log.i(TAG, "wireless_debug mDNS 探测命中 ${WIRELESS_PROBE_TTL_MS}ms 缓存：${it.status}")
+                    return it.status
+                }
+            }
         }
-        Log.i(TAG, "adb_wifi 不可读(raw=$raw threw=$readThrew)，mDNS 探测结果：${port ?: "未发现服务"}")
-        com.starcaretech.a.adb.AdbAuthManager.trace(
-            context,
-            "envCheck wireless_debug adb_wifi=${raw ?: "<null>"} readThrew=$readThrew " +
-                "probe=${port ?: "none"} brand=${Build.BRAND} sdk=${Build.VERSION.SDK_INT}"
-        )
-        return if (port != null) STATUS_OK else STATUS_UNKNOWN
+        // 整个探测放在锁内：并发调用排队，第二个进来时缓存已写好、双检直接命中，
+        // 保证同一时刻最多只有一个 NsdManager 发现在跑（阻塞的调用本就在后台线程）。
+        synchronized(wirelessProbeLock) {
+            wirelessProbeCache?.let {
+                if (SystemClock.elapsedRealtime() - it.atMs < WIRELESS_PROBE_TTL_MS) {
+                    return it.status
+                }
+            }
+            val port = try {
+                com.starcaretech.a.adb.AdbDiscovery.quickProbeConnectPort(
+                    context, timeoutMs = 4_000L, extraRoundMs = 3_000L
+                )
+            } catch (e: Throwable) {
+                Log.w(TAG, "probe wireless debug service fail", e)
+                null
+            }
+            Log.i(TAG, "adb_wifi 不可读(raw=$raw threw=$readThrew)，mDNS 探测结果：${port ?: "未发现服务"}")
+            com.starcaretech.a.adb.AdbAuthManager.trace(
+                context,
+                "envCheck wireless_debug adb_wifi=${raw ?: "<null>"} readThrew=$readThrew " +
+                    "probe=${port ?: "none"} brand=${Build.BRAND} sdk=${Build.VERSION.SDK_INT}"
+            )
+            val status = if (port != null) STATUS_OK else STATUS_UNKNOWN
+            wirelessProbeCache = WirelessProbe(status, SystemClock.elapsedRealtime())
+            return status
+        }
     }
 
     /**

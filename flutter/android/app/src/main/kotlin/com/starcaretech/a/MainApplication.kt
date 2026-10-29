@@ -96,6 +96,9 @@ object StartWatchdog {
     private const val CHECK_INTERVAL_MS = 3000L
     private const val STALL_THRESHOLD_MS = 4000L
 
+    /** 卡顿时随时间线落盘的主线程栈帧数上限（够看到业务/引擎边界即可，避免刷屏） */
+    private const val STACK_FRAME_LIMIT = 20
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     @Volatile
@@ -131,10 +134,21 @@ object StartWatchdog {
                 if (age >= STALL_THRESHOLD_MS) {
                     if (!stallReported) {
                         stallReported = true
-                        appContext?.let {
+                        appContext?.let { ctx ->
+                            // 立即抓主线程当前栈：仅凭"最后阶段"无法区分卡顿发生在
+                            // Flutter 引擎、本应用代码还是系统调用；栈帧随下次自动
+                            // 诊断上报带出，是定位根因的关键证据。心跳停跳说明主线程
+                            // 正被某条消息卡住，此刻抓到的就是卡点（从别的线程读
+                            // Thread.stackTrace 是安全的）。
+                            val frames = Looper.getMainLooper().thread.stackTrace
+                            val shown = minOf(STACK_FRAME_LIMIT, frames.size)
+                            val stack = frames.asSequence()
+                                .take(STACK_FRAME_LIMIT)
+                                .joinToString("\n") { "    at $it" }
                             AdbAuthManager.trace(
-                                it,
-                                "MAIN-THREAD-ANCHOR ★主线程已 ${age}ms 无响应，最后阶段=$lastStage"
+                                ctx,
+                                "MAIN-THREAD-ANCHOR ★主线程已 ${age}ms 无响应，最后阶段=$lastStage\n" +
+                                    "主线程栈顶 $shown 帧（共 ${frames.size} 帧）：\n$stack"
                             )
                         }
                     }
