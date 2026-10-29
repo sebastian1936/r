@@ -1015,7 +1015,21 @@ object AdbAuthManager {
         } catch (e: Exception) {
             Log.w(TAG, "读取 adb_wifi 失败，改用 mDNS 实测", e)
         }
-        // 双轮探测：OriginOS 等 ROM 上 NsdManager 冷启动首轮可能整窗收不到
+        // ① 缓存端口 bind 探活：开着且端口复用（部分 ROM 重开会复用）时毫秒命中
+        AdbDiscovery.cachedEndpoint(context)?.let { return true }
+        // ② API34+ 现代通道（registerServiceInfoCallback，注册即推缓存服务）：
+        //   实测 HyperOS 自动关闭无线调试后，经典双轮要白等 6.5s；现代通道
+        //   注册成功却零推送即可信判 OFF，预检压到 ~2s。仅当该通道在本 ROM
+        //   不可用（注册失败）时才退回下面的经典双轮保正确性。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val (modernPort, reliable) = AdbDiscovery.modernProbeConnectPort(context, 2_000L)
+            if (modernPort != null) return true
+            if (reliable) {
+                Log.i(TAG, "现代通道 2s 零推送，判定无线调试已关闭")
+                return false
+            }
+        }
+        // ③ 经典双轮探测：OriginOS 等 ROM 上 NsdManager 冷启动首轮可能整窗收不到
         // connect 服务的 query 响应，单轮会把"开着"误判成"关了"，导致
         // 已配对设备恢复时被错误引导去开开关。真没开时最坏多等约 3 秒。
         return AdbDiscovery.quickProbeConnectPort(

@@ -72,6 +72,20 @@ const val PROJECTION_STABLE_LIFETIME_MS = 20_000L
 const val PROJECTION_FUSE_WINDOW_MS = 60_000L
 const val PROJECTION_FUSE_MAX_FAILURES = 2
 
+// 远程诊断 logcat 降噪：实测噪声占比 85%（212 行中 181 行）的系统/MIUI 框架 tag。
+// 只屏蔽这几个实锤高频源，未知 tag 全保留。
+private val NOISY_LOGCAT_TAGS = setOf(
+    "AudioManager",          // 系统在本进程内每 2s 一次 getMode
+    "A11yInputMethod",       // MIUI 输入法桥接噪声
+    "ViewRootImplStubImpl",  // MIUI 窗口桩
+    "DecorViewImmersiveImpl",// MIUI 沉浸式实现
+    "MiuiNBIManagerImpl",    // MIUI 无关 binder 管理
+    "FileUtils"              // MIUI 禁止写 mi_exception_log 的已知无害报错
+)
+// "MM-DD HH:MM:SS.mmm PID TID LEVEL TAG: msg"（logcat -v time）
+private val LOGCAT_TAG_RE =
+    Regex("""^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+[VDIWEF]\s+([^:]+):.*""")
+
 // 帧停滞看门狗：仅在屏幕经历过「息屏→亮屏/解锁」或 VirtualDisplay onResumed
 // 之后才开始判定（部分 ROM 静态画面本就不持续推帧，纯无帧不能作为判据）。
 // tick 3s；恢复事件后 6s 一帧没来即判定采集链僵死；采集刚（重）建给 8s 宽限；
@@ -352,6 +366,20 @@ class MainService : Service() {
         fun markServiceAlive(alive: Boolean) {
             isServiceAlive = alive
             if (!alive) aliveInstance = null
+        }
+
+        /**
+         * 自愈存活事实：start intent 能投递到本实例，即证明它当前必然存活。
+         * 必需场景：destroy()->stopSelf() 后实例被 MainActivity 的 bindService
+         * 保活（不走 onDestroy/onCreate），[isServiceAlive] 停留在 false；
+         * 用户重新打开开关只经 onStartCommand，若不在此修正，无障碍看门狗会
+         * 每分钟空转 startForegroundService（实测 WATCHDOG_RESTART 风暴 28 次），
+         * 且反复启动还会把主线程卡 4~15s。
+         */
+        @JvmStatic
+        fun noteInstanceAlive(instance: MainService) {
+            isServiceAlive = true
+            aliveInstance = instance
         }
 
         /** 当前进程内的服务实例（onCreate 置位，onDestroy 清空），供进程外
@@ -1076,6 +1104,9 @@ class MainService : Service() {
         com.starcaretech.a.adb.AdbAuthManager.trace(
             applicationContext, "MainService.onStartCommand action=${intent?.action} startId=$startId")
         super.onStartCommand(intent, flags, startId)
+        // 能收到 start intent 就是实例存活的铁证：修正 destroy() 后被绑定保活的
+        // 僵尸实例上 isServiceAlive/aliveInstance 停留在 false 的问题（看门狗风暴根因）。
+        noteInstanceAlive(this)
         // 关键修复：MainActivity 长期 bindService，stopSelf() 后服务实例可能
         // 因绑定仍存活，destroy() 里置的 serviceDestroyed=true 会残留——
         // 用户再次开启服务时走同一实例，promptProjectionRecovery 等恢复
@@ -2060,13 +2091,16 @@ class MainService : Service() {
             sb.append("interactive=").append(powerManager.isInteractive)
                 .append(" locked=").append(keyguardManager?.isKeyguardLocked).append("\n\n")
             // ② logcat（先最近 2000 行；失败退回按 pid 过滤；再失败占位）
+            // 已用黑名单剔除 ROM/系统框架灌进本 uid 缓冲的高频噪声（实测占 85%：
+            // AudioManager.getMode 每 2s 一行、A11yInputMethod、ViewRootImplStubImpl 等），
+            // 未知 tag 一律保留，避免误杀将来出现的新异常。
             sb.append("===== LOGCAT =====\n")
             var got = false
             for (cmd in listOf(arrayOf("logcat", "-d", "-t", "2000"),
                                arrayOf("logcat", "-d", "--pid=${android.os.Process.myPid()}"))) {
                 runCatching {
                     val p = Runtime.getRuntime().exec(cmd)
-                    val txt = p.inputStream.bufferedReader().readText()
+                    val txt = filterLogcatNoise(p.inputStream.bufferedReader().readText())
                     // 单段限 ~1MB，防异常 ROM 灌爆
                     sb.append(if (txt.length > 1_000_000) txt.substring(txt.length - 1_000_000) else txt)
                     p.waitFor()
@@ -2086,6 +2120,22 @@ class MainService : Service() {
             Log.w(tag, "生成远程诊断失败", e)
             runCatching { out.writeText("collectRemoteLog fatal: ${e.javaClass.simpleName}: ${e.message}\n", Charsets.UTF_8) }
         }
+    }
+
+    /**
+     * logcat 降噪：剔除系统/MIUI 框架在本进程 uid 缓冲里灌的高频无用行。
+     * 采用黑名单（而非白名单）——不在名单内的 tag 全部保留，异常栈续行
+     * （无 logcat 头）默认保留，避免误杀真正的问题证据。
+     */
+    private fun filterLogcatNoise(txt: String): String {
+        if (txt.isEmpty()) return txt
+        val sb = StringBuilder(txt.length)
+        for (line in txt.lineSequence()) {
+            val m = LOGCAT_TAG_RE.matchEntire(line)
+            if (m != null && m.groupValues[1].trim() in NOISY_LOGCAT_TAGS) continue
+            sb.append(line).append('\n')
+        }
+        return sb.toString()
     }
 
     /**

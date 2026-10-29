@@ -188,6 +188,95 @@ object AdbDiscovery {
         return if (isLoopbackPortListening(5555)) 5555 else null
     }
 
+    /**
+     * API34+ 一次性"现代通道"探测：registerServiceInfoCallback 注册成功后
+     * 系统会【立即】把 mdns 缓存中的已知服务推一次（无线调试运行时
+     * _adb-tls-connect 必然在缓存里），无需等经典 PTR query 的多拍往返。
+     *
+     * 用于 enableInput 前的实时预检：
+     *  - 开着：通常几十毫秒内回调，拿到经回环 bind 校验的端口
+     *  - 被系统关闭（HyperOS P2）：注册成功但零回调，[timeoutMs] 后返回 null
+     *    ——调用方据此可快速判 OFF 并引导用户，而不必等经典两轮 6.5s
+     *  - 注册本身失败（[registeredOk]=false）：该 ROM 通道不可用，
+     *    调用方应退回经典发现，不能据 null 判 OFF
+     *
+     * 必须在非主线程调用。
+     */
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    fun modernProbeConnectPort(
+        context: Context,
+        timeoutMs: Long = 2_000L
+    ): Pair<Int?, Boolean> {
+        val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
+        val thread = HandlerThread("AdbNsdModernProbe").apply { start() }
+        val handler = Handler(thread.looper)
+        val latch = CountDownLatch(1)
+        val lock = Any()
+        var foundPort: Int? = null
+        var registeredOk = false
+        // register 调用同步成功、但系统异步回调注册失败：通道不可用，null 不可信
+        var regCallbackFailed = false
+
+        val cb = object : NsdManager.ServiceInfoCallback {
+            override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {
+                Log.i(TAG, "modern probe 注册失败 code=$errorCode，退回经典通道")
+                regCallbackFailed = true
+                latch.countDown()
+            }
+
+            override fun onServiceInfoCallbackUnregistered() {}
+
+            override fun onServiceUpdated(info: NsdServiceInfo) {
+                val service = toService(info) ?: return
+                synchronized(lock) {
+                    if (foundPort == null) {
+                        foundPort = service.port
+                        latch.countDown()
+                    }
+                }
+            }
+
+            override fun onServiceLost() {}
+        }
+
+        // NsdManager 回调要求在带 Looper 的线程注册，且注销须同线程
+        runCatching {
+            val signal = CountDownLatch(1)
+            handler.post {
+                runCatching {
+                    nsdManager.registerServiceInfoCallback(
+                        NsdServiceInfo().apply { serviceType = TYPE_CONNECT },
+                        Executor { r -> handler.post(r) },
+                        cb
+                    )
+                    registeredOk = true
+                }.onFailure {
+                    Log.i(TAG, "modern probe register 抛异常 ${it.javaClass.simpleName}")
+                }
+                signal.countDown()
+            }
+            signal.await(1_000, TimeUnit.MILLISECONDS)
+        }
+
+        try {
+            if (registeredOk) {
+                latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+            }
+        } finally {
+            handler.post {
+                if (registeredOk) {
+                    runCatching { nsdManager.unregisterServiceInfoCallback(cb) }
+                }
+                thread.quitSafely()
+            }
+        }
+        val port = synchronized(lock) { foundPort }
+        if (port != null) rememberConnectPort(context, port)
+        // 只有同步注册成功且未收到异步失败回调，零回调超时才是可信的 OFF 判定
+        val channelReliable = registeredOk && !regCallbackFailed
+        return Pair(port, channelReliable)
+    }
+
     private fun toService(info: NsdServiceInfo): DiscoveredService? {
         val host = info.host?.hostAddress ?: return null
         if (!isLocalAddress(host)) {
