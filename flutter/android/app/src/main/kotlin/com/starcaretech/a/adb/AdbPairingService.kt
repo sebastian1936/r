@@ -437,11 +437,14 @@ class AdbPairingService : Service() {
             .addRemoteInput(remoteInput)
             .build()
 
+        // 已拿到有效端口（自动发现成功，或手动地址已解析成功）时不再挂「手动输入」：
+        // 否则用户容易把 6 位配对码误填进「IP:端口」输入框，收到格式错误提示。
+        // 兜底入口仍保留在搜索态——配对服务消失会退回搜索通知，配对失败点「重试」
+        // 也会重建搜索通知，两种情况下「手动输入」都会重新出现。
         return baseBuilder()
             .setContentTitle("请输入配对码")
             .setContentText("目标 $host:$port；保持系统配对页显示，点下方按钮输入 6 位码")
             .addAction(action)
-            .addAction(manualAddrAction())
             .addAction(stopAction())
             .build()
     }
