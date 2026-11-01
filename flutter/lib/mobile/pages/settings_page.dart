@@ -12,6 +12,7 @@ import 'package:settings_ui/settings_ui.dart';
 import '../../common.dart';
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/login.dart';
+import '../../common/widgets/upload_device_log.dart';
 import '../../consts.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
@@ -895,7 +896,11 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                     padding: EdgeInsets.symmetric(vertical: 8),
                     child: Text(_fingerprint),
                   ),
-                  leading: Icon(Icons.fingerprint))
+                  leading: Icon(Icons.fingerprint)),
+            SettingsTile(
+                onPressed: (context) => showUploadDeviceLogDialog(context),
+                title: const Text('上传诊断日志'),
+                leading: const Icon(Icons.bug_report)),
           ],
         ),
       ],

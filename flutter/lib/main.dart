@@ -8,6 +8,7 @@ import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/widgets/overlay.dart';
+import 'package:flutter_hbb/common/widgets/upload_device_log.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_setting_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/desktop/pages/install_page.dart';
@@ -913,6 +914,14 @@ _registerEventHandler() {
         showToast(msg);
       }
       HomePage.homeKey.currentState?.goToSettings();
+    }, replace: true);
+  }
+  // 手动上传诊断日志：Rust 打包上传完成后回传 success/failed。
+  // 只在主界面（设置页所在窗口）处理。
+  if (isMobile || (isDesktop && desktopType == DesktopType.main)) {
+    platformFFI.registerEventHandler(
+        'upload_device_log', 'upload_device_log', (evt) async {
+      UploadDeviceLogController.instance.onEvent(evt);
     }, replace: true);
   }
 }
