@@ -90,7 +90,9 @@ pub async fn manual_collect_and_upload() -> ResultType<()> {
         bail!("api server unavailable");
     }
     let nonce = random_nonce_hex();
-    let data = hbb_common::tokio::task::spawn_blocking(move || run_collect(&nonce, true)).await??;
+    let nonce2 = nonce.clone();
+    let data = hbb_common::tokio::task::spawn_blocking(move || run_collect(&nonce2, true))
+        .await??;
     upload(&base, UPLOAD_PATH_MANUAL, &nonce, &device_id, data).await?;
     log::info!("manual device-log upload success");
     Ok(())
