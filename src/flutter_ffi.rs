@@ -1080,6 +1080,28 @@ pub fn main_get_version() -> String {
     get_version()
 }
 
+/// 客户在"设置-关于"手动一键上传诊断日志。立即返回，打包与上传在独立线程完成；
+/// 结果经全局事件通道推给 UI：{"name":"upload_device_log","state":"started|success|failed","msg":...}
+pub fn main_upload_device_log() {
+    std::thread::spawn(move || {
+        push_upload_log_event("started", "");
+        match crate::hbbs_http::log_collect::run_manual_upload_blocking() {
+            Ok(()) => push_upload_log_event("success", ""),
+            Err(e) => push_upload_log_event("failed", &e.to_string()),
+        }
+    });
+}
+
+fn push_upload_log_event(state: &str, msg: &str) {
+    let data = HashMap::from([
+        ("name", "upload_device_log".to_owned()),
+        ("state", state.to_owned()),
+        ("msg", msg.to_owned()),
+    ]);
+    let event = serde_json::ser::to_string(&data).unwrap_or_default();
+    let _res = flutter::push_global_event(flutter::APP_TYPE_MAIN, event);
+}
+
 pub fn main_get_fav() -> Vec<String> {
     get_fav()
 }

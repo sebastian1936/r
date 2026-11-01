@@ -408,7 +408,9 @@ pub fn init_log(_is_async: bool, _name: &str) -> Option<flexi_logger::LoggerHand
                         .rotate(
                             Criterion::Age(Age::Day),
                             Naming::Timestamps,
-                            Cleanup::KeepLogFiles(31),
+                            // 客户端本地只保留最近 3 个轮转文件（按天轮转，即约 3 天日志），
+                            // 更早的文件自动删除，避免长期占用被控端设备磁盘。
+                            Cleanup::KeepLogFiles(3),
                         )
                         .start()
                         .ok()
