@@ -64,7 +64,7 @@ Future<void> showUploadDeviceLogDialog(BuildContext context) async {
     builder: (ctx) => AlertDialog(
       title: const Text('上传诊断日志'),
       content: const Text(
-          '将打包本机最近 3 天的运行日志并上传到客服后台，用于协助排查问题。\n\n是否继续？'),
+          '将本软件最近运行日志上传到服务器，用于排查分析问题，不涉及您的隐私。\n\n是否继续？'),
       actions: [
         TextButton(
           onPressed: () => Navigator.of(ctx).pop(false),
@@ -142,7 +142,7 @@ class _UploadProgressDialogState extends State<_UploadProgressDialog> {
                 ],
               )
             : result.ok
-                ? Text('日志已上传成功。\n\n请向客服提供您的设备 ID：\n$_deviceId')
+                ? Text('日志已上传成功。\n\n请向技术人员提供您的设备 ID：\n$_deviceId')
                 : Text('日志上传失败：\n${result.msg}'),
         actions: [
           if (result == null)
