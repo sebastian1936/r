@@ -5,7 +5,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import '../common.dart';
+import '../../common.dart';
+import '../../models/platform_model.dart';
 
 /// 上传过程控制器：Rust 事件经 main.dart 注册的全局 handler 转发到这里。
 class UploadDeviceLogController {
