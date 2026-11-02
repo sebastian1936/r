@@ -1085,11 +1085,100 @@ pub fn main_get_version() -> String {
 pub fn main_upload_device_log() {
     std::thread::spawn(move || {
         push_upload_log_event("started", "");
+        // 安装版 Windows：被控核心日志在 LocalSystem 的 systemprofile 下，用户态
+        // 读不到。先请求系统服务代采；服务不可达（便携版/未安装/旧版服务）再回退本地。
+        #[cfg(windows)]
+        {
+            match manual_upload_via_service() {
+                Ok(()) => {
+                    push_upload_log_event("success", "");
+                    return;
+                }
+                Err(ServiceUploadError::Fallback(reason)) => {
+                    log::info!(
+                        "service-assisted log upload unavailable ({reason}), fallback to local"
+                    );
+                }
+                Err(ServiceUploadError::Failed(msg)) => {
+                    push_upload_log_event("failed", &msg);
+                    return;
+                }
+            }
+        }
         match crate::hbbs_http::log_collect::run_manual_upload_blocking() {
             Ok(()) => push_upload_log_event("success", ""),
             Err(e) => push_upload_log_event("failed", &e.to_string()),
         }
     });
+}
+
+/// 服务代采结果：Fallback=服务侧无法受理（调用方应回退本地采集），Failed=服务已受理但上传失败。
+#[cfg(windows)]
+enum ServiceUploadError {
+    Fallback(String),
+    Failed(String),
+}
+
+/// 通过服务 query 管道请求 LocalSystem 服务代采代传日志，最长等待 90s。
+#[cfg(windows)]
+fn manual_upload_via_service() -> Result<(), ServiceUploadError> {
+    let rt = hbb_common::tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| ServiceUploadError::Fallback(format!("rt error: {e}")))?;
+    rt.block_on(async {
+        let mut conn = crate::ipc::connect(1000, "")
+            .await
+            .map_err(|e| ServiceUploadError::Fallback(format!("no service: {e}")))?;
+        if conn
+            .send(&crate::ipc::Data::ManualUploadLogs)
+            .await
+            .is_err()
+        {
+            return Err(ServiceUploadError::Fallback("ipc send failed".to_owned()));
+        }
+        // 打包+上传耗时不可控：每秒取一次结果，上限 90s。
+        // next_timeout 超时与断连都返回 Err：超时会用满 ~1s，断连会立即返回，
+        // 据此区分；连续两次快速失败即视为服务连接已断，回退本地采集。
+        // 注意：旧版服务不认识 ManualUploadLogs 时会静默吞掉（既不回复也不断连），
+        // 此处只能等到 90s deadline；到期后同样回退本地，保证日志一定能采上来。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        let mut fast_errs = 0;
+        while std::time::Instant::now() < deadline {
+            let tick = std::time::Instant::now();
+            match conn.next_timeout(1000).await {
+                Ok(Some(crate::ipc::Data::ManualUploadLogsResult(r))) => {
+                    return r.map_err(ServiceUploadError::Failed);
+                }
+                // 收到服务发来的无法解析帧（异常情况）：按回退处理
+                Ok(None) => {
+                    return Err(ServiceUploadError::Fallback(
+                        "service closed ipc without result".to_owned(),
+                    ))
+                }
+                Ok(Some(_)) => {
+                    fast_errs = 0;
+                }
+                Err(_) => {
+                    if tick.elapsed() < std::time::Duration::from_millis(500) {
+                        fast_errs += 1;
+                        if fast_errs >= 2 {
+                            return Err(ServiceUploadError::Fallback(
+                                "service ipc connection lost".to_owned(),
+                            ));
+                        }
+                    } else {
+                        fast_errs = 0;
+                    }
+                }
+            }
+        }
+        // 90s 无结果（旧版服务静默不识别，或上传确实超过 90s）：回退本地采集，
+        // 不直接判失败——本功能的首要目标是"日志拿得到"，重复上传代价可接受。
+        Err(ServiceUploadError::Fallback(
+            "service upload timeout (90s), fallback to local".to_owned(),
+        ))
+    })
 }
 
 fn push_upload_log_event(state: &str, msg: &str) {

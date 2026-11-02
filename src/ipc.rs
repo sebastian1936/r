@@ -290,6 +290,12 @@ pub enum Data {
     SocksWs(Option<Box<(Option<config::Socks5Server>, String)>>),
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     Whiteboard((String, crate::whiteboard::CustomEvent)),
+    // 用户态 UI 请求系统服务代采并上传诊断日志（服务为 LocalSystem，可读
+    // systemprofile 下的被控核心日志；用户态进程受 ACL 限制读不到）。
+    #[cfg(windows)]
+    ManualUploadLogs,
+    #[cfg(windows)]
+    ManualUploadLogsResult(Result<(), String>),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -414,6 +420,21 @@ impl Drop for CheckIfRestart {
                 true,
             )
         }
+    }
+}
+
+#[cfg(windows)]
+static MANUAL_UPLOAD_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 无论正常返回还是上传任务 panic（tokio 会静默 abort 任务）都复位忙等标志，
+/// 避免一次异常后所有手动上传永久收到 "already in progress" 直到服务重启。
+#[cfg(windows)]
+struct ManualUploadInFlightGuard;
+#[cfg(windows)]
+impl Drop for ManualUploadInFlightGuard {
+    fn drop(&mut self) {
+        MANUAL_UPLOAD_IN_FLIGHT.store(false, Ordering::SeqCst);
     }
 }
 
@@ -633,6 +654,24 @@ async fn handle(data: Data, stream: &mut Connection) {
                     ))
                     .await
             );
+        }
+        // 服务（LocalSystem）代用户态 UI 打包上传日志。IPC 每个客户端连接都是
+        // 独立任务，这里 await 到上传结束只会占用本次专用连接；忙等标志防止连点。
+        #[cfg(windows)]
+        Data::ManualUploadLogs => {
+            let result = if MANUAL_UPLOAD_IN_FLIGHT
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                Err("manual log upload already in progress".to_owned())
+            } else {
+                log::info!("manual device-log upload requested via service ipc");
+                let _in_flight = ManualUploadInFlightGuard;
+                crate::hbbs_http::log_collect::manual_collect_and_upload()
+                    .await
+                    .map_err(|e| e.to_string())
+            };
+            allow_err!(stream.send(&Data::ManualUploadLogsResult(result)).await);
         }
         Data::TestRendezvousServer => {
             crate::test_rendezvous_server();

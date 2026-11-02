@@ -54,7 +54,11 @@ use std::{
     num::NonZeroI64,
     path::PathBuf,
     str::FromStr,
-    sync::{atomic::AtomicI64, mpsc as std_mpsc},
+    sync::{
+        atomic::{AtomicBool, AtomicI64},
+        mpsc as std_mpsc,
+        Arc,
+    },
 };
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use system_shutdown;
@@ -205,6 +209,8 @@ struct StartCmIpcPara {
     tx_from_cm: mpsc::UnboundedSender<ipc::Data>,
     rx_desktop_ready: mpsc::Receiver<()>,
     tx_cm_stream_ready: mpsc::Sender<()>,
+    // CM IPC 连通后置 true；断流日志据此区分"CM 从未连上"与"CM 已连上后链路断开"
+    cm_attached: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -300,6 +306,10 @@ pub struct Connection {
     #[cfg(target_os = "linux")]
     linux_headless_handle: LinuxHeadlessHandle,
     closed: bool,
+    // 连接任务建立时刻，断流时输出存活时长，用于识别"秒断"
+    open_time: Instant,
+    // CM IPC 是否已连通；未授权阶段断流时用于区分死因
+    cm_attached: Arc<AtomicBool>,
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     start_cm_ipc_para: Option<StartCmIpcPara>,
     auto_disconnect_timer: Option<(Instant, u64)>,
@@ -410,6 +420,7 @@ impl Connection {
 
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let tx_cloned = tx.clone();
+        let cm_attached = Arc::new(AtomicBool::new(false));
         let mut conn = Self {
             inner: ConnInner {
                 id,
@@ -475,12 +486,15 @@ impl Connection {
             #[cfg(target_os = "linux")]
             linux_headless_handle,
             closed: false,
+            open_time: Instant::now(),
+            cm_attached: cm_attached.clone(),
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             start_cm_ipc_para: Some(StartCmIpcPara {
                 rx_to_cm,
                 tx_from_cm,
                 rx_desktop_ready,
                 tx_cm_stream_ready,
+                cm_attached,
             }),
             auto_disconnect_timer: None,
             authed_conn_id: None,
@@ -779,6 +793,19 @@ impl Connection {
                             }
                         }
                     } else {
+                        // 对端流直接结束且无 CloseReason 帧（主控文案即"连接被对方关闭"）。
+                        // 未授权阶段（密码框期间）出现时：cm_attached=false 多为 CM 从未
+                        // 连上（拉起失败）或本连接任务异常死亡；cm_attached=true 则更可能
+                        // 是中继/FRP 链路被 RST。elapsed 用于识别"3 秒秒断"类故障。
+                        log::warn!(
+                            "#{} stream EOF without close frame, elapsed={:.3}s, authorized={}, cm_attached={}, peer={}",
+                            conn.inner.id,
+                            conn.open_time.elapsed().as_secs_f64(),
+                            conn.authorized,
+                            conn.cm_attached
+                                .load(std::sync::atomic::Ordering::Relaxed),
+                            conn.ip
+                        );
                         conn.on_close("Reset by the peer", true).await;
                         break;
                     }
@@ -1205,6 +1232,12 @@ impl Connection {
                 .next()
                 .is_none()
         {
+            log::warn!(
+                "#{} Connection rejected by ip whitelist, peer={}, whitelist={:?}",
+                self.inner.id,
+                addr.ip(),
+                whitelist
+            );
             self.send_login_error("Your ip is blocked by the peer")
                 .await;
             Self::post_alarm_audit(
@@ -1224,6 +1257,11 @@ impl Connection {
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         if crate::is_server() && Config::get_option("allow-only-conn-window-open") == "Y" {
             if !crate::check_process("", !crate::platform::is_root()) {
+                log::warn!(
+                    "#{} Connection rejected by allow-only-conn-window-open, main window not open, peer={}",
+                    self.inner.id,
+                    addr.ip()
+                );
                 self.send_login_error("The main window is not open").await;
                 return false;
             }
@@ -2035,6 +2073,7 @@ impl Connection {
                     p.tx_from_cm,
                     p.rx_desktop_ready,
                     p.tx_cm_stream_ready,
+                    p.cm_attached,
                 )
                 .await
                 {
@@ -4450,6 +4489,7 @@ async fn start_ipc(
     tx_from_cm: mpsc::UnboundedSender<ipc::Data>,
     mut _rx_desktop_ready: mpsc::Receiver<()>,
     tx_stream_ready: mpsc::Sender<()>,
+    cm_attached: Arc<AtomicBool>,
 ) -> ResultType<()> {
     use hbb_common::anyhow::anyhow;
 
@@ -4542,6 +4582,9 @@ async fn start_ipc(
         }
     }
 
+    // 首次直连成功与"拉起 CM 后 20 次重试"成功两条路径都汇聚于此，
+    // 在此置位；若 20 次重试仍失败会在上面 bail，标记保持 false。
+    cm_attached.store(true, Ordering::Relaxed);
     let _res = tx_stream_ready.send(()).await;
     let mut stream = stream.ok_or(anyhow!("none stream"))?;
     loop {

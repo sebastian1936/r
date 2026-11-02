@@ -157,6 +157,8 @@ pub fn core_main() -> Option<Vec<String>> {
         }
     }
     hbb_common::init_log(false, &log_name);
+    // init_log 之后安装：--service/--server/--cm/UI 各进程角色都经过此处。
+    install_panic_log_hook();
 
     // linux uni (url) go here.
     #[cfg(all(target_os = "linux", feature = "flutter"))]
@@ -815,4 +817,38 @@ fn is_root() -> bool {
     }
     #[allow(unreachable_code)]
     crate::platform::is_root()
+}
+
+/// 把线程 panic 落盘到 flexi_logger：dev(unwind) 下 tokio::spawn 任务 panic
+/// 只会静默 abort 该任务、进程不退出；release profile 为 panic=abort，panic
+/// 直接终止进程（再由服务管理器拉起）。两种情况下默认都没有文件级痕迹，只剩
+/// 主控侧看到流 EOF（"连接被对方关闭"）。钩子先写日志再调用默认钩子，行为不变。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn install_panic_log_hook() {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info
+            .payload()
+            .downcast_ref::<&'static str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_owned());
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".to_owned());
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("<unnamed>");
+        // force_capture 不依赖 RUST_BACKTRACE 环境变量；release 构建同样输出。
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        log::error!(
+            "thread '{}' panicked: \"{}\", location={}, backtrace:\n{}",
+            thread_name,
+            payload,
+            location,
+            backtrace
+        );
+        // 保留默认钩子行为（stderr 打印/abort 策略不变）。
+        previous_hook(info);
+    }));
 }

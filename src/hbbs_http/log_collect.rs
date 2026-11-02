@@ -207,7 +207,7 @@ fn run_collect(nonce: &str, manual: bool) -> ResultType<Vec<u8>> {
     Ok(buf.into_inner())
 }
 
-/// 核心日志目录：flexi_logger 目录 + Android 私有兜底目录
+/// 核心日志目录：flexi_logger 目录 + Android 私有兜底目录 + Windows 系统服务账户目录
 fn core_log_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![Config::log_path()];
     #[cfg(target_os = "android")]
@@ -216,7 +216,55 @@ fn core_log_dirs() -> Vec<PathBuf> {
             dirs.push(d);
         }
     }
+    #[cfg(windows)]
+    {
+        // SYSTEM 下 Config::log_path() 本身就是 systemprofile 目录（SystemRoot
+        // 大小写/8.3 形态可能不同），Windows 文件系统不区分大小写，按小写路径
+        // 去重，避免同一目录重复扫描、同一日志在 zip 内打包两份。
+        let mut seen: Vec<String> = dirs
+            .iter()
+            .filter_map(|p| p.to_str().map(|s| s.to_lowercase()))
+            .collect();
+        for d in windows_system_profile_log_dirs() {
+            let key = d.to_str().map(|s| s.to_lowercase());
+            match key {
+                Some(k) if seen.contains(&k) => {}
+                Some(k) => {
+                    seen.push(k);
+                    dirs.push(d);
+                }
+                // 非 UTF-8 路径（极罕见）无法比较，保守保留
+                None => dirs.push(d),
+            }
+        }
+    }
     dirs
+}
+
+/// Windows 安装版核心服务以 LocalSystem（session 0）运行，flexi_logger 日志
+/// 不写在登录用户目录，而写在 systemprofile 下；32 位进程（含 32 位安装包跑在
+/// 64 位系统上）走 SysWOW64 变体。目录名必须与 hbb_common 的 Config 路径推导
+/// 保持一致（APP_NAME 现值），禁止硬编码具体产品名。
+/// 后台 collect_log 指令由 SYSTEM 服务执行，这些目录可读；用户态手动上传时
+/// 会被 ACL 拒绝，由 scan_log_files/read 阶段静默跳过，另走 IPC 由服务代采。
+#[cfg(windows)]
+fn windows_system_profile_log_dirs() -> Vec<PathBuf> {
+    let system_root = std::env::var_os("SystemRoot")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let app_name = hbb_common::config::APP_NAME.read().unwrap().clone();
+    let mut out = Vec::with_capacity(2);
+    for base in ["System32", "SysWOW64"] {
+        let mut p = system_root.join(base);
+        p.push(r"config\systemprofile\AppData\Roaming");
+        // APP_NAME 可能含层级分隔符（如 "Purslane Ltd\RustDesk"），
+        // Windows 下 PathBuf::push 会按 '\' 正确拆层。
+        p.push(&app_name);
+        p.push("log");
+        out.push(p);
+    }
+    out
 }
 
 /// 递归收集目录下 *.log，按修改时间倒序取最新 limit 个。
