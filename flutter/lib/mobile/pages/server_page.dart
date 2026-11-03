@@ -1828,6 +1828,19 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
     "miui_autostart",
     "miui_background_start",
     "samsung_sleep_apps",
+    "vivo_autostart",
+    "vivo_background_power",
+    "vivo_recent_lock",
+    "vivo_power_save",
+  };
+
+  /// 纯文案指引项：系统无任何 API 可读、也没有可直达的设置页，
+  /// 清单里只展示文字步骤，不渲染「去开启/去确认」按钮。
+  static const Set<String> manualGuideKeys = {
+    "vivo_autostart",
+    "vivo_background_power",
+    "vivo_recent_lock",
+    "vivo_power_save",
   };
 
   /// 保活检查是否全部通过：没有任何 off 项即通过。
@@ -1935,6 +1948,40 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
           "「让未使用的应用进入休眠」，并确认本应用不在「休眠的应用程序」"
           "列表中；再到 设置 → 应用 → 本应用 → 电池，选「不受限制」。"
           "否则长期不打开会被系统深度休眠，远程服务无法自动恢复",
+      false,
+    ],
+    "vivo_autostart": [
+      "i管家：允许自启动（vivo/iQOO 必设）",
+      "打开系统自带的「i管家」→ 应用管理 → 权限管理 → 自启动"
+          "（部分版本路径为 i管家 → 权限管理 → 自启动，或 设置 → "
+          "应用与权限 → 权限管理 → 自启动），找到本应用并打开允许，"
+          "「关联启动 / 后台启动」也一并允许。不开的话锁屏久了服务会被"
+          "系统停止且无法自动恢复，远程会一直显示离线",
+      true,
+    ],
+    "vivo_background_power": [
+      "允许后台高耗电（vivo/iQOO 必设）",
+      "设置 → 电池 → 后台耗电管理（部分版本在「更多电池设置」里，"
+          "也可在设置顶部搜索「后台耗电」直达），找到本应用，选择"
+          "「允许后台高耗电」。注意：它和上面的「电池：不受限制」是"
+          "两个独立开关，只开后者仍会被 vivo 电池引擎强制停止",
+      true,
+    ],
+    "vivo_recent_lock": [
+      "最近任务加锁，不要上滑清理（vivo/iQOO 必做）",
+      "先打开一次本应用，再从屏幕底部上滑并停顿调出最近任务列表，"
+          "把本应用的卡片向下拉一下，卡片角上出现锁形图标即已锁定。"
+          "之后点「一键加速 / ×」清理后台不会清掉它。切记不要手动"
+          "上滑划掉本应用卡片——上滑清理等同强制停止，闹钟、看门狗等"
+          "所有保活手段都会失效，只能重新手动打开 App 才能恢复",
+      true,
+    ],
+    "vivo_power_save": [
+      "关闭省电/睡眠/异常耗电自动优化（vivo/iQOO 建议）",
+      "设置 → 电池，关闭「省电模式」「睡眠模式」（部分版本叫"
+          "「超级省电 / 待机耗电管理」）；再打开「i管家」→ 电池管理"
+          "（或实用工具里的省电管理），把本应用从「异常耗电自动优化」"
+          "名单里排除，避免待机时被系统自动结束",
       false,
     ],
     "file_storage": [
@@ -2243,14 +2290,17 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
                             ? "部分 vivo/小米机型读不到该状态：只要开发者选项里"
                                 "「无线调试」确实开着，不用管这个问号，直接点"
                                 "下方「开始配对」即可"
-                            : "系统不允许读取此状态，请手动确认是否已开启",
+                            : (manualGuideKeys.contains(key)
+                                ? "系统无法读取该状态、也无法自动跳转，"
+                                    "请按上面的路径在手机上手动设置"
+                                : "系统不允许读取此状态，请手动确认是否已开启"),
                         style: const TextStyle(
                             fontSize: 11, color: Colors.orangeAccent)),
                   ),
               ],
             ),
           ),
-          if (status != "ok")
+          if (status != "ok" && !manualGuideKeys.contains(key))
             TextButton(
               style: TextButton.styleFrom(
                 padding:

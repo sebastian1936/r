@@ -23,6 +23,12 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- 录屏授权失效时全屏通知一键拉起确认页（Android 10+ 后台禁止直接启动 Activity） -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- 无线调试配对成功后由 adb shell 执行 pm grant 授予本权限（pm_grant
+         持久模式）：之后关 WiFi/重启/无线调试被关时，App 可离线把无障碍
+         开关写回系统，不再依赖无线调试。signature|development 级权限，
+         普通安装不会获得、也无任何运行时弹窗；但必须先在此声明，
+         否则 pm grant 直接抛 SecurityException（controller flavor 已 remove） -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
 
     <queries>
         <intent>

@@ -21,7 +21,9 @@ import com.starcaretech.a.adb.AdbPairingService
  *  - 悬浮窗 / 电池优化白名单 / 通知：公开 API
  *  - MIUI「自启动」「后台弹出界面」：无公开 API，只能反射 AppOps 尽力探测，
  *    探测不到时返回 unknown，UI 仍展示并允许用户手动确认
- *  - 「最近任务加锁」「锁屏显示」：完全无法检测，UI 做静态提示
+ *  - vivo/iQOO 的 i管家自启动、后台高耗电、省电策略，以及各品牌
+ *    「最近任务加锁」「锁屏显示」：完全无法检测，恒 unknown，
+ *    UI 只做纯文案静态提示（无跳转按钮）
  */
 object EnvCheckManager {
     private const val TAG = "EnvCheck"
@@ -187,6 +189,19 @@ object EnvCheckManager {
             // 服务与看门狗全部失效。该状态无公开 API 可读，恒 unknown，
             // 作为保活建议项由用户手动确认。
             items += Item("samsung_sleep_apps", STATUS_UNKNOWN)
+        }
+        if (isVivo) {
+            // vivo/iQOO（OriginOS）保活四件套。实测 i管家/电池引擎
+            // （com.vivo.abe）会对前台服务执行 force-stop 级强杀，杀后
+            // 应用进入 stopped 状态，AlarmManager/JobScheduler/无障碍/
+            // 开机广播全部撤销，看门狗无法自救，只能人工点开 App。
+            // 通用 Doze 白名单（battery_optimization）挡不住该强杀，
+            // 必须配好 vivo 私有的自启动/后台高耗电名单等。四项均无
+            // 任何 API 可读，恒 unknown 做纯文案指引，不做跳转、不阻塞流程。
+            items += Item("vivo_autostart", STATUS_UNKNOWN)
+            items += Item("vivo_background_power", STATUS_UNKNOWN)
+            items += Item("vivo_recent_lock", STATUS_UNKNOWN)
+            items += Item("vivo_power_save", STATUS_UNKNOWN)
         }
         return items.map { mapOf("key" to it.key, "status" to it.status) }
     }
