@@ -1189,6 +1189,10 @@ class RustdeskImpl {
     throw UnimplementedError("cmCheckClientsLength");
   }
 
+  Future<bool> cmHasPendingConnections({dynamic hint}) {
+    return Future.value(false);
+  }
+
   Future<void> mainInit({required String appDir, dynamic hint}) {
     return Future.value();
   }

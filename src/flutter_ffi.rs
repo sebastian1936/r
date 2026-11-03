@@ -1792,6 +1792,12 @@ pub fn cm_get_clients_length() -> usize {
     crate::ui_cm_interface::get_clients_length()
 }
 
+/// CM 空窗自杀关窗前实时复核：是否存在已附着 CM 管道、尚未注册 client 的
+/// 入站连接（纯密码模式密码输入阶段）。有则取消自杀，避免误杀等待密码的连接。
+pub fn cm_has_pending_connections() -> bool {
+    crate::ui_cm_interface::has_pending_connections()
+}
+
 pub fn main_init(app_dir: String, custom_client_config: String) {
     initialize(&app_dir, &custom_client_config);
 }

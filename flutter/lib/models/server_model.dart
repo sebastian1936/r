@@ -219,8 +219,16 @@ class ServerModel with ChangeNotifier {
           if (_clients.isEmpty) {
             hideCmWindow();
             if (_zeroClientLengthCounter++ == 12) {
-              // 6 second
-              windowManager.close();
+              // 关窗前实时复核 --server：可能存在管道已附着但尚未注册
+              // client 的入站连接（纯密码模式下主控还停留在密码输入框），
+              // 有则取消本次自杀并重新计时，等密码提交后注册 client，
+              // 或连接真正结束、计数归零后下一轮再退出。
+              if (await bind.cmHasPendingConnections()) {
+                _zeroClientLengthCounter = 0;
+              } else {
+                // 6 second
+                windowManager.close();
+              }
             }
           } else {
             _zeroClientLengthCounter = 0;

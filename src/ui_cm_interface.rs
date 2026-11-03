@@ -37,7 +37,7 @@ use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
     sync::{
-        atomic::{AtomicI64, Ordering},
+        atomic::{AtomicI64, AtomicUsize, Ordering},
         RwLock,
     },
 };
@@ -81,6 +81,7 @@ struct IpcTaskRunner<T: InvokeUiCM> {
     file_transfer_enabled: bool,
     #[cfg(target_os = "windows")]
     file_transfer_enabled_peer: bool,
+    pending_guard: CmPendingGuard,
 }
 
 lazy_static::lazy_static! {
@@ -88,6 +89,48 @@ lazy_static::lazy_static! {
 }
 
 static CLICK_TIME: AtomicI64 = AtomicI64::new(0);
+
+/// 已连上 CM 命名管道、但尚未收到 Data::Login 注册进 CLIENTS 的入站连接数。
+/// 纯密码模式下 --server 收到空密码时只附着 CM 管道、不发 Login（不弹人工放行框），
+/// 此时主控的密码输入窗口仍然开着，CM 的"零 client 自杀定时器"关窗前必须实时
+/// 复核本计数，避免把正在等待密码的连接一并杀掉（现象：输密码约 7 秒后被
+/// Reset by the peer）。计数只在桌面端 ipc_task 生命周期内增减。
+static CM_PENDING_TASKS: AtomicUsize = AtomicUsize::new(0);
+
+/// CM pending 连接计数守卫：ipc_task 启动即 +1，收到 Data::Login 转正或
+/// 任务结束时 -1，保证任务异常退出也不会留下脏计数。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+struct CmPendingGuard(bool);
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+impl CmPendingGuard {
+    fn new() -> Self {
+        CM_PENDING_TASKS.fetch_add(1, Ordering::SeqCst);
+        Self(true)
+    }
+
+    /// 收到 Data::Login 后该连接转为 CLIENTS 中的正式 client，移出 pending 计数。
+    /// 同一任务可能收到多次 Login（click/both 模式重复弹框），只允许减一次。
+    fn promote(&mut self) {
+        if self.0 {
+            CM_PENDING_TASKS.fetch_sub(1, Ordering::SeqCst);
+            self.0 = false;
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+impl Drop for CmPendingGuard {
+    fn drop(&mut self) {
+        self.promote();
+    }
+}
+
+/// 是否存在"管道已附着但尚未注册 client"的入站连接。供 CM 空窗自杀前实时复核。
+#[inline]
+pub fn has_pending_connections() -> bool {
+    CM_PENDING_TASKS.load(Ordering::SeqCst) > 0
+}
 
 #[derive(Clone)]
 pub struct ConnectionManager<T: InvokeUiCM> {
@@ -412,6 +455,8 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                 Data::Login{id, is_file_transfer, is_view_camera, is_terminal, port_forward, peer_id, name, authorized, keyboard, clipboard, audio, file, file_transfer_enabled: _file_transfer_enabled, restart, recording, block_input, from_switch} => {
                                     log::debug!("conn_id: {}", id);
                                     self.cm.add_connection(id, is_file_transfer, is_view_camera, is_terminal, port_forward, peer_id, name, authorized, keyboard, clipboard, audio, file, restart, recording, block_input, from_switch, self.tx.clone());
+                                    // 已注册为正式 client，移出 pending 计数；重复 Login 时幂等
+                                    self.pending_guard.promote();
                                     self.conn_id = id;
                                     #[cfg(target_os = "windows")]
                                     {
@@ -619,6 +664,7 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
             file_transfer_enabled: false,
             #[cfg(target_os = "windows")]
             file_transfer_enabled_peer: false,
+            pending_guard: CmPendingGuard::new(),
         };
 
         while task_runner.running {
