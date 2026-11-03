@@ -72,6 +72,12 @@ const val PROJECTION_STABLE_LIFETIME_MS = 20_000L
 const val PROJECTION_FUSE_WINDOW_MS = 60_000L
 const val PROJECTION_FUSE_MAX_FAILURES = 2
 
+// 开机全自动恢复录屏（实验，仅无安全锁屏设备）：BOOT_COMPLETED 后的武装窗口，
+// 以及两次补弹延时（与透明页 30s 自毁、授权闸门 45s 兜底超时对齐）
+const val BOOT_AUTO_PROMPT_WINDOW_MS = 150_000L
+const val BOOT_AUTO_PROMPT_RETRY1_MS = 45_000L
+const val BOOT_AUTO_PROMPT_RETRY2_MS = 90_000L
+
 // 远程诊断 logcat 降噪：实测噪声占比 85%（212 行中 181 行）的系统/MIUI 框架 tag。
 // 只屏蔽这几个实锤高频源，未知 tag 全保留。
 private val NOISY_LOGCAT_TAGS = setOf(
@@ -486,6 +492,30 @@ class MainService : Service() {
     /** 上次自动拉起授权页时间（3s 去抖，多触发源只发一次） */
     @Volatile
     private var lastAutoPromptMs = 0L
+
+    // ---- 开机全自动恢复录屏（实验，仅无安全锁屏设备）----
+    // 重启后无密码（滑动/无）锁屏设备：BOOT_COMPLETED 武装一个短窗口，窗口内
+    // 放宽 promptProjectionRecovery 的解锁/前台门控，直接把带
+    // showWhenLocked+turnScreenOn 的授权透明页拉到锁屏之上，由无障碍自动点
+    // 系统确认框。有 PIN/图案/密码的设备绝不武装（Android 安全边界）。
+    @Volatile
+    private var bootAutoPromptArmed = false
+    private var bootAutoPromptDeadlineElapsed = 0L
+    private val bootAutoPromptHandler = Handler(Looper.getMainLooper())
+    private val bootAutoPromptRetryRunnable = object : Runnable {
+        override fun run() {
+            // 就绪/在途/熔断/窗口过期都会拦截补弹，杜绝锁屏弹窗风暴复发
+            if (serviceDestroyed || !bootAutoPromptArmed ||
+                SystemClock.elapsedRealtime() > bootAutoPromptDeadlineElapsed ||
+                _isReady || mediaProjection != null ||
+                projectionRequestInFlight || isProjectionFused()
+            ) {
+                return
+            }
+            Log.i(logTag, "开机自动恢复：补一次锁屏之上授权引导")
+            requestMediaProjectionWithNotice()
+        }
+    }
 
     /**
      * 亮屏/解锁监听：国产 ROM 普遍在锁屏后停止 MediaProjection 会话，
@@ -1127,6 +1157,8 @@ class MainService : Service() {
 
                 if (intent.getBooleanExtra(EXT_INIT_FROM_BOOT, false)) {
                     FFI.startService()
+                    // 实验：无安全锁屏设备武装开机全自动授权（有密码设备内部不武装）
+                    armBootAutoPromptIfUnsecured()
                 }
                 Log.d(logTag, "service starting: ${startId}:${Thread.currentThread()}")
                 val mediaProjectionManager =
@@ -1156,6 +1188,7 @@ class MainService : Service() {
                         } else {
                             MediaProjectionTokenStore.save(this, token)
                             _isReady = true
+                            disarmBootAutoPrompt("录屏授权已就绪")
                             // 用户完成了一次有效授权：历史短命失败计数全部清零，
                             // 否则熔断后手动成功一次，下次单次抖动又会立即熔断
                             shortLivedProjectionFailures = 0
@@ -1280,6 +1313,7 @@ class MainService : Service() {
         }
         Log.i(logTag, "MediaProjection 已用缓存授权静默恢复")
         _isReady = true
+        disarmBootAutoPrompt("缓存授权静默恢复成功")
         checkMediaPermission()
         resumeCaptureIfWanted()
         return true
@@ -1439,7 +1473,9 @@ class MainService : Service() {
      * - 恢复通知始终先发出（同 id 自动去重），锁屏/后台也能由用户手动点；
      * - 仅当 App 有 Activity 在前台 + 屏幕亮 + 已解锁 + 没有别的授权请求在途时，
      *   才主动 startActivity 弹系统确认框。
-     *   看门狗拉起的冷进程、锁屏中、开机恢复一律只发通知，不再自动叠透明 Activity。
+     *   看门狗拉起的冷进程、锁屏中一律只发通知，不再自动叠透明 Activity。
+     *   唯一例外：BOOT_COMPLETED 后 150s 武装窗口内、且设备无安全锁屏
+     *   （滑动/无）时，允许直接在锁屏之上弹授权页做开机全自动恢复（实验）。
      *
      * @param fused true=已熔断：不自动拉起系统确认框（避免无限循环弹框），
      *              只发/更新通知，由用户主动点击重试
@@ -1479,7 +1515,17 @@ class MainService : Service() {
         val screenOn = powerManager.isInteractive
         val unlocked = keyguardManager?.isKeyguardLocked != true
         val foreground = MainApplication.isAppForeground
-        if (!screenOn || !unlocked || !foreground) {
+        // 开机武装窗口内 + 设备无安全锁屏：允许息屏/锁屏/后台态直接把授权页
+        // 拉到锁屏之上（透明页 showWhenLocked+turnScreenOn，无障碍自动确认）。
+        // 再次实时检查安全锁屏，防止开机后补设密码仍被放行。
+        val bootBypass = bootAutoPromptArmed &&
+            SystemClock.elapsedRealtime() <= bootAutoPromptDeadlineElapsed &&
+            !isDeviceSecureLocked()
+        if (bootAutoPromptArmed && !bootBypass) {
+            // 窗口过期 / 设备有安全锁屏：解除武装，永久回到纯通知引导
+            disarmBootAutoPrompt("窗口过期或设备存在安全锁屏")
+        }
+        if (!bootBypass && (!screenOn || !unlocked || !foreground)) {
             Log.i(
                 logTag,
                 "非可交互前台（亮屏=$screenOn 解锁=$unlocked 前台=$foreground），仅通知引导，不自动弹录屏框"
@@ -1488,6 +1534,10 @@ class MainService : Service() {
             // 只发了恢复通知，需要人点通知（或无障碍后续拉起）才能弹系统确认框
             return "background_notice(on=$screenOn,unlocked=$unlocked,fg=$foreground)"
         }
+        // 仅自动流程携带：透明页据此 30s 无人应答自毁，服务才能在 45s/90s 补弹。
+        // 注意上面的全屏通知 PendingIntent 在此之前已生成，不携带该标记，
+        // 用户手点通知进入的授权页不会自毁。
+        intent.putExtra(EXT_BOOT_AUTO_CONSENT, bootBypass)
         // 注意：全局在途闸门由 PermissionRequestTransparentActivity 持有，
         // Service 端不能先占位——否则透明页 onCreate 抢闸门必败直接 finish，
         // 系统录屏框永远弹不出来（曾导致"服务开了但录屏打不开"）。
@@ -1501,12 +1551,65 @@ class MainService : Service() {
         lastAutoPromptMs = now
         return try {
             startActivity(intent)
-            "auto_prompt_started"
+            if (bootBypass) "boot_auto_prompt_started" else "auto_prompt_started"
         } catch (e: Exception) {
             Log.w(logTag, "后台拉起授权页被系统拦截，改由全屏通知引导", e)
             "auto_prompt_blocked:${e.javaClass.simpleName}"
         }
     }
+
+    /**
+     * 开机广播启动时：若设备没有安全锁屏（滑动/无），武装一个短窗口，
+     * 让录屏授权确认框直接显示在锁屏之上并由无障碍自动确认，实现无人值守
+     * 设备重启后自动恢复被控。有 PIN/图案/密码、或状态无法判断时不武装。
+     */
+    private fun armBootAutoPromptIfUnsecured() {
+        if (isDeviceSecureLocked()) {
+            Log.i(logTag, "开机恢复：设备有安全锁屏（或状态未知），维持通知引导，不自动弹授权页")
+            return
+        }
+        bootAutoPromptArmed = true
+        bootAutoPromptDeadlineElapsed =
+            SystemClock.elapsedRealtime() + BOOT_AUTO_PROMPT_WINDOW_MS
+        bootAutoPromptHandler.removeCallbacks(bootAutoPromptRetryRunnable)
+        // onStartCommand 随后立即首弹；开机瞬间 SystemUI/锁屏/无障碍可能
+        // 尚未就绪，按透明页 30s 自毁节奏再补两次。在途闸门、熔断、就绪态
+        // 和 3s 去抖都会拦截重复弹窗，不会复发锁屏弹窗风暴。
+        bootAutoPromptHandler.postDelayed(bootAutoPromptRetryRunnable, BOOT_AUTO_PROMPT_RETRY1_MS)
+        bootAutoPromptHandler.postDelayed(bootAutoPromptRetryRunnable, BOOT_AUTO_PROMPT_RETRY2_MS)
+        Log.i(
+            logTag,
+            "开机恢复：设备无安全锁屏，已武装锁屏自动授权窗口 ${BOOT_AUTO_PROMPT_WINDOW_MS}ms"
+        )
+    }
+
+    private fun disarmBootAutoPrompt(reason: String) {
+        if (!bootAutoPromptArmed) return
+        bootAutoPromptArmed = false
+        bootAutoPromptHandler.removeCallbacks(bootAutoPromptRetryRunnable)
+        Log.i(logTag, "开机自动恢复解除武装：$reason")
+    }
+
+    /** 设备是否设置了安全锁屏（PIN/图案/密码）；无法判断时按 true（安全侧）处理 */
+    private fun isDeviceSecureLocked(): Boolean {
+        val km = keyguardManager ?: return true
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                km.isDeviceSecure
+            } else {
+                @Suppress("DEPRECATION")
+                km.isKeyguardSecure
+            }
+        } catch (e: Exception) {
+            Log.w(logTag, "读取锁屏安全状态失败，按有安全锁屏处理", e)
+            true
+        }
+    }
+
+    /** 当前是否处于录屏短命失效熔断态（熔断时开机自动弹框也必须让路） */
+    private fun isProjectionFused(): Boolean =
+        shortLivedProjectionFailures > PROJECTION_FUSE_MAX_FAILURES &&
+            SystemClock.elapsedRealtime() - projectionFailWindowStartMs <= PROJECTION_FUSE_WINDOW_MS
 
     private fun requestMediaProjectionWithNotice() = promptProjectionRecovery(fused = false)
 
@@ -1753,6 +1856,7 @@ class MainService : Service() {
         markServiceAlive(false)
         // 先注销回调并置位销毁标记，防止系统随后回调 onStop 又弹出授权请求
         serviceDestroyed = true
+        disarmBootAutoPrompt("服务销毁")
         _isReady = false
         _isAudioStart = false
 

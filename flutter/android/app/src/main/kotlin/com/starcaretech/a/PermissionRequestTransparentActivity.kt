@@ -6,7 +6,17 @@ import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+
+/**
+ * 开机全自动恢复（实验）：由 boot 自动流程在锁屏之上拉起本页时，
+ * 30s 内没等到授权结果就自毁——开机早期 SystemUI/无障碍可能尚未就绪，
+ * 自毁释放闸门后 MainService 会在 45s/90s 补弹全新一轮。
+ * 用户手点通知进入（不带 EXT_BOOT_AUTO_CONSENT）不启用，永不替用户关窗。
+ */
+private const val BOOT_CONSENT_AUTO_FINISH_MS = 30_000L
 
 /**
  * 发起系统录屏确认框的透明页。
@@ -16,12 +26,21 @@ import android.util.Log
  * - onCreate 必须先抢到 MainService 的全局授权闸门，抢不到直接 finish，
  *   杜绝亮屏 receiver/看门狗/多 startId 叠出多个确认框。
  *
- * 本页只可能由两个来源启动：
+ * 本页可能的来源：
  * 1. MainService 在 App 前台且亮屏解锁时自动拉起（已过门控）；
- * 2. 用户主动点击恢复通知（锁屏/后台场景的唯一入口，属用户行为）。
+ * 2. 用户主动点击恢复通知（锁屏/后台场景的唯一入口，属用户行为）；
+ * 3. 开机全自动恢复（实验）：无安全锁屏设备在锁屏之上被自动拉起，
+ *    带 EXT_BOOT_AUTO_CONSENT，30s 无结果自毁以便服务补弹。
  */
 class PermissionRequestTransparentActivity: Activity() {
     private val logTag = "permissionRequest"
+
+    private val autoFinishHandler = Handler(Looper.getMainLooper())
+    private val bootAutoFinish = Runnable {
+        Log.i(logTag, "开机锁屏自动授权：${BOOT_CONSENT_AUTO_FINISH_MS}ms 内无结果，自毁以放行补弹")
+        // onDestroy 会兜底 endConsentWait + endProjectionRequest，闸门随之释放
+        finish()
+    }
 
     /** 授权结果已交给 MainService 处理，闸门由服务端释放；否则本页销毁时自行释放 */
     private var handedOffToService = false
@@ -67,6 +86,10 @@ class PermissionRequestTransparentActivity: Activity() {
         // 打开自动点击闸门：仅接下来 20 秒内、系统录屏确认窗口出现时，
         // 才允许本应用无障碍服务点击"立即开始"
         InputService.beginConsentWait()
+        if (intent.getBooleanExtra(EXT_BOOT_AUTO_CONSENT, false)) {
+            Log.i(logTag, "开机自动授权：${BOOT_CONSENT_AUTO_FINISH_MS}ms 无结果将自毁")
+            autoFinishHandler.postDelayed(bootAutoFinish, BOOT_CONSENT_AUTO_FINISH_MS)
+        }
         val mediaProjectionManager =
             getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         // Android 14+ 默认弹"整个屏幕/单个应用"两段式选择框（多一步且
@@ -90,6 +113,7 @@ class PermissionRequestTransparentActivity: Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        autoFinishHandler.removeCallbacks(bootAutoFinish)
         if (requestCode == REQ_REQUEST_MEDIA_PROJECTION) {
             com.starcaretech.a.adb.AdbAuthManager.trace(
                 applicationContext,
@@ -111,7 +135,8 @@ class PermissionRequestTransparentActivity: Activity() {
     }
 
     override fun onDestroy() {
-        // 用户没完成授权页面就被销毁（系统回收/按返回）：兜底释放闸门
+        autoFinishHandler.removeCallbacks(bootAutoFinish)
+        // 用户没完成授权页面就被销毁（系统回收/按返回/开机自毁超时）：兜底释放闸门
         if (!handedOffToService) {
             InputService.endConsentWait()
             MainService.endProjectionRequest()

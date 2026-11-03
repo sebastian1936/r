@@ -38,6 +38,9 @@ const val ACT_LOGIN_REQ_NOTIFY = "LOGIN_REQ_NOTIFY"
 // 锁屏保活周期心跳：AlarmManager 在 Doze 下唤醒服务，补锁并触发信令重连
 const val ACT_KEEPALIVE_TICK = "KEEPALIVE_TICK"
 const val EXT_INIT_FROM_BOOT = "EXT_INIT_FROM_BOOT"
+// 开机全自动恢复（实验）：授权页由 boot 自动流程在锁屏之上拉起。
+// 透明页据此开启"无人应答自毁"，服务才能按固定节奏补弹
+const val EXT_BOOT_AUTO_CONSENT = "EXT_BOOT_AUTO_CONSENT"
 const val EXT_MEDIA_PROJECTION_RES_INTENT = "MEDIA_PROJECTION_RES_INTENT"
 const val EXT_LOGIN_REQ_NOTIFY = "LOGIN_REQ_NOTIFY"
 
