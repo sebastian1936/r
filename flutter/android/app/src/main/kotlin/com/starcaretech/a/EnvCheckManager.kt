@@ -21,11 +21,9 @@ import com.starcaretech.a.adb.AdbPairingService
  *  - 悬浮窗 / 电池优化白名单 / 通知：公开 API
  *  - MIUI「自启动」「后台弹出界面」：无公开 API，只能反射 AppOps 尽力探测，
  *    探测不到时返回 unknown，UI 仍展示并允许用户手动确认
- *  - vivo/iQOO 的 i管家自启动、后台高耗电、省电策略：完全无法检测，
- *    恒 unknown；设置页为厂商私有 Activity，只能按已知组件名尽力
- *    直达（失败回退应用详情页），用户按文案确认
- *  - 各品牌「最近任务加锁」「锁屏显示」：无设置页可跳，恒 unknown，
- *    UI 只做纯文案静态提示（无跳转按钮）
+ *  - 华为（EMUI/鸿蒙）的应用启动管理、耗电详情后台活动、省电策略，
+ *    以及各品牌「最近任务加锁」：完全无法检测，恒 unknown；
+ *    前三项尽力跳转华为手机管家私有页，最近任务加锁无设置页只做文案指引
  */
 object EnvCheckManager {
     private const val TAG = "EnvCheck"
@@ -50,7 +48,7 @@ object EnvCheckManager {
         when {
             isMiui -> "xiaomi"
             isSamsung -> "samsung"
-            com.starcaretech.a.adb.HarmonyOsDetector.isHarmonyOs -> "huawei"
+            isHuawei -> "huawei"
             isHonor -> "honor"
             isOppo -> "oppo"
             isVivo -> "vivo"
@@ -206,6 +204,19 @@ object EnvCheckManager {
             items += Item("vivo_background_power", STATUS_UNKNOWN)
             items += Item("vivo_recent_lock", STATUS_UNKNOWN)
             items += Item("vivo_power_save", STATUS_UNKNOWN)
+        }
+        if (isHuawei) {
+            // 华为（EMUI / 鸿蒙）后台限制比原生 Doze 更严：即使开了
+            // 「电池不受限制」（battery_optimization），EMUI 的「应用启动
+            // 管理」仍会禁止自启动/后台活动，「耗电详情」也会限制后台
+            // 运行。Android 10 及以下无系统级无线调试，无法用 ADB shell
+            // 写入 Doze 白名单，全靠用户手动配好这几项。四项均无 API
+            // 可读，恒 unknown；前三项尽力跳转华为手机管家私有页，最近
+            // 任务加锁无设置页只能文案指引；均不阻塞流程。
+            items += Item("huawei_autostart", STATUS_UNKNOWN)
+            items += Item("huawei_background_power", STATUS_UNKNOWN)
+            items += Item("huawei_recent_lock", STATUS_UNKNOWN)
+            items += Item("huawei_power_save", STATUS_UNKNOWN)
         }
         return items.map { mapOf("key" to it.key, "status" to it.status) }
     }
@@ -484,6 +495,11 @@ object EnvCheckManager {
     // vivo / iQOO 同为 OriginOS/Funtouch 系
     val isVivo: Boolean by lazy { brandMatches("vivo", "iqoo") }
 
+    // 华为：覆盖 EMUI（Android 10 及以下）与鸿蒙（HarmonyOS 2/3/4）。
+    // 注意：鸿蒙通过 HarmonyOsDetector 单独判定（主要用于无线调试能力），
+    // 但品牌展示/保活项下发统一用 isHuawei，避免 EMUI 华为掉到 other。
+    val isHuawei: Boolean by lazy { brandMatches("huawei") }
+
     // 荣耀独立后的 MagicOS 机型（分家前的老荣耀仍是鸿蒙，已在上面归 huawei）
     val isHonor: Boolean by lazy { brandMatches("honor") }
 
@@ -548,6 +564,15 @@ object EnvCheckManager {
             "vivo_background_power" -> openVivoBackgroundPower(appContext)
 
             "vivo_power_save" -> openVivoPowerSettings(appContext)
+
+            // 华为（EMUI / 鸿蒙）私有三件套：手机管家/设置的组件名随
+            // EMUI/HarmonyOS 版本变化，逐个尝试，失败回退应用详情页
+            // （详情页内有「启动管理」「电池」入口）
+            "huawei_autostart" -> openHuaweiAutoStart(appContext)
+
+            "huawei_background_power" -> openHuaweiBackgroundPower(appContext)
+
+            "huawei_power_save" -> openHuaweiPowerSettings(appContext)
 
             else -> openAppDetails(appContext)
         }
@@ -740,6 +765,65 @@ object EnvCheckManager {
      * 用户按文案关闭省电/睡眠模式、排除异常耗电优化。
      */
     private fun openVivoPowerSettings(context: Context): Boolean {
+        if (launch(context, Intent(Settings.ACTION_BATTERY_SAVER_SETTINGS))) return true
+        return launch(context, Intent(Settings.ACTION_SETTINGS))
+    }
+
+    /**
+     * 华为「应用启动管理」页：EMUI 在「设置 → 应用 → 应用启动管理」，
+     * 鸿蒙在「手机管家 → 应用启动管理」。组件名随版本变化，逐个尝试；
+     * 全部失败时回退应用详情页（详情页内有「启动管理」入口）。
+     * 用户需关闭「自动管理」，手动允许「自启动 / 关联启动 / 后台活动」。
+     */
+    private fun openHuaweiAutoStart(context: Context): Boolean {
+        val candidates = listOf(
+            // EMUI 10/11 应用启动管理
+            ComponentName(
+                "com.huawei.systemmanager",
+                "com.huawei.systemmanager.appcontrol.activity.StartupAppControlActivity"
+            ),
+            // 鸿蒙 / 部分 EMUI 手机管家启动管理
+            ComponentName(
+                "com.huawei.systemmanager",
+                "com.huawei.systemmanager.optimize.process.ProtectActivity"
+            ),
+            // 鸿蒙 4 手机管家
+            ComponentName(
+                "com.huawei.systemmanager",
+                "com.huawei.systemmanager.startupmgr.ui.StartupAppListActivity"
+            )
+        )
+        candidates.forEach { if (launch(context, Intent().setComponent(it))) return true }
+        return openAppDetails(context)
+    }
+
+    /**
+     * 华为「耗电详情 / 电池」页：EMUI 在「设置 → 电池 → 耗电详情」，
+     * 鸿蒙在「手机管家 → 电池」。打开后找到本应用，允许后台活动、
+     * 关闭「自动管理」/异常耗电优化。失败回退系统电池页，再回退
+     * 应用详情页（详情页内有「电池」入口）。
+     */
+    private fun openHuaweiBackgroundPower(context: Context): Boolean {
+        val candidates = listOf(
+            ComponentName(
+                "com.huawei.systemmanager",
+                "com.huawei.systemmanager.optimize.process.ProtectActivity"
+            ),
+            ComponentName(
+                "com.android.settings",
+                "com.android.settings.Settings\$AdvancedPowerSettingsActivity"
+            )
+        )
+        candidates.forEach { if (launch(context, Intent().setComponent(it))) return true }
+        if (launch(context, Intent(Settings.ACTION_BATTERY_SAVER_SETTINGS))) return true
+        return openAppDetails(context)
+    }
+
+    /**
+     * 华为省电模式页：打开系统「省电模式 / 电池」设置页，用户按文案
+     * 关闭省电模式、把本应用加入不优化名单。失败回退设置主页。
+     */
+    private fun openHuaweiPowerSettings(context: Context): Boolean {
         if (launch(context, Intent(Settings.ACTION_BATTERY_SAVER_SETTINGS))) return true
         return launch(context, Intent(Settings.ACTION_SETTINGS))
     }

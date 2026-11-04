@@ -1832,15 +1832,20 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
     "vivo_background_power",
     "vivo_recent_lock",
     "vivo_power_save",
+    "huawei_autostart",
+    "huawei_background_power",
+    "huawei_recent_lock",
+    "huawei_power_save",
   };
 
   /// 纯文案指引项：系统无任何 API 可读、也没有可直达的设置页，
   /// 清单里只展示文字步骤，不渲染「去开启/去确认」按钮。
-  /// vivo 自启动/后台高耗电/省电策略有私有设置页可尽力直达（原生
+  /// vivo/华为 自启动/后台高耗电/省电策略有私有设置页可尽力直达（原生
   /// EnvCheckManager.openSetting 内逐级回退），会渲染跳转按钮；
   /// 只有「最近任务加锁」必须在最近任务卡片上操作，无设置页可跳。
   static const Set<String> manualGuideKeys = {
     "vivo_recent_lock",
+    "huawei_recent_lock",
   };
 
   /// 保活检查是否全部通过：没有任何 off 项即通过。
@@ -1985,6 +1990,40 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
           "再打开「i管家」→ 电池管理"
           "（或实用工具里的省电管理），把本应用从「异常耗电自动优化」"
           "名单里排除，避免待机时被系统自动结束",
+      false,
+    ],
+    "huawei_autostart": [
+      "允许自启动 / 后台活动（华为必设）",
+      "点「去确认」打开手机管家「应用启动管理」；没跳对时手动进入："
+          "设置 → 应用 → 应用启动管理 → 找到本应用，关闭「自动管理」，"
+          "手动打开「自启动 / 关联启动 / 后台活动」三项。"
+          "这是华为锁屏后能否保持后台的核心开关，不开的话服务会被"
+          "EMUI 直接停止且无法自动恢复，远程会一直显示离线",
+      true,
+    ],
+    "huawei_background_power": [
+      "耗电详情：允许后台活动（华为必设）",
+      "点「去确认」打开电池/耗电详情页；找到本应用，允许「后台活动」"
+          "（部分版本叫「关闭异常耗电自动优化」或「允许后台运行」）。"
+          "注意：它和上面的「电池：不受限制」是两个独立开关，"
+          "只开后者仍会被 EMUI 限制后台",
+      true,
+    ],
+    "huawei_recent_lock": [
+      "最近任务加锁，不要上滑清理（华为必做）",
+      "该项没有系统设置页，只能在手机上操作：先打开一次本应用，"
+          "再从屏幕底部上滑并停顿调出最近任务列表，"
+          "把本应用的卡片向下拉一下，卡片角上出现锁形图标即已锁定。"
+          "之后点「一键加速」清理后台不会清掉它。切记不要手动上滑"
+          "划掉本应用卡片——上滑清理等同强制停止",
+      true,
+    ],
+    "huawei_power_save": [
+      "关闭省电模式 / 加入不优化名单（华为建议）",
+      "点「去确认」打开系统电池页；请关闭「省电模式」"
+          "（EMUI 叫「省电模式 / 超级省电」，鸿蒙叫「低电量模式」）；"
+          "再到 手机管家 → 电池 / 耗电详情，把本应用加入"
+          "「不优化」或「允许后台活动」名单，避免待机时被系统自动结束",
       false,
     ],
     "file_storage": [
@@ -2143,10 +2182,10 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
       if (ok != true) {
         showToast("未找到对应设置页，请按文字指引手动开启");
       } else {
-        // vivo 私有开关无任何 API 可读，复查结果永远是 unknown，
+        // vivo/华为 私有开关无任何 API 可读，复查结果永远是 unknown，
         // 不能承诺"自动重新检查变绿"，提示用户自行确认
-        showToast(key.startsWith("vivo_")
-            ? "设置完成后返回本页；该开关状态 vivo 不支持自动检测，请自行确认已开启"
+        showToast(key.startsWith("vivo_") || key.startsWith("huawei_")
+            ? "设置完成后返回本页；该开关状态不支持自动检测，请自行确认已开启"
             : "设置完成后返回本页，将自动重新检查");
       }
     } catch (_) {
