@@ -1,6 +1,8 @@
 package com.starcaretech.a
 
 import android.app.Activity
+import android.app.KeyguardManager
+import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
@@ -17,6 +19,18 @@ import android.util.Log
  * 用户手点通知进入（不带 EXT_BOOT_AUTO_CONSENT）不启用，永不替用户关窗。
  */
 private const val BOOT_CONSENT_AUTO_FINISH_MS = 30_000L
+
+/**
+ * 等待本页成为有焦点的顶级窗口（解散锁屏动画/前台切换完成）后再弹系统框；
+ * 焦点回调万一丢失，该兜底超时后也照样发起，避免永久挂起。
+ */
+private const val FOCUS_WAIT_FALLBACK_MS = 2_000L
+
+/**
+ * requestDismissKeyguard 在个别 ROM 上可能任何回调都不返回，
+ * 该超时后回退旧路径（锁屏之上直弹+30s 自毁补弹），不死等。
+ */
+private const val DISMISS_FALLBACK_MS = 8_000L
 
 /**
  * 发起系统录屏确认框的透明页。
@@ -42,8 +56,30 @@ class PermissionRequestTransparentActivity: Activity() {
         finish()
     }
 
+    /** 窗口焦点迟迟不来时兜底发起，避免解散锁屏后卡在本页不弹框 */
+    private val focusFallback = Runnable {
+        if (launchPendingFocus && !captureLaunched) {
+            Log.i(logTag, "等待窗口焦点 ${FOCUS_WAIT_FALLBACK_MS}ms 超时，直接发起录屏确认框")
+            launchCaptureIntent()
+        }
+    }
+
+    /** requestDismissKeyguard 长时间无任何回调时回退旧路径 */
+    private val dismissFallback = Runnable {
+        if (!captureLaunched && !launchPendingFocus) {
+            Log.i(logTag, "解散锁屏 ${DISMISS_FALLBACK_MS}ms 无回调，回退锁屏之上直弹")
+            scheduleCaptureAfterFocus()
+        }
+    }
+
     /** 授权结果已交给 MainService 处理，闸门由服务端释放；否则本页销毁时自行释放 */
     private var handedOffToService = false
+
+    /** 系统录屏确认框是否已发起（防焦点回调/兜底超时重复发起） */
+    private var captureLaunched = false
+
+    /** 已请求解散锁屏/等待成为顶级前台，窗口拿到焦点后再发起 */
+    private var launchPendingFocus = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -74,22 +110,101 @@ class PermissionRequestTransparentActivity: Activity() {
             return
         }
         com.starcaretech.a.adb.AdbAuthManager.trace(
-            applicationContext, "录屏透明页：发起系统录屏确认框（等待自动点击闸门 20s）")
+            applicationContext, "录屏透明页：开始授权流程（等待自动点击闸门 20s）")
 
-        // 锁屏恢复场景：点亮屏幕并把授权页显示在锁屏之上（无密码锁屏可直接完成；
-        // 有密码锁屏仍需先解锁，这是系统安全边界）
+        // 锁屏恢复场景：点亮屏幕并把本页显示在锁屏之上（无密码锁屏随后会用
+        // requestDismissKeyguard 解散；有密码锁屏仍需先解锁，这是系统安全边界）
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
         }
 
-        // 打开自动点击闸门：仅接下来 20 秒内、系统录屏确认窗口出现时，
-        // 才允许本应用无障碍服务点击"立即开始"
-        InputService.beginConsentWait()
-        if (intent.getBooleanExtra(EXT_BOOT_AUTO_CONSENT, false)) {
+        val bootAutoConsent = intent.getBooleanExtra(EXT_BOOT_AUTO_CONSENT, false)
+        if (bootAutoConsent) {
             Log.i(logTag, "开机自动授权：${BOOT_CONSENT_AUTO_FINISH_MS}ms 无结果将自毁")
             autoFinishHandler.postDelayed(bootAutoFinish, BOOT_CONSENT_AUTO_FINISH_MS)
         }
+
+        // HyperOS Android16 实测：setShowWhenLocked/setTurnScreenOn 只作用于本页，
+        // 不会传递给 startActivityForResult 拉起的系统 MediaProjection 确认
+        // Activity——确认框不显示在锁屏之上，无障碍点击器无框可点；解锁瞬间
+        // 挂起的请求还会被系统直接 resultCode=0 取消。对无密码（滑动/无）
+        // 锁屏，官方 requestDismissKeyguard 可无需手势/凭据直接代码解散，
+        // 在 onKeyguardGone（解锁后的真前台）再发起确认框即可正常显示并被
+        // 自动点击。有安全锁屏时回调立即取消，走旧路径（锁屏之上直弹）兜底。
+        val keyguardManager =
+            getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        if (bootAutoConsent &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            keyguardManager?.isKeyguardLocked == true
+        ) {
+            try {
+                Log.i(logTag, "开机自动授权：锁屏中，先请求代码解散无密码锁屏")
+                autoFinishHandler.postDelayed(dismissFallback, DISMISS_FALLBACK_MS)
+                keyguardManager.requestDismissKeyguard(
+                    this,
+                    object : KeyguardManager.KeyguardDismissCallback() {
+                        override fun onKeyguardGone() {
+                            Log.i(logTag, "锁屏已解散（onKeyguardGone），准备在真前台发起录屏确认框")
+                            scheduleCaptureAfterFocus()
+                        }
+
+                        override fun onDismissCancelled() {
+                            // 有安全锁屏需凭据（开机武装本不该放行到此，双保险）
+                            Log.i(logTag, "解散锁屏被取消（可能需要凭据），回退锁屏之上直弹")
+                            scheduleCaptureAfterFocus()
+                        }
+
+                        override fun onDismissError() {
+                            Log.w(logTag, "解散锁屏出错，回退锁屏之上直弹")
+                            scheduleCaptureAfterFocus()
+                        }
+                    }
+                )
+                return
+            } catch (e: Exception) {
+                Log.w(logTag, "requestDismissKeyguard 异常，回退锁屏之上直弹", e)
+            }
+        }
+
+        scheduleCaptureAfterFocus()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // 解散锁屏动画/前台切换完成、本页成为有焦点的顶级窗口后，
+        // Android14+ 要求的"发起方可见前台"条件才真正满足，
+        // 避免 USER_PRESENT 沿上 229ms 即被系统瞬拒。
+        if (hasFocus && launchPendingFocus && !captureLaunched) {
+            launchCaptureIntent()
+        }
+    }
+
+    /**
+     * 等本页拿到窗口焦点后再发起系统录屏确认框；焦点回调可能丢失，
+     * [FOCUS_WAIT_FALLBACK_MS] 兜底超时直接发起。
+     */
+    private fun scheduleCaptureAfterFocus() {
+        if (captureLaunched || isFinishing) return
+        autoFinishHandler.removeCallbacks(dismissFallback)
+        launchPendingFocus = true
+        if (hasWindowFocus()) {
+            launchCaptureIntent()
+        } else {
+            autoFinishHandler.removeCallbacks(focusFallback)
+            autoFinishHandler.postDelayed(focusFallback, FOCUS_WAIT_FALLBACK_MS)
+        }
+    }
+
+    private fun launchCaptureIntent() {
+        if (captureLaunched || isFinishing) return
+        captureLaunched = true
+        launchPendingFocus = false
+        autoFinishHandler.removeCallbacks(focusFallback)
+
+        // 点击闸门在确认框真正发起时才开：解散锁屏/等焦点的耗时不吞 20s TTL
+        InputService.beginConsentWait()
+
         val mediaProjectionManager =
             getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         // Android 14+ 默认弹"整个屏幕/单个应用"两段式选择框（多一步且
@@ -108,7 +223,16 @@ class PermissionRequestTransparentActivity: Activity() {
             } else {
                 mediaProjectionManager.createScreenCaptureIntent()
             }
-        startActivityForResult(captureIntent, REQ_REQUEST_MEDIA_PROJECTION)
+        try {
+            startActivityForResult(captureIntent, REQ_REQUEST_MEDIA_PROJECTION)
+        } catch (e: Exception) {
+            Log.w(logTag, "拉起系统录屏确认框失败，结束本轮授权", e)
+            com.starcaretech.a.adb.AdbAuthManager.trace(
+                applicationContext, "录屏透明页：拉起系统确认框异常 ${e.javaClass.simpleName}")
+            InputService.endConsentWait()
+            MainService.endProjectionRequest()
+            finish()
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -136,6 +260,8 @@ class PermissionRequestTransparentActivity: Activity() {
 
     override fun onDestroy() {
         autoFinishHandler.removeCallbacks(bootAutoFinish)
+        autoFinishHandler.removeCallbacks(focusFallback)
+        autoFinishHandler.removeCallbacks(dismissFallback)
         // 用户没完成授权页面就被销毁（系统回收/按返回/开机自毁超时）：兜底释放闸门
         if (!handedOffToService) {
             InputService.endConsentWait()

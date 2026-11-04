@@ -2963,7 +2963,63 @@ pub mod server_side {
                 crate::read_custom_client(&custom_client_config);
             }
         }
+        // 纯服务进程（BootReceiver/看门狗直接拉起 MainService，无 Flutter 引擎）
+        // 不会执行 Dart mainInit → initialize()，release 文件日志从未初始化，
+        // 开机到人工打开 App 之间的所有 core 日志整段缺失。必须在 start_server
+        // 之前补齐：先设 APP_HOME_DIR（兜底路径推导与 get_home().exists() 都依赖
+        // 它），再调 init_log；init_log 内部 Once，Flutter 后续 mainInit 再调为
+        // no-op，日志持续写同一文件。debug 构建走 android_logger，不需要此处理。
+        #[cfg(not(debug_assertions))]
+        ensure_service_file_logging(&env);
         std::thread::spawn(move || start_server(true));
+    }
+
+    /// 纯服务进程（开机/看门狗拉起，无 Flutter 引擎）补齐 release 文件日志。
+    ///
+    /// APP_HOME_DIR 正常由 Dart `mainSetHomeDir`（ExternalPath 主外部存储根，
+    /// 通常是 /storage/emulated/0）在 mainInit 前注入；服务进程没有 Dart，
+    /// 这里通过 Environment.getExternalStorageDirectory() 取同一路径，失败再
+    /// 用标准路径兜底。注意必须在 APP_DIR 赋值之后调用——init_log 的 Android
+    /// 兜底目录要从 APP_DIR 反推包名（Android/data/<pkg>/files/log），
+    /// 首选目录与兜底目录都会被日志采集扫描到。
+    #[cfg(not(debug_assertions))]
+    fn ensure_service_file_logging(env: &JNIEnv) {
+        if config::APP_HOME_DIR.read().unwrap().is_empty() {
+            let home = (|| -> Option<String> {
+                let file = env
+                    .call_static_method(
+                        "android/os/Environment",
+                        "getExternalStorageDirectory",
+                        "()Ljava/io/File;",
+                        &[],
+                    )
+                    .ok()?
+                    .l()
+                    .ok()?;
+                let path = env
+                    .call_method(
+                        &file,
+                        "getAbsolutePath",
+                        "()Ljava/lang/String;",
+                        &[],
+                    )
+                    .ok()?
+                    .l()
+                    .ok()?;
+                let jstring = JString::from(path);
+                Some(
+                    env.get_string(&jstring)
+                        .ok()?
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            })()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "/storage/emulated/0".to_owned());
+            log::info!("service 进程补齐 APP_HOME_DIR={home}");
+            *config::APP_HOME_DIR.write().unwrap() = home;
+        }
+        hbb_common::init_log(false, "");
     }
 
     #[no_mangle]
