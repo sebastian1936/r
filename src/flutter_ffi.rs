@@ -2970,7 +2970,7 @@ pub mod server_side {
         // 它），再调 init_log；init_log 内部 Once，Flutter 后续 mainInit 再调为
         // no-op，日志持续写同一文件。debug 构建走 android_logger，不需要此处理。
         #[cfg(not(debug_assertions))]
-        ensure_service_file_logging(&env);
+        ensure_service_file_logging(&mut env);
         std::thread::spawn(move || start_server(true));
     }
 
@@ -2983,7 +2983,7 @@ pub mod server_side {
     /// 兜底目录要从 APP_DIR 反推包名（Android/data/<pkg>/files/log），
     /// 首选目录与兜底目录都会被日志采集扫描到。
     #[cfg(not(debug_assertions))]
-    fn ensure_service_file_logging(env: &JNIEnv) {
+    fn ensure_service_file_logging(env: &mut JNIEnv) {
         if config::APP_HOME_DIR.read().unwrap().is_empty() {
             let home = (|| -> Option<String> {
                 let file = env
@@ -3007,12 +3007,12 @@ pub mod server_side {
                     .l()
                     .ok()?;
                 let jstring = JString::from(path);
-                Some(
-                    env.get_string(&jstring)
-                        .ok()?
-                        .to_string_lossy()
-                        .into_owned(),
-                )
+                // 先把结果取成 owned String，再 Some 返回；直接把
+                // env.get_string(&jstring) 放进 Some 会让临时 JavaStr
+                // 持有对 jstring 的借用，jstring drop 后仍被使用，
+                // 触发 E0597「borrowed value does not live long enough」。
+                let s = env.get_string(&jstring).ok()?.to_string_lossy().into_owned();
+                Some(s)
             })()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "/storage/emulated/0".to_owned());
