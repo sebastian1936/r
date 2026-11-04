@@ -378,7 +378,9 @@ object AdbAuthManager {
         // 白名单。深度 Doze 下应用层 alarm/wakelock/WiFi 会被系统统一挂起，
         // 这是锁屏1小时左右必离线的根因，应用内任何手段都绕不过；而下列命令
         // 等价于用户在系统设置里逐层手动配置，且更彻底，重启保留。
-        // 命令本身幂等，失败输出被吞掉且不影响无障碍名单写入这一主流程。
+        // 命令幂等；`2>/dev/null` 只吞掉错误提示，真实生效状态由脚本末尾的
+        // KA_* 回读带回来（见 keepAliveReadback），避免 ROM 静默拒绝时
+        // 误以为已经保活。
         val pkg = context.packageName
         val keepAliveExemptions = buildString {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -398,6 +400,19 @@ object AdbAuthManager {
             // 休眠时保持 WLAN 连接（MIUI 默认可能省电断 WiFi，WifiLock 被忽略时兜底）
             appendLine("settings put global wifi_sleep_policy 2 2>/dev/null")
         }.trimIndent()
+        // 保活豁免回读：逐项读回真实状态，脚本末尾 echo KA_* 行供
+        // [keepAliveReadback] 解析后写入诊断（只诊断，不参与授权判定）
+        val keepAliveVerify = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) buildString {
+            appendLine("echo KA_WHITELIST=${'$'}(dumpsys deviceidle whitelist 2>/dev/null | grep -c \"$pkg\")")
+            appendLine("echo KA_APPOPS_RUN_BG=${'$'}(cmd appops get $pkg RUN_IN_BACKGROUND 2>/dev/null | tr '\\n' ' ')")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                appendLine("echo KA_APPOPS_RUN_ANY=${'$'}(cmd appops get $pkg RUN_ANY_IN_BACKGROUND 2>/dev/null | tr '\\n' ' ')")
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                appendLine("echo KA_STANDBY=${'$'}(am get-standby-bucket $pkg 2>/dev/null)")
+            }
+            appendLine("echo KA_WIFI_SLEEP=${'$'}(settings get global wifi_sleep_policy 2>/dev/null)")
+        }.trimIndent() else ""
         val script = """
             echo "ROM: mios=${'$'}(getprop ro.mi.os.version.name) miui=${'$'}(getprop ro.miui.ui.version.name) sdk=${'$'}(getprop ro.build.version.sdk) uid=${'$'}(id 2>/dev/null)"
             old=${'$'}(settings get secure enabled_accessibility_services)
@@ -433,6 +448,7 @@ object AdbAuthManager {
             $keepAliveExemptions
             echo $MARKER
             settings get secure enabled_accessibility_services
+            $keepAliveVerify
         """.trimIndent()
 
         val run = runShellWithRetry(context, identity, manualConnect) { script }
@@ -453,6 +469,15 @@ object AdbAuthManager {
             return DirectResult(false, stage, joined.take(800))
         }
         val out = run.output
+        // 保活豁免回读先落诊断：即使下面的无障碍写入被拒，也能看到
+        // 白名单/appops/待机桶是否真的生效（vivo/OPPO 会静默拒绝）
+        val (keepAliveText, keepAliveOk) = keepAliveReadback(out)
+        if (keepAliveOk) {
+            Log.i(TAG, "保活豁免已生效：$keepAliveText")
+        } else {
+            Log.w(TAG, "保活豁免未完全生效（ROM 可能静默拒绝）：$keepAliveText")
+        }
+        diag(context, "keepalive exemptions ok=$keepAliveOk $keepAliveText")
         // 某些 ROM（如澎湃 OS）拒绝时不一定吐 SecurityException，靠退出码兜底识别
         val putExitNonZero = Regex("PUT_EXIT=([1-9]\\d*|\\d{2,})").containsMatchIn(out)
         if (putExitNonZero || out.contains("SecurityException") || out.contains("Permission denial")) {
@@ -478,6 +503,35 @@ object AdbAuthManager {
             false, "verify_failed",
             "shell 侧名单已写入，但 App 侧连续 3 秒读不到（ROM 设置隔离/延迟）"
         )
+    }
+
+    /**
+     * 解析保活豁免脚本末尾的 KA_* 回读行，返回「状态摘要 to 是否全部生效」。
+     * 仅用于诊断，不参与授权成功判定：
+     *  - whitelist=命中的 Doze 白名单行数（0=命令未生效）
+     *  - run_bg / run_any=appops 原始输出（应含 allow）
+     *  - standby=待机桶（应为 active）
+     *  - wifi_sleep=WiFi 休眠策略（应为 2）
+     * 个别 ROM 不支持某条回读时对应字段为 null，视为该项不阻塞判定。
+     */
+    private fun keepAliveReadback(out: String): Pair<String, Boolean> {
+        fun value(name: String): String? =
+            Regex("^$name=(.*)$", RegexOption.MULTILINE)
+                .find(out)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotEmpty() }
+
+        val whitelist = value("KA_WHITELIST")
+        val runBg = value("KA_APPOPS_RUN_BG")
+        val runAny = value("KA_APPOPS_RUN_ANY")
+        val standby = value("KA_STANDBY")
+        val wifiSleep = value("KA_WIFI_SLEEP")
+        val ok = (whitelist?.toIntOrNull() ?: 0) > 0 &&
+            runBg?.contains("allow") == true &&
+            (runAny == null || runAny.contains("allow")) &&
+            (standby == null || standby.contains("active")) &&
+            (wifiSleep == null || wifiSleep == "2")
+        val text = "whitelist=$whitelist run_bg=$runBg run_any=$runAny " +
+            "standby=$standby wifi_sleep=$wifiSleep"
+        return text to ok
     }
 
     private fun saveResult(context: Context, guid: String, mode: String) {

@@ -12,6 +12,7 @@ import ffi.FFI
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.*
+import android.app.usage.UsageStatsManager
 import android.app.PendingIntent.FLAG_IMMUTABLE
 import android.app.PendingIntent.FLAG_UPDATE_CURRENT
 import android.content.BroadcastReceiver
@@ -635,13 +636,55 @@ class MainService : Service() {
                     return
                 }
                 Log.i(logTag, "网络恢复，2s 去抖后触发信令重连")
+                captureDiag("network onAvailable: $network")
                 keepAliveHandler.removeCallbacks(networkRestartRunnable)
                 keepAliveHandler.postDelayed(networkRestartRunnable, 2000)
+            }
+
+            override fun onLost(network: Network) {
+                // 断网时刻是判断"离线是信号问题还是被系统挂起"的关键证据
+                Log.w(logTag, "网络断开 onLost: $network ${powerStateLine()}")
+                captureDiag("network onLost: $network ${powerStateLine()}")
             }
         }
         runCatching { cm.registerNetworkCallback(request, cb) }
             .onSuccess { networkCallback = cb }
             .onFailure { Log.w(logTag, "registerNetworkCallback fail", it) }
+    }
+
+    /**
+     * 保活相关系统电源状态单行摘要，用于区分"锁屏掉线"的具体成因：
+     * Doze 深度休眠、省电模式、电池优化未豁免、待机桶降级、后台网络受限。
+     * 个别 ROM 上某 API 抛异常时只跳过该字段，不影响其他信息。
+     */
+    private fun powerStateLine(): String {
+        val sb = StringBuilder("interactive=").append(powerManager.isInteractive)
+        runCatching { sb.append(" powerSave=").append(powerManager.isPowerSaveMode) }
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                sb.append(" deviceIdle=")
+                    .append(if (powerManager.isDeviceIdleMode) 1 else 0)
+                sb.append(" ignoreBatteryOpt=")
+                    .append(if (powerManager.isIgnoringBatteryOptimizations(packageName)) 1 else 0)
+            }
+        }
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                sb.append(" standbyBucket=")
+                    .append(getSystemService(UsageStatsManager::class.java)?.appStandbyBucket)
+            }
+        }
+        runCatching {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                // RESTRICT_BACKGROUND_STATUS_*：1=白名单 2=受限 3=始终受限
+                sb.append(" restrictBgStatus=").append(cm?.restrictBackgroundStatus)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                sb.append(" bgRestricted=").append(cm?.isBackgroundRestricted)
+            }
+        }
+        return sb.toString()
     }
 
     /** 触发 Rust 端 RendezvousMediator 重新注册信令服务器（幂等，带间隔去抖） */
@@ -706,7 +749,11 @@ class MainService : Service() {
      */
     fun handleKeepAliveTick(from: String) {
         if (serviceDestroyed) return
-        Log.i(logTag, "keepalive tick from=$from")
+        val power = powerStateLine()
+        Log.i(logTag, "keepalive tick from=$from $power")
+        // 每次心跳都留一行电源状态：夜间掉线后可对照网络恢复时刻，
+        // 判断是 Doze 挂起、省电模式还是后台数据限制
+        captureDiag("keepalive tick from=$from $power")
         runCatching { createForegroundNotification() }
         initKeepAlive()
         restartRendezvousMediator()
@@ -2192,8 +2239,8 @@ class MainService : Service() {
             }.onFailure { sb.append("version=<error: ${it.javaClass.simpleName}>\n") }
             runCatching { sb.append("flavor=").append(com.starcaretech.a.BuildConfig.FLAVOR).append('\n') }
                 .onFailure { /* BuildConfig 引用不到时忽略，不影响主功能 */ }
-            sb.append("interactive=").append(powerManager.isInteractive)
-                .append(" locked=").append(keyguardManager?.isKeyguardLocked).append("\n\n")
+            sb.append("locked=").append(keyguardManager?.isKeyguardLocked)
+                .append(' ').append(powerStateLine()).append("\n\n")
             // ② logcat（先最近 2000 行；失败退回按 pid 过滤；再失败占位）
             // 已用黑名单剔除 ROM/系统框架灌进本 uid 缓冲的高频噪声（实测占 85%：
             // AudioManager.getMode 每 2s 一行、A11yInputMethod、ViewRootImplStubImpl 等），

@@ -21,8 +21,10 @@ import com.starcaretech.a.adb.AdbPairingService
  *  - 悬浮窗 / 电池优化白名单 / 通知：公开 API
  *  - MIUI「自启动」「后台弹出界面」：无公开 API，只能反射 AppOps 尽力探测，
  *    探测不到时返回 unknown，UI 仍展示并允许用户手动确认
- *  - vivo/iQOO 的 i管家自启动、后台高耗电、省电策略，以及各品牌
- *    「最近任务加锁」「锁屏显示」：完全无法检测，恒 unknown，
+ *  - vivo/iQOO 的 i管家自启动、后台高耗电、省电策略：完全无法检测，
+ *    恒 unknown；设置页为厂商私有 Activity，只能按已知组件名尽力
+ *    直达（失败回退应用详情页），用户按文案确认
+ *  - 各品牌「最近任务加锁」「锁屏显示」：无设置页可跳，恒 unknown，
  *    UI 只做纯文案静态提示（无跳转按钮）
  */
 object EnvCheckManager {
@@ -197,7 +199,9 @@ object EnvCheckManager {
             // 开机广播全部撤销，看门狗无法自救，只能人工点开 App。
             // 通用 Doze 白名单（battery_optimization）挡不住该强杀，
             // 必须配好 vivo 私有的自启动/后台高耗电名单等。四项均无
-            // 任何 API 可读，恒 unknown 做纯文案指引，不做跳转、不阻塞流程。
+            // 任何 API 可读，恒 unknown；前三项按已知私有组件名尽力跳转
+            // 设置页（见 openSetting），最近任务加锁无设置页只能文案指引；
+            // 均不阻塞流程。
             items += Item("vivo_autostart", STATUS_UNKNOWN)
             items += Item("vivo_background_power", STATUS_UNKNOWN)
             items += Item("vivo_recent_lock", STATUS_UNKNOWN)
@@ -537,6 +541,14 @@ object EnvCheckManager {
             // 打开电池优化设置页（含本应用电池"不受限制"开关），再按文案操作
             "samsung_sleep_apps" -> openBatterySettings(appContext)
 
+            // vivo/iQOO 私有三件套：设置页组件名随 OriginOS 版本变化，
+            // 逐个尝试，全部失败回退应用详情页（详情页内也有对应入口）
+            "vivo_autostart" -> openVivoAutoStart(appContext)
+
+            "vivo_background_power" -> openVivoBackgroundPower(appContext)
+
+            "vivo_power_save" -> openVivoPowerSettings(appContext)
+
             else -> openAppDetails(appContext)
         }
     }
@@ -671,6 +683,65 @@ object EnvCheckManager {
         )
         candidates.forEach { if (launch(context, it)) return true }
         return openAppDetails(context)
+    }
+
+    /**
+     * vivo/iQOO「自启动」页：优先 i管家（permissionmanager）的自启动管理，
+     * 再试旧版 i管家（iqoo.secure）的白名单页。组件不存在/未导出时
+     * startActivity 抛异常被 [launch] 吞掉，逐级回退应用详情页。
+     */
+    private fun openVivoAutoStart(context: Context): Boolean {
+        val candidates = listOf(
+            ComponentName(
+                "com.vivo.permissionmanager",
+                "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"
+            ),
+            ComponentName(
+                "com.vivo.permissionmanager",
+                "com.vivo.permissionmanager.activity.PurviewTabActivity"
+            ),
+            ComponentName(
+                "com.iqoo.secure",
+                "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager"
+            ),
+            ComponentName(
+                "com.iqoo.secure",
+                "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity"
+            )
+        )
+        candidates.forEach { if (launch(context, Intent().setComponent(it))) return true }
+        return openAppDetails(context)
+    }
+
+    /**
+     * vivo/iQOO「后台耗电管理」页：该页是电池引擎的私有 Activity，
+     * 不同 OriginOS 版本组件名不同，逐个尝试；全部失败时打开应用详情页
+     * （详情页内有「电池 → 后台耗电管理」入口，用户按文案选择
+     * 「允许后台高耗电」）。
+     */
+    private fun openVivoBackgroundPower(context: Context): Boolean {
+        val candidates = listOf(
+            ComponentName(
+                "com.vivo.pem",
+                "com.vivo.pem.activity.HighPowerActivity"
+            ),
+            ComponentName(
+                "com.vivo.pem",
+                "com.vivo.pem.ui.HighPowerAppsActivity"
+            )
+        )
+        candidates.forEach { if (launch(context, Intent().setComponent(it))) return true }
+        return openAppDetails(context)
+    }
+
+    /**
+     * vivo/iQOO 省电/睡眠模式：无稳定私有入口，直接打开系统「省电模式」
+     * 设置页（多数 OriginOS 版本即电池页），失败回退设置主页，
+     * 用户按文案关闭省电/睡眠模式、排除异常耗电优化。
+     */
+    private fun openVivoPowerSettings(context: Context): Boolean {
+        if (launch(context, Intent(Settings.ACTION_BATTERY_SAVER_SETTINGS))) return true
+        return launch(context, Intent(Settings.ACTION_SETTINGS))
     }
 
     /**
