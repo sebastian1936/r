@@ -130,7 +130,7 @@ class PermissionRequestTransparentActivity: Activity() {
         // Activity——确认框不显示在锁屏之上，无障碍点击器无框可点；解锁瞬间
         // 挂起的请求还会被系统直接 resultCode=0 取消。对无密码（滑动/无）
         // 锁屏，官方 requestDismissKeyguard 可无需手势/凭据直接代码解散，
-        // 在 onKeyguardGone（解锁后的真前台）再发起确认框即可正常显示并被
+        // 在 onDismissSucceeded（解锁后的真前台）再发起确认框即可正常显示并被
         // 自动点击。有安全锁屏时回调立即取消，走旧路径（锁屏之上直弹）兜底。
         val keyguardManager =
             getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
@@ -144,8 +144,8 @@ class PermissionRequestTransparentActivity: Activity() {
                 keyguardManager.requestDismissKeyguard(
                     this,
                     object : KeyguardManager.KeyguardDismissCallback() {
-                        override fun onKeyguardGone() {
-                            Log.i(logTag, "锁屏已解散（onKeyguardGone），准备在真前台发起录屏确认框")
+                        override fun onDismissSucceeded() {
+                            Log.i(logTag, "锁屏已解散（onDismissSucceeded），准备在真前台发起录屏确认框")
                             scheduleCaptureAfterFocus()
                         }
 

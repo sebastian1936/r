@@ -681,7 +681,11 @@ class MainService : Service() {
                 sb.append(" restrictBgStatus=").append(cm?.restrictBackgroundStatus)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                sb.append(" bgRestricted=").append(cm?.isBackgroundRestricted)
+                // isBackgroundRestricted 在 ActivityManager 上（API 28+），
+                // ConnectivityManager 没有该方法
+                val am = getSystemService(ActivityManager::class.java)
+                sb.append(" bgRestricted=")
+                    .append(if (am?.isBackgroundRestricted == true) 1 else 0)
             }
         }
         return sb.toString()
