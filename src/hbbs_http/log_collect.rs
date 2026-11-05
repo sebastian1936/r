@@ -1,88 +1,28 @@
-// 远程设备日志提取：心跳收到 collect_log 指令后，打包本机日志为 zip
-// 上传到自建 API（POST /api/device-log/upload，nonce 一次性核销）。
-// 打包与磁盘读取放在 spawn_blocking（心跳 runtime 是 current_thread，
-// 不能阻塞心跳 tick）；上传全程 await。
+// 设备日志手动上传：客户在 App"设置-关于"一键打包本机日志为 zip 并上传到自建 API
+// （POST /api/device-log/manual-upload，nonce 客户端自生成，仅用于命名与幂等）。
+// 打包与磁盘读取放在 spawn_blocking（调用方 runtime 不得被阻塞）；上传全程 await。
 use std::{
     collections::HashSet,
     io::Write,
     path::{Path, PathBuf},
-    sync::Mutex,
     time::{Duration, SystemTime},
 };
 
-use hbb_common::{bail, config::Config, lazy_static, log, ResultType};
+use hbb_common::{bail, config::Config, log, ResultType};
 use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 
 const DIAG_TOKEN: &str = "sc-diag-2026-10";
-/// 远程指令提取时每个日志目录只取最新的几个核心日志
-const MAX_CORE_LOGS: usize = 3;
 /// zip 解压前总大小硬上限（与服务端 MaxBytesReader 一致）
 const MAX_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 /// 等待 Android Kotlin 侧生成 remote_diag 产物的最长时间
 #[cfg(target_os = "android")]
 const NATIVE_DIAG_WAIT: Duration = Duration::from_secs(8);
 
-/// 后台按指令提取的回传接口（nonce 一次性核销）
-const UPLOAD_PATH_COMMAND: &str = "/api/device-log/upload";
 /// 客户在 App 内手动一键上传的接口（nonce 客户端自生成，不核销指令）
 const UPLOAD_PATH_MANUAL: &str = "/api/device-log/manual-upload";
 
-lazy_static::lazy_static! {
-    // 已成功上传的 nonce：心跳可能重发同一指令，成功一次后不再重复打包上传。
-    // 失败不记忆，下次心跳自动重试。
-    static ref DONE_NONCES: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
-}
-
-pub async fn collect_and_upload(nonce: String) {
-    if nonce.len() != 64 || !nonce.chars().all(|c| c.is_ascii_hexdigit()) {
-        log::warn!("collect_log: bad nonce, ignored");
-        return;
-    }
-    {
-        let mut done = DONE_NONCES.lock().unwrap();
-        if done.contains(&nonce) {
-            log::info!("collect_log: nonce already uploaded, skipped");
-            return;
-        }
-        // 纯内存去重，进程长期运行后无界增长没有意义，超量直接清空重来
-        if done.len() > 128 {
-            done.clear();
-        }
-    }
-
-    let result = async {
-        let device_id = Config::get_id();
-        let base = crate::hbbs_http::sync::api_server_base();
-        if base.is_empty() {
-            return Err::<(), String>("api server unavailable".to_owned());
-        }
-        let nonce2 = nonce.clone();
-        let data = match hbb_common::tokio::task::spawn_blocking(move || {
-            run_collect(&nonce2, false)
-        })
-        .await
-        {
-            Ok(Ok(data)) => data,
-            Ok(Err(e)) => return Err(format!("collect failed: {e}")),
-            Err(e) => return Err(format!("collect task panicked: {e}")),
-        };
-        upload(&base, UPLOAD_PATH_COMMAND, &nonce, &device_id, data)
-            .await
-            .map_err(|e| format!("upload failed: {e}"))
-    }
-    .await;
-
-    match result {
-        Ok(()) => {
-            DONE_NONCES.lock().unwrap().insert(nonce);
-            log::info!("collect_log: upload success");
-        }
-        Err(e) => log::warn!("collect_log: upload failed, will retry on next command: {e}"),
-    }
-}
-
 /// 客户在 App"设置-关于"手动一键上传：nonce 客户端随机生成，不经后台指令核销，
-/// 打包保留期内全部日志（不限于最新几个文件）。成功/失败由调用方（FFI）感知并推给 UI。
+/// 打包保留期内全部日志。成功/失败由调用方（FFI）感知并推给 UI。
 pub async fn manual_collect_and_upload() -> ResultType<()> {
     let device_id = Config::get_id();
     let base = crate::hbbs_http::sync::api_server_base();
@@ -91,7 +31,7 @@ pub async fn manual_collect_and_upload() -> ResultType<()> {
     }
     let nonce = random_nonce_hex();
     let nonce2 = nonce.clone();
-    let data = hbb_common::tokio::task::spawn_blocking(move || run_collect(&nonce2, true))
+    let data = hbb_common::tokio::task::spawn_blocking(move || run_collect(&nonce2))
         .await??;
     upload(&base, UPLOAD_PATH_MANUAL, &nonce, &device_id, data).await?;
     log::info!("manual device-log upload success");
@@ -116,19 +56,16 @@ fn random_nonce_hex() -> String {
 }
 
 /// 收集、等待 Android 产物、打包 zip。全部阻塞操作，调用方须在 blocking 线程。
-/// manual=true 为客户手动上传：打包日志目录下全部文件（受总大小上限保护），
+/// 打包日志目录下全部文件（保留期已由 flexi_logger 限制为约 3 天，受总大小上限保护），
 /// 并在 collect_info.txt 标记 trigger=manual。
-fn run_collect(nonce: &str, manual: bool) -> ResultType<Vec<u8>> {
+fn run_collect(nonce: &str) -> ResultType<Vec<u8>> {
     // 按优先级排列的候选条目（zip 内名称, 本机路径）：核心日志先新后旧
     let mut entries: Vec<(String, PathBuf)> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
 
-    // 手动上传取全部日志文件（保留期已由 flexi_logger 限制为约 3 天）；
-    // 远程指令提取只取最新的几个，控制包体与读取耗时。
-    let max_core_logs = if manual { usize::MAX } else { MAX_CORE_LOGS };
     let mut core_idx = 0u32;
     for dir in core_log_dirs() {
-        for f in latest_logs(&dir, max_core_logs) {
+        for f in latest_logs(&dir, usize::MAX) {
             if seen.insert(f.clone()) {
                 core_idx += 1;
                 if let Some(name) = f.file_name().and_then(|n| n.to_str()) {
@@ -191,13 +128,11 @@ fn run_collect(nonce: &str, manual: bool) -> ResultType<Vec<u8>> {
 
         // 收集环境信息，便于后台分析时对照
         zip.start_file("collect_info.txt", options)?;
-        let trigger = if manual { "manual" } else { "remote-command" };
         let info = format!(
-            "device_id : {}\nplatform  : {}\napp_ver   : {}\ntrigger   : {}\nnonce     : {}...\ncollected : {:?}\n",
+            "device_id : {}\nplatform  : {}\napp_ver   : {}\ntrigger   : manual\nnonce     : {}...\ncollected : {:?}\n",
             Config::get_id(),
             std::env::consts::OS,
             crate::VERSION,
-            trigger,
             &nonce[..8.min(nonce.len())],
             SystemTime::now(),
         );
@@ -245,8 +180,8 @@ fn core_log_dirs() -> Vec<PathBuf> {
 /// 不写在登录用户目录，而写在 systemprofile 下；32 位进程（含 32 位安装包跑在
 /// 64 位系统上）走 SysWOW64 变体。目录名必须与 hbb_common 的 Config 路径推导
 /// 保持一致（APP_NAME 现值），禁止硬编码具体产品名。
-/// 后台 collect_log 指令由 SYSTEM 服务执行，这些目录可读；用户态手动上传时
-/// 会被 ACL 拒绝，由 scan_log_files/read 阶段静默跳过，另走 IPC 由服务代采。
+/// 手动上传由 SYSTEM 服务执行（经 IPC），这些目录可读；用户态直接调用时
+/// 会被 ACL 拒绝，由 scan_log_files/read 阶段静默跳过。
 #[cfg(windows)]
 fn windows_system_profile_log_dirs() -> Vec<PathBuf> {
     let system_root = std::env::var_os("SystemRoot")
@@ -343,7 +278,7 @@ fn prepare_native_diag(nonce: &str) -> Option<PathBuf> {
 }
 
 /// 二进制 zip 上传；复用全局 TLS/代理客户端构建。
-/// path 为目标接口（UPLOAD_PATH_COMMAND / UPLOAD_PATH_MANUAL）。
+/// path 为目标接口（UPLOAD_PATH_MANUAL）。
 async fn upload(
     api_base: &str,
     path: &str,
