@@ -1062,6 +1062,8 @@ class MainService : Service() {
 
         // 防电诈：系统通话期间锁定被控输入（AudioManager 轮询，无需权限）
         CallStateMonitor.start(applicationContext)
+        // Probe：网络类型画像（wifi/cellular/ethernet），写 net-transport 供心跳上报
+        NetworkTypeMonitor.start(applicationContext)
         StartWatchdog.stage("MainService.onCreate: done")
     }
 
@@ -1085,6 +1087,8 @@ class MainService : Service() {
         stopService(Intent(this, FloatingWindowService::class.java))
         // 防电诈：注销通话监听并恢复输入锁
         CallStateMonitor.stop()
+        // Probe：注销网络类型回调
+        NetworkTypeMonitor.stop()
         super.onDestroy()
     }
 

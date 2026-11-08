@@ -250,9 +250,15 @@ async fn start_hbbs_sync_async() {
                 let modified_at = LocalConfig::get_option("strategy_timestamp").parse::<i64>().unwrap_or(0);
                 v["modified_at"] = json!(modified_at);
                 // 网络类型画像：Android 端由 NetworkTypeMonitor 写 net-transport
-                // （wifi/cellular/ethernet），桌面端固定写 ethernet；缺省不带该字段，
-                // 服务端按 unknown 处理，不参与 cellular 槽位派发（设计 §6.6）
+                // （wifi/cellular/ethernet）；桌面端无回调，缺省固定 ethernet（设计 §6.6）。
+                // Android 若尚未写成功则不带字段，服务端按 unknown 处理，不参与 cellular 槽位
                 let transport = Config::get_option("net-transport");
+                #[cfg(not(target_os = "android"))]
+                let transport = if transport.is_empty() {
+                    "ethernet".to_owned()
+                } else {
+                    transport
+                };
                 if !transport.is_empty() {
                     v["transport"] = json!(transport);
                 }
