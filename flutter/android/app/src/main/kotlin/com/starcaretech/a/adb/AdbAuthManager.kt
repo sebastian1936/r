@@ -820,9 +820,12 @@ object AdbAuthManager {
         return try {
             val aom = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
             // unsafeCheckOpNoThrow 会把 default 解析成实际生效模式，
-            // 只有显式 allow 才说明"允许受限设置"已打开
+            // 只有显式 allow 才说明"允许受限设置"已打开。
+            // 不能用 AppOpsManager.OPSTR_ACCESS_RESTRICTED_SETTINGS：该常量是
+            // @SystemApi，公开 SDK 的 android.jar 里不存在，编译期 Unresolved reference；
+            // 其字符串值 "android:access_restricted_settings" 是 AOSP 稳定公开值，可直接传
             val mode = aom.unsafeCheckOpNoThrow(
-                AppOpsManager.OPSTR_ACCESS_RESTRICTED_SETTINGS,
+                OP_ACCESS_RESTRICTED_SETTINGS,
                 Process.myUid(),
                 context.packageName
             )
