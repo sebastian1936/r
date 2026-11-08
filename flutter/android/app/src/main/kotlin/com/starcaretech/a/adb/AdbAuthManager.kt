@@ -1,8 +1,10 @@
 package com.starcaretech.a.adb
 
+import android.app.AppOpsManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Process
 import android.provider.Settings
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -29,6 +31,13 @@ object AdbAuthManager {
 
     /** 目标权限：signature|privileged|development，shell 可以 grant */
     private const val PERM_WRITE_SECURE_SETTINGS = "android.permission.WRITE_SECURE_SETTINGS"
+
+    /**
+     * Android 13（API 33）引入的"受限设置"appop。旁加载安装的 App 该 op
+     * 默认非 allow，系统会拒绝绑定其无障碍服务并把组件移出无障碍名单；
+     * adb shell（uid 2000）有权翻转，等价于设置页"允许受限设置"菜单。
+     */
+    private const val OP_ACCESS_RESTRICTED_SETTINGS = "android:access_restricted_settings"
 
     /** 本应用无障碍服务组件（manifest: android:name=".InputService"） */
     fun accessibilityComponent(context: Context): String =
@@ -218,6 +227,10 @@ object AdbAuthManager {
                 }
             }
             if (granted) {
+                // 趁配对会话的 adbd 还连着，顺手解除 Android13+ 受限设置：
+                // 否则旁加载场景下后续写无障碍名单会被系统拒绑并清空。
+                // 失败不阻断授权（enableInput 内还有检测与 shell 兜底）
+                liftRestrictedSettingsViaShell(context, identity, manualConnect)
                 saveResult(context, guid, "pm_grant")
                 Log.i(TAG, "ADB 自授权完成（pm grant）guid=$guid")
                 diag(context, "success mode=pm_grant")
@@ -360,6 +373,55 @@ object AdbAuthManager {
     }
 
     /**
+     * 经 adb shell 解除 Android 13+ 的"受限设置"拦截。
+     *
+     * 该 appop App 自己无权修改（持 WRITE_SECURE_SETTINGS 也不行），只有 shell
+     * （uid 2000）可翻转，因此必须在无线调试连接存活时执行；appop 持久化、重启
+     * 保留。配对会话内调用一次即可长期生效。任何连接/执行失败都只落诊断，
+     * 不抛异常、不阻断主授权流程——后续 [enableInput] 仍有检测与 shell 兜底。
+     */
+    private fun liftRestrictedSettingsViaShell(
+        context: Context,
+        identity: AdbKeyStore.Identity,
+        manualConnect: ManualConnectProvider?
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        val pkg = context.packageName
+        val script =
+            "cmd appops set $pkg $OP_ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null;" +
+                "echo RS_STATE=\$(cmd appops get $pkg $OP_ACCESS_RESTRICTED_SETTINGS 2>/dev/null | tr '\\n' ' ')"
+        val run = try {
+            runShellWithRetry(context, identity, manualConnect) { script }
+        } catch (e: Exception) {
+            diag(context, "lift restricted 异常：${e.chainText()}")
+            return
+        }
+        val cost = android.os.SystemClock.elapsedRealtime() - t0
+        if (!run.connected) {
+            diag(context, "lift restricted 跳过：shell 未连接 cost=${cost}ms")
+            return
+        }
+        val state = Regex("^RS_STATE=(.*)$", RegexOption.MULTILINE)
+            .find(run.output)?.groupValues?.get(1)?.trim()
+        val allowed = state?.contains("allow") == true
+        diag(context, "lift restricted allow=$allowed state='$state' cost=${cost}ms")
+        Log.i(TAG, "受限设置解除 allow=$allowed state=$state")
+    }
+
+    /**
+     * 受限设置解除片段（供 [shellDirectEnableAccessibility] 的复合脚本内联）。
+     * 必须排在写无障碍名单之前：先解除拦截，系统才会接受随后的名单写入并绑定。
+     * 回读 RS_STATE 由调用方在输出里解析落诊断。API<33 返回空串。
+     * 刻意保持单行：内嵌换行会破坏外层 raw string 的 trimIndent 公共缩进判定。
+     */
+    private fun restrictedLiftSnippet(pkg: String): String {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return ""
+        return "cmd appops set $pkg $OP_ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null; " +
+            "echo RS_STATE=\$(cmd appops get $pkg $OP_ACCESS_RESTRICTED_SETTINGS 2>/dev/null | tr '\\n' ' ')"
+    }
+
+    /**
      * shell 直写开启无障碍。在 adb shell 内用一条复合命令完成"读-改-写-校验"，
      * 保留名单里其他应用的服务。返回 [DirectResult]，失败时带具体阶段与原始信息。
      * @param force true=名单中已有组件时也先移除再加回，强制系统重新绑定
@@ -413,8 +475,12 @@ object AdbAuthManager {
             }
             appendLine("echo KA_WIFI_SLEEP=${'$'}(settings get global wifi_sleep_policy 2>/dev/null)")
         }.trimIndent() else ""
+        // 受限设置解除必须先于名单写入：Android 13+ 旁加载 App 未解除时，
+        // 后面的 settings put 即使回读命中也会被系统拒绝绑定并清空名单
+        val restrictedLift = restrictedLiftSnippet(pkg)
         val script = """
             echo "ROM: mios=${'$'}(getprop ro.mi.os.version.name) miui=${'$'}(getprop ro.miui.ui.version.name) sdk=${'$'}(getprop ro.build.version.sdk) uid=${'$'}(id 2>/dev/null)"
+            $restrictedLift
             old=${'$'}(settings get secure enabled_accessibility_services)
             target='$comp'
             force='$forceFlag'
@@ -469,6 +535,13 @@ object AdbAuthManager {
             return DirectResult(false, stage, joined.take(800))
         }
         val out = run.output
+        // 受限设置回读：API33+ 脚本里有 RS_STATE 行；缺失（老系统/ROM 不支持）
+        // 时为 null，只落诊断不参与判定
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val rsState = Regex("^RS_STATE=(.*)$", RegexOption.MULTILINE)
+                .find(out)?.groupValues?.get(1)?.trim()
+            diag(context, "restricted appop readback='$rsState' allowed=${rsState?.contains("allow") == true}")
+        }
         // 保活豁免回读先落诊断：即使下面的无障碍写入被拒，也能看到
         // 白名单/appops/待机桶是否真的生效（vivo/OPPO 会静默拒绝）
         val (keepAliveText, keepAliveOk) = keepAliveReadback(out)
@@ -571,6 +644,10 @@ object AdbAuthManager {
         "a11y_listed" to isAccessibilityListed(context),
         "a11y_running" to InputService.isOpen,
         "paired" to isPaired(context),
+        // API<33 无受限设置机制，输出 null 而非 false，避免误导排查
+        "restricted" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            isAccessibilityRestricted(context)
+        } else null,
         "a11y_list_raw" to runCatching {
             Settings.Secure.getString(
                 context.contentResolver,
@@ -730,6 +807,33 @@ object AdbAuthManager {
     }
 
     /**
+     * 本应用的无障碍是否被系统"受限设置"拦截（Android 13+）。
+     *
+     * 旁加载（非应用商店）安装的 App 该 appop 默认为非 allow：即使持有
+     * WRITE_SECURE_SETTINGS 把组件写进无障碍名单，AccessibilityManagerService
+     * 也拒绝绑定并把组件从名单剔除——表现为"写入回读成功、稍后名单变回 null、
+     * 服务始终不绑定"。进程内查询自身 appop 无需任何权限；
+     * API < 33 没有此机制，固定返回 false；查询异常时按未受限处理（不误伤）。
+     */
+    fun isAccessibilityRestricted(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
+        return try {
+            val aom = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+            // unsafeCheckOpNoThrow 会把 default 解析成实际生效模式，
+            // 只有显式 allow 才说明"允许受限设置"已打开
+            val mode = aom.unsafeCheckOpNoThrow(
+                AppOpsManager.OPSTR_ACCESS_RESTRICTED_SETTINGS,
+                Process.myUid(),
+                context.packageName
+            )
+            mode != AppOpsManager.MODE_ALLOWED
+        } catch (e: Exception) {
+            Log.w(TAG, "查询受限设置状态失败", e)
+            false
+        }
+    }
+
+    /**
      * 一键打开输入控制：配对授权成功后，用户在页面上打开输入开关时直接启用无障碍，
      * 不再跳转系统设置。必须在后台线程调用（shell 路径最多阻塞约 20 秒）。
      *
@@ -766,7 +870,8 @@ object AdbAuthManager {
         diag(
             context,
             "enableInput#begin isOpen=${InputService.isOpen} listed=${isAccessibilityListed(context)} " +
-                "wss=${isWriteSecureSettingsGranted(context)} grantMode=$grantMode " +
+                "wss=${isWriteSecureSettingsGranted(context)} restricted=${isAccessibilityRestricted(context)} " +
+                "grantMode=$grantMode " +
                 "sdk=${Build.VERSION.SDK_INT} rom=${Build.MANUFACTURER}/${Build.MODEL} " +
                 "miuiVer=${getSystemProperty("ro.mi.ui.version.name")} hyperVer=${getSystemProperty("ro.mi.os.version.name")}\n" +
                 "名单原文: '$listRaw'"
@@ -822,8 +927,19 @@ object AdbAuthManager {
                 "enableInput#end=${if (rebound) "ok(local-rebind)" else "FAIL(local_failed)"} " +
                     "cost=${android.os.SystemClock.elapsedRealtime() - tStart}ms"
             )
-            return if (rebound) EnableResult(true, "local")
-            else EnableResult(false, "local_failed")
+            if (rebound) return EnableResult(true, "local")
+            // 本地两轮都写不绑：Android 13+ 旁加载场景的典型根因是"受限设置"
+            // 拦截（名单可写但系统拒绑并清空）。已配对设备不在此返回，继续走
+            // 下方 shell 通道——脚本会先翻转 ACCESS_RESTRICTED_SETTINGS 再重写
+            // 名单，无线调试开着即可全自动恢复；未配对/非受限才按原逻辑返回
+            val restricted = isAccessibilityRestricted(context)
+            if (restricted && grantMode != null) {
+                Log.i(TAG, "enableInput：本地失败且命中受限设置，转 shell 通道解除")
+                diag(context, "local_failed 且 restricted=true，fallthrough 到 shell 路径")
+            } else {
+                diag(context, "本地失败收尾 restricted=$restricted grantMode=$grantMode，返回 local_failed")
+                return EnableResult(false, "local_failed")
+            }
         }
 
         // 3) 没本地权限：必须配对过，且此刻无线调试开着才能连 adbd
@@ -957,6 +1073,8 @@ object AdbAuthManager {
      *   shell_no_service（无线调试开着但没发现连接服务）/
      *   shell_rejected（配对失效需重新配对）/ shell_put_denied（ROM 安全开关拦截）/
      *   shell_verify_failed / shell_connect_error
+     *   注：local 路径因"受限设置"失败时不直接返回 local_failed，已配对设备
+     *   会自动转入 shell 通道解除后重试（见 enableInput 内 fallthrough）
      * @param detail 技术详情（原始错误片段，仅排查用）
      */
     data class EnableResult(val ok: Boolean, val mode: String, val detail: String = "")
