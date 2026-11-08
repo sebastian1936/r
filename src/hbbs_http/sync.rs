@@ -249,6 +249,13 @@ async fn start_hbbs_sync_async() {
                 }
                 let modified_at = LocalConfig::get_option("strategy_timestamp").parse::<i64>().unwrap_or(0);
                 v["modified_at"] = json!(modified_at);
+                // 网络类型画像：Android 端由 NetworkTypeMonitor 写 net-transport
+                // （wifi/cellular/ethernet），桌面端固定写 ethernet；缺省不带该字段，
+                // 服务端按 unknown 处理，不参与 cellular 槽位派发（设计 §6.6）
+                let transport = Config::get_option("net-transport");
+                if !transport.is_empty() {
+                    v["transport"] = json!(transport);
+                }
                 if let Ok(s) = crate::post_request(url.clone(), v.to_string(), "").await {
                     if let Ok(mut rsp) = serde_json::from_str::<HashMap::<&str, Value>>(&s) {
                         if rsp.remove("sysinfo").is_some() {
@@ -272,6 +279,18 @@ async fn start_hbbs_sync_async() {
                             if let Ok(strategy) = serde_json::from_value::<StrategyOptions>(strategy) {
                                 log::info!("strategy updated");
                                 handle_config_options(strategy.config_options);
+                            }
+                        }
+                        // pull 模式探测任务：入独立工作线程串行执行，不阻塞心跳
+                        if let Some(tasks) = rsp.remove("probe_tasks") {
+                            match serde_json::from_value::<Vec<crate::hbbs_http::probe::ProbeTask>>(tasks) {
+                                Ok(tasks) => {
+                                    log::info!("received {} probe task(s)", tasks.len());
+                                    for task in tasks {
+                                        crate::hbbs_http::probe::spawn(task);
+                                    }
+                                }
+                                Err(e) => log::warn!("bad probe_tasks payload: {}", e),
                             }
                         }
                     }

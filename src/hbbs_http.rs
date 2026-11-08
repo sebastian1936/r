@@ -8,6 +8,8 @@ pub mod downloader;
 mod http_client;
 #[cfg(not(target_os = "ios"))]
 pub mod log_collect;
+#[cfg(not(target_os = "ios"))]
+pub mod probe;
 pub mod record_upload;
 pub mod sync;
 pub use http_client::{
