@@ -505,7 +505,8 @@ fn classify_io(e: &std::io::Error) -> &'static str {
     match e.kind() {
         ErrorKind::TimedOut => "timeout",
         ErrorKind::ConnectionRefused => "connection_refused",
-        ErrorKind::NetworkUnreachable => "network_unreachable",
+        // 注：ErrorKind::NetworkUnreachable 等 io_error_more 变体在 Rust 1.83 才稳定，
+        // CI 固定 1.75，不可用；网络不可达归入 other
         _ => "other",
     }
 }
@@ -878,10 +879,6 @@ Ping statistics for 10.255.255.1:
         assert_eq!(
             classify_io(&std::io::Error::new(ErrorKind::ConnectionRefused, "x")),
             "connection_refused"
-        );
-        assert_eq!(
-            classify_io(&std::io::Error::new(ErrorKind::NetworkUnreachable, "x")),
-            "network_unreachable"
         );
         assert_eq!(
             classify_io(&std::io::Error::new(ErrorKind::TimedOut, "x")),
