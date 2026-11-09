@@ -34,7 +34,7 @@ const DNS_TIMEOUT: Duration = Duration::from_secs(3);
 const PING_TIMEOUT: Duration = Duration::from_secs(9); // 3 包×2s + 间隔兜底
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const TCP_GAP: Duration = Duration::from_millis(500);
-const MAX_REDIRECTS_DEFAULT: usize = 3;
+const MAX_REDIRECTS_DEFAULT: u64 = 3;
 
 const STATUS_DONE: &str = "done";
 const STATUS_TIMEOUT: &str = "timeout";
@@ -535,7 +535,7 @@ async fn probe_http(task: &ProbeTask) -> (String, String, Value) {
     let max_redirects = clamp_usize(extra_u64(task, "max_redirects", MAX_REDIRECTS_DEFAULT), 0, 5);
 
     // 记录每一跳 from→to，custom 策略内部同时完成 limited(n) 语义
-    let chain = Arc::new(Mutex::new(Vec::<String>::new());
+    let chain = Arc::new(Mutex::new(Vec::<String>::new()));
     let policy = reqwest::redirect::Policy::custom({
         let chain = chain.clone();
         move |attempt| {
