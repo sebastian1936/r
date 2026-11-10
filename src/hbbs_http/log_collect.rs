@@ -129,10 +129,13 @@ fn run_collect(nonce: &str) -> ResultType<Vec<u8>> {
         // 收集环境信息，便于后台分析时对照
         zip.start_file("collect_info.txt", options)?;
         let info = format!(
-            "device_id : {}\nplatform  : {}\napp_ver   : {}\ntrigger   : manual\nnonce     : {}...\ncollected : {:?}\n",
+            "device_id : {}\nplatform  : {}\napp_ver   : {}\ngit_commit: {}\ngit_branch: {}\nbuild_date: {}\ntrigger   : manual\nnonce     : {}...\ncollected : {:?}\n",
             Config::get_id(),
             std::env::consts::OS,
             crate::VERSION,
+            option_env!("RUSTDESK_GIT_COMMIT").unwrap_or("unknown"),
+            option_env!("RUSTDESK_GIT_BRANCH").unwrap_or("unknown"),
+            crate::BUILD_DATE,
             &nonce[..8.min(nonce.len())],
             SystemTime::now(),
         );

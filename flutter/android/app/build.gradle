@@ -32,6 +32,30 @@ if (flutterVersionName == null) {
     flutterVersionName = '1.0'
 }
 
+// 诊断日志构建溯源：构建期从 git 取提交/分支/脏标记并注入 BuildConfig，
+// 随上传日志输出，用于把线上安装包精确映射到源码提交。
+// 非 git 环境（解压源码构建）一律降级 "unknown"，不阻断构建。
+def runGit = { List<String> gitArgs ->
+    try {
+        def stdout = new ByteArrayOutputStream()
+        exec {
+            workingDir rootProject.projectDir
+            commandLine "git"
+            gitArgs.each { a -> args(a) }
+            standardOutput = stdout
+            isIgnoreExitValue = true
+        }
+        return stdout.toString().trim()
+    } catch (Exception ignored) {
+        return "unknown"
+    }
+}
+def buildGitCommit = runGit(["rev-parse", "--short", "HEAD"]) ?: "unknown"
+def buildGitBranch = runGit(["rev-parse", "--abbrev-ref", "HEAD"]) ?: "unknown"
+def buildGitStatus = runGit(["status", "--porcelain"])
+def buildGitDirty = (buildGitStatus && buildGitStatus != "unknown") ? "true" : "false"
+def buildTimestamp = new Date().format("yyyy-MM-dd HH:mm:ss")
+
 // Add rustls-platform-verifier Android support
 String findRustlsPlatformVerifierMavenDir() {
     def dependencyText = providers.exec {
@@ -114,6 +138,12 @@ android {
         targetSdkVersion 33
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
+
+        // 构建溯源信息，MainService 诊断头与录屏授权埋点读取
+        buildConfigField "String", "GIT_COMMIT", "\"${buildGitCommit}\""
+        buildConfigField "String", "GIT_BRANCH", "\"${buildGitBranch}\""
+        buildConfigField "String", "GIT_DIRTY", "\"${buildGitDirty}\""
+        buildConfigField "String", "BUILD_TIME", "\"${buildTimestamp}\""
 
         // libstaradb.so 使用预编译 BoringSSL（自带 STL 无关代码），不依赖 NDK C++ STL
         externalNativeBuild {

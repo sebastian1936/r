@@ -43,6 +43,26 @@ fn build_manifest() {
     }
 }
 
+/// 诊断日志构建溯源：构建期取 git 提交/分支，通过 rustc-env 注入，
+/// log_collect 写进 collect_info.txt。非 git 环境降级 "unknown"，不阻断构建。
+fn emit_git_build_info() {
+    fn git(args: &[&str]) -> Option<String> {
+        std::process::Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .filter(|s| !s.is_empty())
+    }
+    let commit = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    println!("cargo:rustc-env=RUSTDESK_GIT_COMMIT={}", commit);
+    println!("cargo:rustc-env=RUSTDESK_GIT_BRANCH={}", branch);
+    // HEAD 变化（切分支/切提交）时重新求值；同分支新增提交靠 CI 干净构建兜底
+    println!("cargo:rerun-if-changed=.git/HEAD");
+}
+
 fn install_android_deps() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
     if target_os != "android" {
@@ -79,6 +99,7 @@ fn install_android_deps() {
 
 fn main() {
     hbb_common::gen_version();
+    emit_git_build_info();
     install_android_deps();
     #[cfg(all(windows, feature = "inline"))]
     build_manifest();

@@ -2247,6 +2247,14 @@ class MainService : Service() {
             }.onFailure { sb.append("version=<error: ${it.javaClass.simpleName}>\n") }
             runCatching { sb.append("flavor=").append(com.starcaretech.a.BuildConfig.FLAVOR).append('\n') }
                 .onFailure { /* BuildConfig 引用不到时忽略，不影响主功能 */ }
+            // 构建溯源：git 提交/分支/脏标记/构建时间，出问题的包可直接映射到源码提交
+            runCatching {
+                sb.append("gitCommit=").append(com.starcaretech.a.BuildConfig.GIT_COMMIT)
+                    .append(" gitBranch=").append(com.starcaretech.a.BuildConfig.GIT_BRANCH)
+                    .append(" gitDirty=").append(com.starcaretech.a.BuildConfig.GIT_DIRTY)
+                    .append('\n')
+                    .append("buildTime=").append(com.starcaretech.a.BuildConfig.BUILD_TIME).append('\n')
+            }.onFailure { sb.append("build=<error: ${it.javaClass.simpleName}>\n") }
             sb.append("locked=").append(keyguardManager?.isKeyguardLocked)
                 .append(' ').append(powerStateLine()).append("\n\n")
             // ② logcat（先最近 2000 行；失败退回按 pid 过滤；再失败占位）
