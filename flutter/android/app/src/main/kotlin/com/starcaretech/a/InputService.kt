@@ -63,6 +63,10 @@ const val LONG_TAP_DELAY = 200L
 // 无障碍存活期间巡检 MainService 的间隔（进程被 MIUI 异常销毁后快速自愈）
 private const val SERVICE_WATCHDOG_INTERVAL_MS = 60_000L
 
+// 录屏弹窗扫描"未找到按钮"属于高频静默路径（每 400ms 一轮），
+// 诊断埋点按该间隔节流，避免刷爆 192KB 的 diag 环形缓冲
+private const val CONSENT_NO_BUTTON_TRACE_INTERVAL_MS = 2_000L
+
 class InputService : AccessibilityService() {
 
     companion object {
@@ -114,14 +118,27 @@ class InputService : AccessibilityService() {
             // 交回用户手动选择，不会误点"单个应用"。
             consentPending = true
             consentSince = System.currentTimeMillis()
-            ctx?.startConsentRescue()
+            val c = ctx
+            if (c == null) {
+                // 无服务实例时拿不到 Context 写 diag，仅落 logcat；
+                // 服务解绑在快照里另有 InputService#onDestroy 记录可对账
+                Log.w(
+                    "input service",
+                    "自动点击闸门武装失败：无障碍服务未绑定（ctx=null）"
+                )
+            } else {
+                c.startConsentRescue()
+            }
         }
 
         /** 授权结果返回（同意/拒绝）后调用 */
         @JvmStatic
         fun endConsentWait() {
             consentPending = false
-            ctx?.stopConsentRescue()
+            ctx?.let {
+                it.stopConsentRescue()
+                it.traceConsentEnd("closed")
+            }
         }
 
         /**
@@ -789,6 +806,39 @@ class InputService : AccessibilityService() {
     private var consentClicks = 0
     private var consentRescueScheduled = false
 
+    // 单轮授权内的埋点节流状态，startConsentRescue 每轮重置。
+    // 扫描每 400ms 一轮、一轮最多 50 次，静默路径必须去重/限频，
+    // 否则会刷爆 AdbAuthManager 的 192KB diag 环形缓冲。
+    private var consentScanCount = 0
+    private var consentRootNullTraced = false
+    private var consentEmptyPkgTraced = false
+    private var consentChoiceTraced = false
+    private var consentEndTraced = false
+    private var consentNoButtonTraceAt = 0L
+    // 关键证据：ROM 实际使用的弹窗宿主包名，每个未知包名每轮只记一次
+    private val consentUnknownPkgsTraced = hashSetOf<String>()
+
+    /** 写入与 ADB 诊断同一份环形缓冲，手动上传日志即可回看 */
+    private fun consentTrace(text: String) {
+        runCatching {
+            com.starcaretech.a.adb.AdbAuthManager.trace(
+                applicationContext, "录屏自动点击：$text"
+            )
+        }
+    }
+
+    /** 闸门生命周期结束汇总，每轮只输出一次（正常关闭/TTL 超时共用） */
+    private fun traceConsentEnd(reason: String) {
+        if (consentSince == 0L || consentEndTraced) return
+        consentEndTraced = true
+        val elapsed = System.currentTimeMillis() - consentSince
+        consentTrace(
+            "闸门结束 reason=$reason elapsed=${elapsed}ms " +
+                "扫描=$consentScanCount 次 点击=$consentClicks 次"
+        )
+        consentSince = 0L
+    }
+
     // 系统录屏确认框可能出现的窗口：AOSP 在 framework（包名 "android"），
     // 部分国产 ROM 走 SystemUI/权限控制器
     private val projectionDialogPkgs = setOf(
@@ -828,6 +878,7 @@ class InputService : AccessibilityService() {
                 scanAndClickProjectionDialog()
             } catch (e: Exception) {
                 Log.w(logTag, "录屏弹窗自动点击异常", e)
+                consentTrace("扫描异常 ${e.javaClass.simpleName}: ${e.message}")
             }
             // 多级弹窗（部分 ROM 有"继续→开始"两步）：在 TTL 内周期重试，点击次数封顶
             if (isConsentActive() && consentClicks < CONSENT_MAX_CLICKS) {
@@ -841,13 +892,26 @@ class InputService : AccessibilityService() {
         if (!consentPending) return false
         if (System.currentTimeMillis() - consentSince > CONSENT_TTL_MS) {
             consentPending = false
+            traceConsentEnd("ttl_timeout")
             return false
         }
         return true
     }
 
     fun startConsentRescue() {
+        // 每轮授权重置节流状态并记录武装起点（含 sdk，便于按系统版本对账）
+        consentScanCount = 0
         consentClicks = 0
+        consentRootNullTraced = false
+        consentEmptyPkgTraced = false
+        consentChoiceTraced = false
+        consentEndTraced = false
+        consentNoButtonTraceAt = 0L
+        consentUnknownPkgsTraced.clear()
+        consentTrace(
+            "闸门已武装 sdk=${Build.VERSION.SDK_INT} " +
+                "ttl=${CONSENT_TTL_MS}ms maxClicks=$CONSENT_MAX_CLICKS"
+        )
         if (consentRescueScheduled) return
         consentRescueScheduled = true
         consentHandler.post(consentRescue)
@@ -871,10 +935,35 @@ class InputService : AccessibilityService() {
     }
 
     private fun scanAndClickProjectionDialog() {
-        val root = rootInActiveWindow ?: return
-        val pkg = root.packageName?.toString() ?: return
+        consentScanCount++
+        val root = rootInActiveWindow
+        if (root == null) {
+            // 静默路径 1：无障碍服务取不到当前活动窗口（ROM 限制/窗口切换瞬间）
+            if (!consentRootNullTraced) {
+                consentRootNullTraced = true
+                consentTrace("扫描#$consentScanCount 失败：rootInActiveWindow=null（取不到当前窗口内容）")
+            }
+            return
+        }
+        val pkg = root.packageName?.toString()
+        if (pkg.isNullOrEmpty()) {
+            // 静默路径 2：窗口节点没有包名
+            if (!consentEmptyPkgTraced) {
+                consentEmptyPkgTraced = true
+                consentTrace("扫描#$consentScanCount 失败：当前窗口包名为空")
+            }
+            return
+        }
         val pkgOk = projectionDialogPkgs.contains(pkg) || pkg.endsWith(".systemui")
-        if (!pkgOk) return
+        if (!pkgOk) {
+            // 静默路径 3（首要嫌疑）：弹窗宿主不在 AOSP 白名单，
+            // 如 HyperOS/MIUI 把确认框放进 com.miui.securitycenter 等自有组件。
+            // 记录真实包名，每个包名每轮只记一次。
+            if (consentUnknownPkgsTraced.add(pkg)) {
+                consentTrace("扫描#$consentScanCount 弹窗包名不在白名单，跳过 pkg=$pkg")
+            }
+            return
+        }
 
         // 两步选择器兜底（正常情况下 Android 14+ 已由
         // createConfigForDefaultDisplay 跳过；此处只应对无视 config
@@ -884,6 +973,10 @@ class InputService : AccessibilityService() {
         // 注意：简化框里的静态文案"应用范围：整个屏幕"不算选择器。
         if (hasProjectionChoice(root)) {
             Log.i(logTag, "检测到两步式录屏授权选择器（含单个应用入口），放弃自动点击")
+            if (!consentChoiceTraced) {
+                consentChoiceTraced = true
+                consentTrace("扫描#$consentScanCount 检测到两步式选择器（含单个应用入口），放弃自动点击 pkg=$pkg")
+            }
             return
         }
 
@@ -901,7 +994,16 @@ class InputService : AccessibilityService() {
             consentClicks++
             val label = target.text ?: target.contentDescription
             Log.i(logTag, "自动确认系统录屏授权：$label（第 $consentClicks 次）")
+            consentTrace("扫描#$consentScanCount 命中按钮\"$label\"，执行点击（第 $consentClicks 次）pkg=$pkg")
             target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        } else {
+            // 静默路径 4：包名匹配但找不到确认按钮（ROM 改了控件 id/文案），
+            // 2s 限频，避免每轮 50 条重复记录
+            val now = System.currentTimeMillis()
+            if (now - consentNoButtonTraceAt >= CONSENT_NO_BUTTON_TRACE_INTERVAL_MS) {
+                consentNoButtonTraceAt = now
+                consentTrace("扫描#$consentScanCount 未找到可点的确认按钮 pkg=$pkg")
+            }
         }
     }
 
