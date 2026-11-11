@@ -2057,6 +2057,30 @@ pub fn main_start_service() {
     }
 }
 
+/// App 心跳通道（source=app）下发的探测任务入队。
+///
+/// 探测 worker 是独立 std 线程（ping/tcp/http），不依赖 rendezvous 中介和
+/// 被控服务，因此 stop-service=Y（用户点了"停止服务"）时任务仍可正常执行，
+/// 探测功能的在线/执行只与 App 进程是否存活挂钩。
+///
+/// 入参为 ProbeTask JSON 数组字符串（与服务心跳通道同结构），
+/// 返回成功入队条数；解析失败返回 "0" 并告警，不影响 App 主流程。
+pub fn main_enqueue_probe_tasks(tasks_json: String) -> SyncReturn<String> {
+    match serde_json::from_str::<Vec<crate::hbbs_http::probe::ProbeTask>>(&tasks_json) {
+        Ok(tasks) => {
+            let n = tasks.len();
+            for task in tasks {
+                crate::hbbs_http::probe::spawn(task);
+            }
+            SyncReturn(n.to_string())
+        }
+        Err(e) => {
+            log::warn!("main_enqueue_probe_tasks parse failed: {}", e);
+            SyncReturn("0".to_string())
+        }
+    }
+}
+
 pub fn main_update_temporary_password() {
     update_temporary_password();
 }
