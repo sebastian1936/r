@@ -18,7 +18,15 @@ import ffi.FFI
  * - NetworkCallback 事件驱动，无轮询；注册后主动对齐一次，覆盖机型不立即回调
  * - minSdk 22 兼容：API 24+ 用 registerDefaultNetworkCallback，
  *   API 22/23 退回 registerNetworkCallback；读网络分别走 Capabilities / NetworkInfo
- * - 与 CallStateMonitor 同生命周期：MainService.onCreate 启动、onDestroy 注销
+ * - 进程级生命周期：由 MainApplication.onCreate 启动，App 进程存活（含用户未开启
+ *   远程服务、看门狗/开机广播以纯后台方式拉起）即持续采集，与 MainService 的
+ *   stop-service 完全解耦——探测"在线"以 App 心跳为准，transport 也必须同生命周期。
+ *   进程死亡后回调由系统自动注销，无需手动 stop。
+ *
+ * 时序说明：Application 阶段 Rust 端 APP_DIR（config 落盘根目录）可能尚未由
+ * Dart mainInit / FFI.startServer 写入，此时 FFI.setOption 的落盘会静默失败，
+ * 但内存 LOCAL_CONFIG 写入成功，同进程后续 mainGetOption 读内存即可得到值；
+ * APP_DIR 就绪后的下一次网络变化或进程重启重新注册时会正常落盘。
  */
 object NetworkTypeMonitor {
     private const val TAG = "NetworkTypeMonitor"
@@ -64,6 +72,8 @@ object NetworkTypeMonitor {
     }
 
     fun stop() {
+        // 进程级监听后正常生命周期内不再调用：进程死亡时系统自动注销回调。
+        // 保留仅为极端场景（如测试）提供手动收口能力。
         val cb = callback ?: return
         runCatching { cm?.unregisterNetworkCallback(cb) }
             .onFailure { Log.w(TAG, "unregister network callback failed", it) }
