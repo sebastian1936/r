@@ -3,8 +3,10 @@
 // 用户在 App 内"停止服务"后管理后台立即判离线。本链路只要 Flutter 引擎存活
 // 就周期性上报 source=app 心跳，承担两个职责：
 //   1. 在线态：服务端据此展示"App在线"（服务未开、暂不可被控）；
-//   2. 探测：随心跳上报网络类型（transport），并 pull 探测任务转交给 Rust
-//      probe worker 执行——worker 是独立线程，stop-service=Y 时照样工作。
+//   2. 探测（仅桌面端）：pull 探测任务转交给 Rust probe worker 执行——
+//      worker 是独立线程，stop-service=Y 时照样工作。
+//      移动端探测已下线：安卓不再领取/执行探测任务，心跳仅保留在线态，
+//      并随心跳上报 os 供服务端拒绝移动端进入探测注册表。
 //
 // 设计要点：
 //   - 频率 15s：服务端在线窗口 60s，可容忍连续 3 次丢包；
@@ -15,6 +17,7 @@
 //   - App 进程/引擎销毁后 Timer 自然停止，服务端 60s 后判离线。
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_hbb/common.dart';
@@ -52,16 +55,14 @@ class AppHeartbeat {
       final base = apiBase;
       if (base.isEmpty) return;
       final uuid = await bind.mainGetUuid();
-      // 网络类型由 Android NetworkTypeMonitor 桥接写入配置（wifi/cellular/
-      // ethernet），停止服务期间 MainService 仍存活、值持续刷新；读不到时
-      // 传空串，服务端归一为 unknown，不影响心跳本身。
-      final transport = await bind.mainGetOption(key: 'net-transport');
+      // os 标识客户端平台（android/windows/macos/linux）：服务端据此拒绝移动端
+      // 进入探测注册表；transport(net-transport) 随移动端探测下线不再上报。
       final body = jsonEncode({
         'id': id,
         'uuid': uuid,
         'ver': 1,
         'source': 'app',
-        'transport': transport,
+        'os': Platform.operatingSystem,
       });
       final resp = await post(
         Uri.parse('$base/api/heartbeat'),
@@ -82,7 +83,9 @@ class AppHeartbeat {
 
   /// 解析心跳响应里的 probe_tasks 并交给 Rust probe worker。
   /// 无任务时服务端返回 {}，老服务端没有该字段，均安全跳过。
+  /// 安卓端探测已下线，客户端侧直接拦截（服务端 os 判定为主，本处双保险）。
   static void _dispatchProbeTasks(String body) {
+    if (Platform.isAndroid) return;
     try {
       final data = jsonDecode(body);
       final tasks = (data is Map && data['probe_tasks'] is List)
