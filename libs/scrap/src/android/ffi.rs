@@ -501,7 +501,9 @@ pub extern "system" fn Java_ffi_FFI_onAppStart(mut env: JNIEnv, _class: JClass, 
         return;
     }
     if let Ok(jvm) = env.get_java_vm() {
-        if let Ok(context) = env.new_global_ref(ctx) {
+        // ctx 在下方 with_local_frame 闭包中还要使用；JObject 非 Copy，
+        // 按值传会被 move（E0382），这里改按引用借用
+        if let Ok(context) = env.new_global_ref(&ctx) {
             let java_vm = jvm.get_java_vm_pointer() as *mut c_void;
             let context_jobject = context.as_obj().as_raw() as *mut c_void;
             *APPLICATION_CONTEXT.write().unwrap() = Some(context);
@@ -532,7 +534,12 @@ pub extern "system" fn Java_ffi_FFI_onAppStart(mut env: JNIEnv, _class: JClass, 
         let path = env
             .call_method(file, "getAbsolutePath", "()Ljava/lang/String;", &[])?
             .l()?;
-        let path = env.get_string(&JString::from(path))?.to_string_lossy();
+        // JString 与 get_string 返回的 JavaStr 都是语句末即释放的临时值，
+        // 而 to_string_lossy 借用 JavaStr，必须拆成 let 绑定延长生命周期
+        // （E0716 temporary value dropped while borrowed）
+        let jpath = JString::from(path);
+        let java_path = env.get_string(&jpath)?;
+        let path = java_path.to_string_lossy();
         if !path.is_empty() {
             *hbb_common::config::APP_DIR.write().unwrap() = path.to_string();
             log::info!("APP_DIR initialized at onAppStart: {}", path);
