@@ -55,8 +55,8 @@ class AppHeartbeat {
       final base = apiBase;
       if (base.isEmpty) return;
       final uuid = await bind.mainGetUuid();
-      // os 标识客户端平台（android/windows/macos/linux）：服务端据此拒绝移动端
-      // 进入探测注册表；transport(net-transport) 随移动端探测下线不再上报。
+      // os 标识客户端平台（android/windows/macos/linux）：服务端桌面白名单据此
+      // 拒绝移动端进入探测注册表（fail-closed），探测在线态与派单只认桌面端。
       final body = jsonEncode({
         'id': id,
         'uuid': uuid,

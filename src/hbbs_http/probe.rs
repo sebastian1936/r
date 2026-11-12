@@ -147,15 +147,12 @@ async fn run_task(task: &ProbeTask) -> String {
 
 /// 通用外层结构（设计 §5.4）；dns 段由各探测函数预解析后传入。
 fn base_result(task: &ProbeTask, dns: Value) -> Value {
-    let transport = Config::get_option("net-transport");
-    let transport = if transport.is_empty() { "unknown" } else { transport.as_str() };
     json!({
         "probe_type": task.probe_type,
         "target": task.target,
         "agent": {
             "platform": std::env::consts::OS,
             "version": crate::VERSION,
-            "transport": transport,
         },
         "dns": dns,
     })

@@ -1062,8 +1062,6 @@ class MainService : Service() {
 
         // 防电诈：系统通话期间锁定被控输入（AudioManager 轮询，无需权限）
         CallStateMonitor.start(applicationContext)
-        // NetworkTypeMonitor 已提升至 MainApplication 进程级：停服/服务未启动时
-        // 探测画像仍需持续采集，这里不再启动（start 本身幂等，归属只留 Application 一处）
         StartWatchdog.stage("MainService.onCreate: done")
     }
 
@@ -1087,8 +1085,6 @@ class MainService : Service() {
         stopService(Intent(this, FloatingWindowService::class.java))
         // 防电诈：注销通话监听并恢复输入锁
         CallStateMonitor.stop()
-        // NetworkTypeMonitor 为进程级监听，停服不注销，否则 stop-service 期间
-        // App 心跳的 transport 会断供；进程死亡时系统自动回收回调。
         super.onDestroy()
     }
 

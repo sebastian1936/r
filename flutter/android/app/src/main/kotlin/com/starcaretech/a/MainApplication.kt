@@ -73,10 +73,6 @@ class MainApplication : Application() {
         StartWatchdog.stage("Application: FFI.onAppStart 前")
         FFI.onAppStart(applicationContext)
         StartWatchdog.stage("Application: FFI.onAppStart 后")
-        // Probe：网络类型画像进程级采集，不依赖远程服务是否开启。
-        // 放在 FFI.onAppStart 之后保证 native 已加载；APP_DIR 未就绪期间
-        // setOption 仅内存生效，同进程心跳读取不受影响（见 NetworkTypeMonitor 头注释）。
-        NetworkTypeMonitor.start(applicationContext)
         // ADB 授权后的无障碍自愈监控（仅 Android 11+ 实际生效）
         AdbSelfHeal.start(applicationContext)
         StartWatchdog.stage("Application.onCreate: done")

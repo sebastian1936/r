@@ -513,7 +513,7 @@ pub extern "system" fn Java_ffi_FFI_onAppStart(mut env: JNIEnv, _class: JClass, 
     // 在任何配置读写前确定落盘根目录。hbb_common 的 CONFIG2 / LOCAL_CONFIG 等
     // lazy_static 首次访问即按当前 APP_DIR 加载并在整个进程内缓存，不会随后续
     // APP_DIR 变化重新加载。Application 阶段（本函数）早于 Flutter mainInit，
-    // 而 NetworkTypeMonitor 等原生组件此刻已可能写 option；若 APP_DIR 仍为空，
+    // 原生组件此刻已可能写 option；若 APP_DIR 仍为空，
     // 会从错误的相对路径加载到空配置并永久缓存，导致用户持久化设置（如
     // quality-monitor-mode）重启后读出来全是默认值。路径与 Flutter
     // getApplicationDocumentsDirectory 保持一致：Context.getDir("flutter")
