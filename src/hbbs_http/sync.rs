@@ -276,18 +276,8 @@ async fn start_hbbs_sync_async() {
                                 handle_config_options(strategy.config_options);
                             }
                         }
-                        // pull 模式探测任务：入独立工作线程串行执行，不阻塞心跳
-                        if let Some(tasks) = rsp.remove("probe_tasks") {
-                            match serde_json::from_value::<Vec<crate::hbbs_http::probe::ProbeTask>>(tasks) {
-                                Ok(tasks) => {
-                                    log::info!("received {} probe task(s)", tasks.len());
-                                    for task in tasks {
-                                        crate::hbbs_http::probe::spawn(task);
-                                    }
-                                }
-                                Err(e) => log::warn!("bad probe_tasks payload: {}", e),
-                            }
-                        }
+                        // 探测任务只走 App 心跳通道（flutter AppHeartbeat，独立于
+                        // stop-service），服务心跳响应不再携带 probe_tasks，此处不处理。
                     }
                 }
             }
