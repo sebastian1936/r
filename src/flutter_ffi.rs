@@ -40,9 +40,12 @@ lazy_static::lazy_static! {
 fn initialize(app_dir: &str, custom_client_config: &str) {
     flutter::async_tasks::start_flutter_async_runner();
     // `APP_DIR` is set in `main_get_data_dir_ios()` on iOS.
+    // Android 上 FFI.onAppStart 可能已提前写入正确目录；空路径永不合法，跳过覆盖。
     #[cfg(not(target_os = "ios"))]
     {
-        *config::APP_DIR.write().unwrap() = app_dir.to_owned();
+        if !app_dir.is_empty() {
+            *config::APP_DIR.write().unwrap() = app_dir.to_owned();
+        }
     }
     // core_main's load_custom_client does not work for flutter since it is only applied to its load_library in main.c
     if custom_client_config.is_empty() {
@@ -2979,7 +2982,17 @@ pub mod server_side {
         log::debug!("startServer from jvm");
         let mut env = env;
         if let Ok(app_dir) = env.get_string(&app_dir) {
-            *config::APP_DIR.write().unwrap() = app_dir.into();
+            // 空字符串可能来自 prefs 尚未被 Flutter 同步的纯服务启动（开机/看门狗）。
+            // 此时 FFI.onAppStart 已通过 Context.getDir("flutter") 建立了正确的
+            // APP_DIR，绝不能被空值覆盖，否则 lazy 配置会从错误相对路径加载为空。
+            if !app_dir.is_empty() {
+                *config::APP_DIR.write().unwrap() = app_dir.into();
+            } else {
+                log::warn!(
+                    "startServer got empty app_dir, keep existing APP_DIR: {}",
+                    config::APP_DIR.read().unwrap()
+                );
+            }
         }
         if let Ok(custom_client_config) = env.get_string(&custom_client_config) {
             if !custom_client_config.is_empty() {

@@ -508,4 +508,35 @@ pub extern "system" fn Java_ffi_FFI_onAppStart(mut env: JNIEnv, _class: JClass, 
             try_init_rustls_platform_verifier(&mut env, context_jobject);
         }
     }
+    // 在任何配置读写前确定落盘根目录。hbb_common 的 CONFIG2 / LOCAL_CONFIG 等
+    // lazy_static 首次访问即按当前 APP_DIR 加载并在整个进程内缓存，不会随后续
+    // APP_DIR 变化重新加载。Application 阶段（本函数）早于 Flutter mainInit，
+    // 而 NetworkTypeMonitor 等原生组件此刻已可能写 option；若 APP_DIR 仍为空，
+    // 会从错误的相对路径加载到空配置并永久缓存，导致用户持久化设置（如
+    // quality-monitor-mode）重启后读出来全是默认值。路径与 Flutter
+    // getApplicationDocumentsDirectory 保持一致：Context.getDir("flutter")
+    // 即 /data/user/0/<pkg>/app_flutter，getDir 会自动建目录。
+    let _ = env.with_local_frame(8, |env| -> JniResult<()> {
+        let name = env.new_string("flutter")?;
+        let file = env
+            .call_method(
+                ctx,
+                "getDir",
+                "(Ljava/lang/String;I)Ljava/io/File;",
+                &[
+                    JValue::Object(&JObject::from(name)),
+                    JValue::Int(0),
+                ],
+            )?
+            .l()?;
+        let path = env
+            .call_method(file, "getAbsolutePath", "()Ljava/lang/String;", &[])?
+            .l()?;
+        let path = env.get_string(&JString::from(path))?.to_string_lossy();
+        if !path.is_empty() {
+            *hbb_common::config::APP_DIR.write().unwrap() = path.to_string();
+            log::info!("APP_DIR initialized at onAppStart: {}", path);
+        }
+        Ok(())
+    });
 }

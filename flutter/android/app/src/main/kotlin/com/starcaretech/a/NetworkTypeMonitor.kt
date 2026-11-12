@@ -31,10 +31,9 @@ import ffi.FFI
  *   stop-service 完全解耦——探测"在线"以 App 心跳为准，transport 也必须同生命周期。
  *   进程死亡后回调与 Handler 任务由系统自动回收。
  *
- * 时序说明：Application 阶段 Rust 端 APP_DIR（config 落盘根目录）可能尚未由
- * Dart mainInit / FFI.startServer 写入，此时 FFI.setOption 的落盘会静默失败，
- * 但内存 LOCAL_CONFIG 写入成功，同进程后续 mainGetOption 读内存即可得到值；
- * APP_DIR 就绪后的下一次网络变化或进程重启重新注册时会正常落盘。
+ * 时序说明：FFI.onAppStart（MainApplication.onCreate，先于本 monitor 启动）
+ * 已通过 Context.getDir("flutter") 提前写入 Rust 端 APP_DIR，因此这里的
+ * FFI.setOption 可正常落盘；早期实现中 APP_DIR 空窗导致的静默落盘失败已修复。
  */
 object NetworkTypeMonitor {
     private const val TAG = "NetworkTypeMonitor"
