@@ -9,7 +9,9 @@
 //      并随心跳上报 os 供服务端拒绝移动端进入探测注册表。
 //
 // 设计要点：
-//   - 频率 15s：服务端在线窗口 60s，可容忍连续 3 次丢包；
+//   - 频率 3s：探测全量 PC 化后的低延迟 pull 节奏，服务端在线窗口 60s，
+//     可容忍连续约 20 次丢拍；默认走 Rust 缓存 HTTP client（连接池 keep-alive），
+//     不重复 TLS 握手，单台日流量约 10MB 量级；
 //   - 复用 HttpFallback：https 传输失败自动回退 http，与业务接口一致；
 //   - 服务端在服务心跳权威窗口（10s）内自动忽略 app 心跳的在线态部分，
 //     不会降级设备列表的绿色在线态；探测槽位状态机保证任务只下发一次；
@@ -26,7 +28,7 @@ import 'package:flutter_hbb/models/platform_model.dart';
 import 'http_service.dart';
 
 class AppHeartbeat {
-  static const Duration _interval = Duration(seconds: 15);
+  static const Duration _interval = Duration(seconds: 3);
   static const Duration _requestTimeout = Duration(seconds: 10);
   static Timer? _timer;
   static bool _sending = false;

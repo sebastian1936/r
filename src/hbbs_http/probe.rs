@@ -1,11 +1,13 @@
 // 在线网络质量探测 Agent 模块（设计文档 §5/§6）。
 //
-// 心跳拉到 probe_tasks 后入队，由独立工作线程串行执行（单设备并发 1、其余排队），
-// 不阻塞心跳 current-thread 运行时。三种探测：
-//   - ping：系统自带 ping 子进程（免 root/免新权限），参数数组调用，不经 shell
-//   - tcp：tokio TcpStream，3 次×2s，成功即停
-//   - http：专用 reqwest client，硬超时 15s，不重试、不下载 body、最多 3 跳转
-// 结果经 post_request 上报 /api/probe/report，带 X-Probe-Token，失败重试 2 次。
+// 心跳拉到 probe_tasks 后入队（容量 32），独立工作线程内 current-thread 运行时
+// 并发执行，信号量限流 PROBE_CONCURRENCY=10：满员后 supervisor 停 drain 形成背压，
+// 队列满则入队端丢弃并告警，由服务端 TTL 兜底。三种探测全部单次化、失败不重试：
+//   - ping：系统自带 ping 子进程（免 root/免新权限），单包，参数数组调用，不经 shell
+//   - tcp：tokio TcpStream，单次连接 2s 超时，失败即返回
+//   - http：专用 reqwest client，硬超时 5s，不重试、不下载 body、最多 3 跳转
+// 各阶段超时：DNS 2s / Ping 兜底 5s / TCP 连接 2s / HTTP 整体 5s。
+// 结果经 post_request 单次上报 /api/probe/report，带 X-Probe-Token，失败丢弃由服务端 TTL 收口。
 
 use std::{
     collections::{HashMap, HashSet},
@@ -20,18 +22,25 @@ use std::{
 use hbb_common::{
     config::Config,
     log,
-    tokio::{self, net::TcpStream},
+    tokio::{self, net::TcpStream, sync::Semaphore},
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 const PROBE_TOKEN: &str = "sc-probe-2026-10";
-const QUEUE_CAP: usize = 8;
+// 队列容量必须大于并发度，给服务端心跳批量下发留 burst 缓冲；
+// 队列满后 spawn() 非阻塞丢弃并告警，由服务端 TTL 兜底。
+const QUEUE_CAP: usize = 32;
+// 单 Agent 探测并发上限：服务端保留派发策略大脑（发几个、何时发可随版本调整），
+// 客户端把执行能力一次做足——客户端无法强制用户升级，并发模型不留给以后改。
+const PROBE_CONCURRENCY: usize = 10;
 const DONE_CACHE_MAX: usize = 64; // 已执行任务结果缓存上限，超过整体清空
 
-const HARD_TIMEOUT: Duration = Duration::from_secs(15);
-const DNS_TIMEOUT: Duration = Duration::from_secs(3);
-const PING_TIMEOUT: Duration = Duration::from_secs(9); // 3 包×2s + 间隔兜底
+// 5s 封顶折中方案：单槽目标"领任务 ≤3s + 执行 ≤5s（DNS 另计 2s）"，
+// 慢目标/弱网以 timeout 如实上报，不再靠拉长等待换成功率。
+const HARD_TIMEOUT: Duration = Duration::from_secs(5);
+const DNS_TIMEOUT: Duration = Duration::from_secs(2);
+const PING_TIMEOUT: Duration = Duration::from_secs(5); // 单包探测的命令挂死兜底
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const TCP_GAP: Duration = Duration::from_millis(500);
 const MAX_REDIRECTS_DEFAULT: u64 = 3;
@@ -39,9 +48,6 @@ const MAX_REDIRECTS_DEFAULT: u64 = 3;
 const STATUS_DONE: &str = "done";
 const STATUS_TIMEOUT: &str = "timeout";
 const STATUS_FAILED: &str = "failed";
-
-// 上报失败重试间隔（首次立即发，之后 2s/5s 各一次）
-const REPORT_RETRY_GAPS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5)];
 
 /// 心跳下发的探测任务（协议见设计 §5.1）。未知字段默认忽略，向前兼容。
 #[derive(Debug, Clone, Deserialize)]
@@ -79,7 +85,8 @@ fn start_worker() -> SyncSender<ProbeTask> {
     if let Err(e) = std::thread::Builder::new()
         .name("probe-worker".to_owned())
         .spawn(move || {
-            // 独立 current-thread 运行时：探测全部异步化，与心跳线程互不影响
+            // 独立 current-thread 运行时：探测全部异步化，与心跳线程互不影响。
+            // spawn 出的探测任务在 await 点交错并发（IO/子进程型任务无线程阻塞）。
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -99,24 +106,43 @@ fn start_worker() -> SyncSender<ProbeTask> {
 }
 
 async fn worker_loop(rx: Receiver<ProbeTask>) {
-    // task_id -> 上次完整上报 body：重复任务直接重发结果，不重复探测
-    let mut done: HashMap<String, String> = HashMap::new();
+    // 并发闸：最多 PROBE_CONCURRENCY 个探测在途（执行+上报合计）。许可在派发前
+    // 获取，满员后 supervisor 停在 acquire 不再 drain channel，channel 填满后
+    // 入队端 try_send 丢弃，形成"队列 + 信号量"两级背压，内存里不会无限堆任务。
+    let sem = Arc::new(Semaphore::new(PROBE_CONCURRENCY));
+    // task_id -> 上次完整上报 body：重复任务直接重发结果，不重复探测。
+    // 并发任务共享，用 std Mutex 保护，持锁只做 map 短操作、不跨 await。
+    let done = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+
     while let Ok(task) = rx.recv() {
-        let body = match done.get(&task.task_id) {
-            Some(cached) => {
-                log::info!("probe duplicate task {}, re-report cached result", task.task_id);
-                cached.clone()
-            }
-            None => {
-                let body = run_task(&task).await;
-                if done.len() >= DONE_CACHE_MAX {
-                    done.clear();
+        // 重复任务：仅重发缓存结果，不占探测并发额度
+        if let Some(cached) = done.lock().unwrap().get(&task.task_id).cloned() {
+            log::info!("probe duplicate task {}, re-report cached result", task.task_id);
+            tokio::spawn(async move {
+                report_once(&cached).await;
+            });
+            continue;
+        }
+        // 满员时在此等待形成背压；信号量全程不 close，acquire_owned 不会出错
+        let permit = sem
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("probe semaphore closed");
+        let done = done.clone();
+        tokio::spawn(async move {
+            let body = run_task(&task).await;
+            {
+                let mut cache = done.lock().unwrap();
+                if cache.len() >= DONE_CACHE_MAX {
+                    cache.clear();
                 }
-                done.insert(task.task_id.clone(), body.clone());
-                body
+                cache.insert(task.task_id.clone(), body.clone());
             }
-        };
-        report_with_retry(&body).await;
+            report_once(&body).await;
+            // 上报完成才释放许可：与服务端 inflight（已派发未上报）口径一致
+            drop(permit);
+        });
     }
 }
 
@@ -216,7 +242,8 @@ async fn probe_ping(task: &ProbeTask) -> (String, String, Value) {
     }
     let dns = resolve_dns(host).await;
     // DNS 预解析失败不阻断：系统 ping 仍可能自行解析成功，dns.error 如实上报
-    let count = clamp_usize(extra_u64(task, "count", 3), 1, 10);
+    // 单次化：服务端 defaultExtra 下发 count=1；默认值同步为 1 防御老服务端。
+    let count = clamp_usize(extra_u64(task, "count", 1), 1, 10);
 
     let mut cmd = build_ping_command(host, count);
     let started = Instant::now();
@@ -440,7 +467,8 @@ async fn probe_tcp(task: &ProbeTask) -> (String, String, Value) {
         );
     }
     let dns = resolve_dns(host).await;
-    let attempts_n = clamp_usize(extra_u64(task, "attempts", 3), 1, 5) as u32;
+    // 单次化：服务端 defaultExtra 下发 attempts=1；默认值同步为 1 防御老服务端。
+    let attempts_n = clamp_usize(extra_u64(task, "attempts", 1), 1, 5) as u32;
 
     let mut attempts = Vec::new();
     let mut connected = false;
@@ -636,13 +664,13 @@ async fn probe_http(task: &ProbeTask) -> (String, String, Value) {
                     "ttfb": ms(HARD_TIMEOUT),
                     "total": ms(HARD_TIMEOUT),
                 },
-                "error": "http hard timeout 15s",
+                "error": "http hard timeout 5s",
             });
             let mut result = base_result(task, dns);
             result["http"] = http;
             (
                 STATUS_TIMEOUT.to_owned(),
-                "http hard timeout 15s".to_owned(),
+                "http hard timeout 5s".to_owned(),
                 result,
             )
         }
@@ -651,7 +679,9 @@ async fn probe_http(task: &ProbeTask) -> (String, String, Value) {
 
 // ---------- 上报 ----------
 
-async fn report_with_retry(body: &str) {
+/// 单次上报：失败立即丢弃，不做退避重试——探测已全面短超时化，重试只会放大
+/// 任务尾延迟，未上报的槽位由服务端 TTL（90s）收口为 expired。
+async fn report_once(body: &str) {
     let base = crate::hbbs_http::sync::api_server_base();
     if base.is_empty() {
         log::warn!("probe report skipped: api server base empty");
@@ -659,26 +689,18 @@ async fn report_with_retry(body: &str) {
     }
     let url = format!("{}/api/probe/report", base);
     let header = format!("X-Probe-Token: {}", PROBE_TOKEN);
-    // 首次立即发；失败按 2s/5s 重试，仍失败丢弃，服务端 TTL 兜底
-    for attempt in 0..=REPORT_RETRY_GAPS.len() {
-        if attempt > 0 {
-            tokio::time::sleep(REPORT_RETRY_GAPS[attempt - 1]).await;
-        }
-        match crate::post_request(url.clone(), body.to_owned(), &header).await {
-            Ok(text) => {
-                if serde_json::from_str::<Value>(&text)
-                    .ok()
-                    .and_then(|v| v.get("code").and_then(|c| c.as_i64()))
-                    == Some(0)
-                {
-                    return;
-                }
+    match crate::post_request(url, body.to_owned(), &header).await {
+        Ok(text) => {
+            if serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v.get("code").and_then(|c| c.as_i64()))
+                != Some(0)
+            {
                 log::warn!("probe report rejected by server: {}", text);
             }
-            Err(e) => log::warn!("probe report attempt {} failed: {}", attempt + 1, e),
         }
+        Err(e) => log::warn!("probe report failed (no retry, server TTL will close slot): {}", e),
     }
-    log::error!("probe report dropped after retries: {}", &body[..body.len().min(120)]);
 }
 
 // ---------- 小工具 ----------
