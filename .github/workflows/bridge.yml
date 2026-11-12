@@ -31,22 +31,37 @@ jobs:
 
       - name: Install prerequisites
         run: |
-          sudo apt-get install ca-certificates -y
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            clang \
-            cmake \
-            curl \
-            gcc \
-            git \
-            g++ \
-            libclang-dev \
-            libgtk-3-dev \
-            llvm-dev \
-            nasm \
-            ninja-build \
-            pkg-config \
-            wget
+          # GitHub runner 偶发 DNS 故障：Temporary failure resolving *.ubuntu.com
+          # （2026-11 多次构建挂在此处，见设计文档 C.26），同任务其他域名解析正常，
+          # 仅 Ubuntu 源域名解析失败。策略：先按默认源 apt 重试，仍失败则切到不同根域
+          # 的镜像站（kernel.org / 阿里云）绕开 ubuntu.com 解析。
+          # 22.04 runner 的源可能以 mirror+file 引用 /etc/apt/apt-mirrors.txt，也可能
+          # 直接写在 .list/.sources 中，mirrorlist 与 sources 文件两处一并重写才生效。
+          apt_install() {
+            sudo apt-get install "$@" -y && return 0
+            echo "::warning::apt-get install $* 首次失败，apt update 后重试"
+            sleep 10
+            sudo apt-get update -y || true
+            sudo apt-get install "$@" -y
+          }
+          switch_apt_mirror() {
+            for mirror in http://mirrors.edge.kernel.org/ubuntu http://mirrors.aliyun.com/ubuntu; do
+              echo "::warning::尝试备用镜像: $mirror"
+              echo "$mirror/" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+              sudo find /etc/apt -maxdepth 2 -type f \( -name '*.list' -o -name '*.sources' \) \
+                -exec sed -i -E \
+                  -e "s|https?://[a-z0-9.]*ubuntu\.com/ubuntu|$mirror|g" \
+                  -e "s|https?://mirrors\.edge\.kernel\.org/ubuntu|$mirror|g" \
+                  -e "s|https?://mirrors\.aliyun\.com/ubuntu|$mirror|g" \
+                  {} +
+              if sudo apt-get update -y && sudo apt-get install "$@" -y; then return 0; fi
+            done
+            return 1
+          }
+          PKGS="ca-certificates clang cmake curl gcc git g++ libclang-dev libgtk-3-dev llvm-dev nasm ninja-build pkg-config wget"
+          if ! apt_install $PKGS; then
+            switch_apt_mirror $PKGS || { echo "::error::所有 apt 源均不可用"; exit 1; }
+          fi
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@v1
