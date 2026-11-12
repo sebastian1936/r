@@ -12,17 +12,18 @@
 use std::{
     collections::{HashMap, HashSet},
     io::ErrorKind,
-    sync::{
-        mpsc::{sync_channel, Receiver, SyncSender},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use hbb_common::{
     config::Config,
     log,
-    tokio::{self, net::TcpStream, sync::Semaphore},
+    tokio::{
+        self,
+        net::TcpStream,
+        sync::{mpsc, Semaphore},
+    },
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -66,7 +67,12 @@ pub struct ProbeTask {
 // ---------- 入队与工作线程 ----------
 
 lazy_static::lazy_static! {
-    static ref QUEUE: Mutex<SyncSender<ProbeTask>> = Mutex::new(start_worker());
+    // 必须是 tokio 异步通道：worker 跑在独立 current-thread 运行时上，队列空时
+    // worker_loop 挂在 rx.recv().await，运行时仍能驱动已 spawn 的探测任务。
+    // 若用 std 阻塞通道，recv 会让线程睡在运行时调度器之外，spawn 出去的任务
+    // 只在新消息到达时才有机会被 poll；单台设备派完任务后通道静默，会导致
+    // 探测永不执行、上报永不发出（服务端只能等 TTL 收口为 expired）。
+    static ref QUEUE: Mutex<mpsc::Sender<ProbeTask>> = Mutex::new(start_worker());
 }
 
 /// 心跳入口：非阻塞入队，队列满（设备长期卡顿）直接丢弃并告警，服务端 TTL 兜底。
@@ -80,8 +86,8 @@ pub fn spawn(task: ProbeTask) {
     }
 }
 
-fn start_worker() -> SyncSender<ProbeTask> {
-    let (tx, rx) = sync_channel::<ProbeTask>(QUEUE_CAP);
+fn start_worker() -> mpsc::Sender<ProbeTask> {
+    let (tx, rx) = mpsc::channel::<ProbeTask>(QUEUE_CAP);
     if let Err(e) = std::thread::Builder::new()
         .name("probe-worker".to_owned())
         .spawn(move || {
@@ -105,7 +111,7 @@ fn start_worker() -> SyncSender<ProbeTask> {
     tx
 }
 
-async fn worker_loop(rx: Receiver<ProbeTask>) {
+async fn worker_loop(mut rx: mpsc::Receiver<ProbeTask>) {
     // 并发闸：最多 PROBE_CONCURRENCY 个探测在途（执行+上报合计）。许可在派发前
     // 获取，满员后 supervisor 停在 acquire 不再 drain channel，channel 填满后
     // 入队端 try_send 丢弃，形成"队列 + 信号量"两级背压，内存里不会无限堆任务。
@@ -114,7 +120,9 @@ async fn worker_loop(rx: Receiver<ProbeTask>) {
     // 并发任务共享，用 std Mutex 保护，持锁只做 map 短操作、不跨 await。
     let done = Arc::new(Mutex::new(HashMap::<String, String>::new()));
 
-    while let Ok(task) = rx.recv() {
+    // recv().await 在队列空时把线程交还给 tokio park，已 spawn 的探测任务
+    // 照常被驱动；所有 Sender 关闭时 recv 返回 None，循环退出、线程自然结束。
+    while let Some(task) = rx.recv().await {
         // 重复任务：仅重发缓存结果，不占探测并发额度
         if let Some(cached) = done.lock().unwrap().get(&task.task_id).cloned() {
             log::info!("probe duplicate task {}, re-report cached result", task.task_id);
