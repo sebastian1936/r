@@ -399,6 +399,7 @@ fn ping_rtt_stats(rtts: &[f64]) -> (f64, f64, f64) {
 /// 不创建任何子进程，彻底消除 ping.exe 的窗口与进程创建开销。
 #[cfg(windows)]
 mod icmp_win {
+    use std::time::Instant;
     use windows::Win32::Foundation::{GetLastError, HANDLE};
     use windows::Win32::NetworkManagement::IpHelper::{
         IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho, ICMP_ECHO_REPLY,
