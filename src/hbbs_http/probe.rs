@@ -298,7 +298,8 @@ async fn probe_ping(task: &ProbeTask) -> (String, String, Value) {
         100.0
     };
     let (rtt_min, rtt_avg, rtt_max) = ping_rtt_stats(&outcome.rtts);
-    // 字段口径与旧 ping.exe 版本完全一致，前端/地图零改动
+    // 字段名与旧 ping.exe 版本保持一致（前端/地图零改动），但 RTT 升级为亚毫秒精度，
+    // 不再出现 IcmpSendEcho 整数毫秒截断导致的 0ms
     let ping = json!({
         "sent": sent,
         "received": received,
@@ -374,22 +375,23 @@ async fn resolve_host_ips(host: &str) -> (Vec<std::net::IpAddr>, Value) {
     }
 }
 
-/// 由成功回包 RTT 序列（毫秒）计算 min/avg/max，空序列返回全 0；avg 保留 1 位小数。
+/// 由成功回包 RTT 序列（f64 毫秒，亚毫秒精度）计算 min/avg/max，空序列返回全 0；
+/// avg 保留 1 位小数，min/max 保留测量原值（最多 2 位小数）。
 #[cfg(windows)]
-fn ping_rtt_stats(rtts: &[u32]) -> (f64, f64, f64) {
+fn ping_rtt_stats(rtts: &[f64]) -> (f64, f64, f64) {
     if rtts.is_empty() {
         return (0.0, 0.0, 0.0);
     }
-    let mut min = u32::MAX;
-    let mut max = 0u32;
-    let mut sum = 0u64;
+    let mut min = f64::INFINITY;
+    let mut max = 0.0f64;
+    let mut sum = 0.0f64;
     for &rtt in rtts {
         min = min.min(rtt);
         max = max.max(rtt);
-        sum += rtt as u64;
+        sum += rtt;
     }
-    let avg = sum as f64 / rtts.len() as f64;
-    (min as f64, (avg * 10.0).round() / 10.0, max as f64)
+    let avg = sum / rtts.len() as f64;
+    (min, (avg * 10.0).round() / 10.0, max)
 }
 
 /// Windows 进程内 ICMP 实现（iphlpapi）。
@@ -419,7 +421,9 @@ mod icmp_win {
     pub(super) struct EchoOutcome {
         pub(super) sent: u32,
         pub(super) received: u32,
-        pub(super) rtts: Vec<u32>,
+        // f64 毫秒（亚毫秒精度）：IcmpSendEcho 回包的 RoundTripTime 是整数毫秒，
+        // 同城/同机房链路 RTT 常 <1ms 会被截断成 0，故改用调用前后 Instant 自测
+        pub(super) rtts: Vec<f64>,
         pub(super) summary: String,
     }
 
@@ -474,6 +478,11 @@ mod icmp_win {
             // windows 0.61 的 IcmpSendEcho 为混合签名（CI 实测）：
             // requestdata/replybuffer 是裸指针需显式 cast，
             // requestoptions 是 Option<*const IP_OPTION_INFORMATION>，无自定义 IP 选项传 None
+            //
+            // IcmpSendEcho 的 ICMP_ECHO_REPLY.RoundTripTime 为 u32 整数毫秒，亚毫秒回包
+            // （同城/同机房常见）直接截断为 0，前端会显示不合理的 0ms。调用前后用 Instant
+            // 自测获得亚毫秒精度；阻塞调用本身的调度开销在微秒级，对 RTT 测量影响可忽略。
+            let started = Instant::now();
             let replies = IcmpSendEcho(
                 handle,
                 destination,
@@ -484,6 +493,7 @@ mod icmp_win {
                 reply_buf.len() as u32,
                 ECHO_TIMEOUT_MS,
             );
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
             if replies == 0 {
                 // 本机 API 调用失败（超时也走这里，GetLastError=IP_REQ_TIMED_OUT）
                 last_code = GetLastError().0;
@@ -495,7 +505,13 @@ mod icmp_win {
             last_ttl = reply.Options.Ttl as u32;
             if reply.Status == IP_SUCCESS {
                 outcome.received += 1;
-                outcome.rtts.push(reply.RoundTripTime);
+                // 自测值保留 2 位小数；极端情况下自测为 0（时钟精度不足）回退 API 整数毫秒
+                let rtt = if elapsed_ms > 0.0 {
+                    (elapsed_ms * 100.0).round() / 100.0
+                } else {
+                    reply.RoundTripTime as f64
+                };
+                outcome.rtts.push(rtt);
             } else {
                 // 回包到达但目的端返回差错（不可达等）
                 outcome.summary = format!("{} (status={})", status_text(reply.Status), reply.Status);
@@ -822,12 +838,17 @@ mod tests {
         // 空序列全 0
         assert_eq!(ping_rtt_stats(&[]), (0.0, 0.0, 0.0));
         // 单包：min/avg/max 相同
-        assert_eq!(ping_rtt_stats(&[12]), (12.0, 12.0, 12.0));
+        assert_eq!(ping_rtt_stats(&[12.0]), (12.0, 12.0, 12.0));
         // 多包：min/max 取极值，avg 保留 1 位小数（(11+12+13)/3=12.0）
-        assert_eq!(ping_rtt_stats(&[12, 11, 13]), (11.0, 12.0, 13.0));
+        assert_eq!(ping_rtt_stats(&[12.0, 11.0, 13.0]), (11.0, 12.0, 13.0));
         // avg 四舍五入：10+11+12 = 33/3 = 11.0；10+12 = 11.0
-        assert_eq!(ping_rtt_stats(&[10, 12]), (10.0, 11.0, 12.0));
+        assert_eq!(ping_rtt_stats(&[10.0, 12.0]), (10.0, 11.0, 12.0));
         // 非整除场景：(10+11)/2 = 10.5
-        assert_eq!(ping_rtt_stats(&[10, 11]), (10.0, 10.5, 11.0));
+        assert_eq!(ping_rtt_stats(&[10.0, 11.0]), (10.0, 10.5, 11.0));
+        // 亚毫秒序列不再被截断为 0：同城链路 0.32/0.48ms，avg 保留 1 位小数
+        let (min, avg, max) = ping_rtt_stats(&[0.32, 0.48]);
+        assert!((min - 0.32).abs() < f64::EPSILON);
+        assert!((max - 0.48).abs() < f64::EPSILON);
+        assert!((avg - 0.4).abs() < f64::EPSILON);
     }
 }
