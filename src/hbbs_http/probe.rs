@@ -3,7 +3,8 @@
 // 心跳拉到 probe_tasks 后入队（容量 32），独立工作线程内 current-thread 运行时
 // 并发执行，信号量限流 PROBE_CONCURRENCY=10：满员后 supervisor 停 drain 形成背压，
 // 队列满则入队端丢弃并告警，由服务端 TTL 兜底。三种探测全部单次化、失败不重试：
-//   - ping：系统自带 ping 子进程（免 root/免新权限），单包，参数数组调用，不经 shell
+//   - ping：仅 Windows，进程内 IcmpSendEcho（iphlpapi，普通用户权限，无子进程无窗口），
+//     阻塞调用放 spawn_blocking；非 Windows 平台返回 unsupported
 //   - tcp：tokio TcpStream，单次连接 2s 超时，失败即返回
 //   - http：专用 reqwest client，硬超时 5s，不重试、不下载 body、最多 3 跳转
 // 各阶段超时：DNS 2s / Ping 兜底 5s / TCP 连接 2s / HTTP 整体 5s。
@@ -239,28 +240,44 @@ fn is_safe_host(host: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b':')
 }
 
+#[cfg(windows)]
 async fn probe_ping(task: &ProbeTask) -> (String, String, Value) {
     let host = task.target.trim();
     if !is_safe_host(host) {
         return (
             STATUS_FAILED.to_owned(),
             "invalid ping target".to_owned(),
-            base_result(task, json!({ "resolved_ips": [], "elapsed_ms": 0, "error": "invalid_target" })),
+            base_result(task, skipped_dns("invalid_target")),
         );
     }
-    let dns = resolve_dns(host).await;
-    // DNS 预解析失败不阻断：系统 ping 仍可能自行解析成功，dns.error 如实上报
     // 单次化：服务端 defaultExtra 下发 count=1；默认值同步为 1 防御老服务端。
     let count = clamp_usize(extra_u64(task, "count", 1), 1, 10);
+    let (ips, dns) = resolve_host_ips(host).await;
+    let v4 = match ips.iter().find_map(|ip| match ip {
+        std::net::IpAddr::V4(v4) => Some(*v4),
+        _ => None,
+    }) {
+        Some(v4) => v4,
+        None => {
+            // 仅 IPv6（Icmp6 链路暂未实现）或解析失败：明确失败原因，不做静默兜底
+            let reason = if ips.is_empty() {
+                "dns resolve failed or timed out"
+            } else {
+                "ipv6 icmp not supported"
+            };
+            return (STATUS_FAILED.to_owned(), reason.to_owned(), base_result(task, dns));
+        }
+    };
 
-    let mut cmd = build_ping_command(host, count);
+    // IcmpSendEcho 是同步阻塞 API，放 spawn_blocking 防止冻结 current-thread 运行时
     let started = Instant::now();
-    let output = match tokio::time::timeout(PING_TIMEOUT, cmd.output()).await {
+    let job = tokio::task::spawn_blocking(move || icmp_win::echo_v4(v4, count));
+    let outcome = match tokio::time::timeout(PING_TIMEOUT, job).await {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
             return (
                 STATUS_FAILED.to_owned(),
-                format!("ping spawn failed: {}", e),
+                format!("icmp task join failed: {}", e),
                 base_result(task, dns),
             )
         }
@@ -272,195 +289,223 @@ async fn probe_ping(task: &ProbeTask) -> (String, String, Value) {
             )
         }
     };
-    let elapsed = started.elapsed();
-    let exit_code = output.status.code().unwrap_or(-1);
-    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
-    if !output.stderr.is_empty() {
-        text.push('\n');
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
-    }
-    let stats = parse_ping_output(current_flavor(), &text);
-    // 退出码非零通常是 100% 丢包这类业务失败，探测本身执行成功，仍按 done 上报
+
+    let sent = outcome.sent;
+    let received = outcome.received;
+    let loss_pct = if sent > 0 {
+        ((sent - received) as f64 / sent as f64) * 100.0
+    } else {
+        100.0
+    };
+    let (rtt_min, rtt_avg, rtt_max) = ping_rtt_stats(&outcome.rtts);
+    // 字段口径与旧 ping.exe 版本完全一致，前端/地图零改动
     let ping = json!({
-        "sent": stats.sent,
-        "received": stats.received,
-        "loss_pct": stats.loss_pct,
-        "rtt_min_ms": stats.rtt_min,
-        "rtt_avg_ms": stats.rtt_avg,
-        "rtt_max_ms": stats.rtt_max,
-        "rtt_mdev_ms": stats.rtt_mdev,
-        "exit_code": exit_code,
-        "elapsed_ms": ms(elapsed),
-        "raw_tail": tail(&text, 200),
+        "sent": sent,
+        "received": received,
+        "loss_pct": loss_pct,
+        "rtt_min_ms": rtt_min,
+        "rtt_avg_ms": rtt_avg,
+        "rtt_max_ms": rtt_max,
+        // IcmpSendEcho 无 mdev 口径，固定 0（旧 Windows 文本解析同样为 0）
+        "rtt_mdev_ms": 0.0,
+        // 无子进程概念：探测执行成功固定 0，失败原因走 error_msg/raw_tail
+        "exit_code": 0,
+        "elapsed_ms": ms(started.elapsed()),
+        "raw_tail": outcome.summary,
     });
     let mut result = base_result(task, dns);
     result["ping"] = ping;
-    (STATUS_DONE.to_owned(), String::new(), result)
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PingFlavor {
-    Unix, // Linux / Android / macOS 输出同构
-    Windows,
-}
-
-fn current_flavor() -> PingFlavor {
-    #[cfg(windows)]
-    {
-        PingFlavor::Windows
-    }
-    #[cfg(not(windows))]
-    {
-        PingFlavor::Unix
+    if received == 0 {
+        // 全丢/超时按 timeout 上报，地图染红；部分丢包仍为 done，由丢包率叠红闪电
+        (
+            STATUS_TIMEOUT.to_owned(),
+            format!("icmp echo unreachable: {}", outcome.summary),
+            result,
+        )
+    } else {
+        (STATUS_DONE.to_owned(), String::new(), result)
     }
 }
 
-fn build_ping_command(host: &str, count: usize) -> hbb_common::tokio::process::Command {
-    let count = count.to_string();
-    #[cfg(windows)]
-    let bin = "ping.exe";
-    #[cfg(not(windows))]
-    let bin = "ping";
-    let mut cmd = hbb_common::tokio::process::Command::new(bin);
-    // 超时后 drop 即 kill，避免子进程悬挂占住工作线程
-    cmd.kill_on_drop(true);
-    #[cfg(windows)]
-    {
-        // -w 单位毫秒
-        cmd.args(["-n", count.as_str(), "-w", "2000"]);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // macOS 的 -W 单位是毫秒
-        cmd.args(["-c", count.as_str(), "-W", "2000"]);
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        // Linux/Android 的 -W 单位秒
-        cmd.args(["-c", count.as_str(), "-W", "2"]);
-    }
-    cmd.arg(host);
-    cmd
+#[cfg(not(windows))]
+async fn probe_ping(task: &ProbeTask) -> (String, String, Value) {
+    // 探测白名单已收窄为仅 Windows，非 Windows 客户端理论上收不到 ping 任务；
+    // 保留防御性返回，避免老服务端误派时 panic 或静默丢弃。
+    (
+        STATUS_FAILED.to_owned(),
+        "ping probe only supported on windows".to_owned(),
+        base_result(task, skipped_dns("ping unsupported on this platform")),
+    )
 }
 
-#[derive(Debug, Default, PartialEq)]
-struct PingStats {
-    sent: u32,
-    received: u32,
-    loss_pct: f64,
-    rtt_min: f64,
-    rtt_avg: f64,
-    rtt_max: f64,
-    rtt_mdev: f64,
-}
-
-/// 解析入口按平台分发；解析器为纯函数，全部平台都参与编译与单测。
-fn parse_ping_output(flavor: PingFlavor, text: &str) -> PingStats {
-    match flavor {
-        PingFlavor::Unix => parse_ping_unix(text),
-        PingFlavor::Windows => parse_ping_windows(text),
+/// 解析主机名并返回去重 IP 列表，同时产出与 resolve_dns 同口径的 dns JSON。
+#[cfg(windows)]
+async fn resolve_host_ips(host: &str) -> (Vec<std::net::IpAddr>, Value) {
+    let started = Instant::now();
+    match tokio::time::timeout(DNS_TIMEOUT, tokio::net::lookup_host((host, 0u16))).await {
+        Ok(Ok(addrs)) => {
+            let mut seen = HashSet::new();
+            let ips: Vec<std::net::IpAddr> =
+                addrs.map(|sa| sa.ip()).filter(|ip| seen.insert(*ip)).collect();
+            let dns = json!({
+                "resolved_ips": ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>(),
+                "elapsed_ms": ms(started.elapsed()),
+                "error": "",
+            });
+            (ips, dns)
+        }
+        Ok(Err(e)) => (
+            Vec::new(),
+            json!({
+                "resolved_ips": [],
+                "elapsed_ms": ms(started.elapsed()),
+                "error": format!("dns_lookup_failed: {}", e),
+            }),
+        ),
+        Err(_) => (
+            Vec::new(),
+            json!({
+                "resolved_ips": [],
+                "elapsed_ms": ms(DNS_TIMEOUT),
+                "error": "dns_timeout",
+            }),
+        ),
     }
 }
 
-/// Linux/Android/macOS：
-/// `3 packets transmitted, 3 received, 0% packet loss`
-/// `rtt min/avg/max/mdev = 0.047/0.062/0.081/0.014 ms`（macOS 为 stddev）
-fn parse_ping_unix(text: &str) -> PingStats {
-    let mut s = PingStats::default();
-    for line in text.lines() {
-        let lower = line.to_lowercase();
-        if lower.contains("packets transmitted") {
-            let tokens: Vec<&str> = lower.split_whitespace().collect();
-            if let Some(v) = tokens.first().and_then(|t| t.parse::<u32>().ok()) {
-                s.sent = v;
-            }
-            if let Some(v) = tokens.get(3).and_then(|t| t.parse::<u32>().ok()) {
-                s.received = v;
-            }
-            if let Some(p) = tokens.iter().find(|t| t.ends_with('%')) {
-                s.loss_pct = p.trim_end_matches('%').parse().unwrap_or(0.0);
-            }
-        } else if lower.contains("min/avg/max") {
-            if let Some((_, rhs)) = line.split_once('=') {
-                let nums: Vec<f64> = rhs
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .split('/')
-                    .filter_map(|x| x.parse().ok())
-                    .collect();
-                if nums.len() >= 3 {
-                    s.rtt_min = nums[0];
-                    s.rtt_avg = nums[1];
-                    s.rtt_max = nums[2];
-                    s.rtt_mdev = nums.get(3).copied().unwrap_or(0.0);
+/// 由成功回包 RTT 序列（毫秒）计算 min/avg/max，空序列返回全 0；avg 保留 1 位小数。
+#[cfg(windows)]
+fn ping_rtt_stats(rtts: &[u32]) -> (f64, f64, f64) {
+    if rtts.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    let mut min = u32::MAX;
+    let mut max = 0u32;
+    let mut sum = 0u64;
+    for &rtt in rtts {
+        min = min.min(rtt);
+        max = max.max(rtt);
+        sum += rtt as u64;
+    }
+    let avg = sum as f64 / rtts.len() as f64;
+    (min as f64, (avg * 10.0).round() / 10.0, max as f64)
+}
+
+/// Windows 进程内 ICMP 实现（iphlpapi）。
+/// 普通用户权限即可调用 IcmpSendEcho（无需 raw socket/管理员），
+/// 不创建任何子进程，彻底消除 ping.exe 的窗口与进程创建开销。
+#[cfg(windows)]
+mod icmp_win {
+    use windows::Win32::Foundation::{GetLastError, HANDLE};
+    use windows::Win32::NetworkManagement::IpHelper::{
+        IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho, ICMP_ECHO_REPLY,
+    };
+
+    /// 单包 echo 超时，与旧 ping.exe `-w 2000` 口径一致（毫秒）
+    const ECHO_TIMEOUT_MS: u32 = 2000;
+    const REQUEST_DATA: &[u8] = b"rustdesk-probe-ping";
+    /// 回包缓冲余量：ICMP_ECHO_REPLY 结构 + 请求数据 + IP 头余量
+    const REPLY_MARGIN: usize = 16;
+
+    /// IP_STATUS 常见值（ipifcons/ipexport 口径），用于 raw_tail 人类可读文案
+    const IP_SUCCESS: u32 = 0;
+    const IP_BUF_TOO_SMALL: u32 = 11001;
+    const IP_DEST_NET_UNREACHABLE: u32 = 11002;
+    const IP_DEST_HOST_UNREACHABLE: u32 = 11003;
+    const IP_REQ_TIMED_OUT: u32 = 11010;
+    const IP_GENERAL_FAILURE: u32 = 11050;
+
+    pub(super) struct EchoOutcome {
+        pub(super) sent: u32,
+        pub(super) received: u32,
+        pub(super) rtts: Vec<u32>,
+        pub(super) summary: String,
+    }
+
+    fn status_text(code: u32) -> &'static str {
+        match code {
+            IP_BUF_TOO_SMALL => "buffer too small",
+            IP_DEST_NET_UNREACHABLE => "destination network unreachable",
+            IP_DEST_HOST_UNREACHABLE => "destination host unreachable",
+            IP_REQ_TIMED_OUT => "request timed out",
+            IP_GENERAL_FAILURE => "general failure",
+            _ => "icmp error",
+        }
+    }
+
+    /// 对 IPv4 目标背靠背连发 count 个 ICMP Echo（无系统 ping 的 1s 间隔）。
+    /// 全程同步阻塞，调用方必须放在 spawn_blocking 线程执行。
+    pub(super) fn echo_v4(ip: std::net::Ipv4Addr, count: usize) -> EchoOutcome {
+        let mut outcome = EchoOutcome {
+            sent: 0,
+            received: 0,
+            rtts: Vec::with_capacity(count),
+            summary: String::new(),
+        };
+        // SAFETY: FFI 调用遵循 Icmp* 契约——句柄由 IcmpCreateFile 取得并在本函数
+        // 内关闭；回包缓冲生命周期覆盖 IcmpSendEcho 全程，裸指针仅在调用期间有效。
+        unsafe {
+            let handle = match IcmpCreateFile() {
+                Ok(h) => h,
+                Err(e) => {
+                    outcome.summary = format!("IcmpCreateFile failed: {}", e);
+                    return outcome;
                 }
+            };
+            echo_loop(handle, ip, count, &mut outcome);
+            let _ = IcmpCloseHandle(handle);
+        }
+        outcome
+    }
+
+    /// # Safety
+    /// `handle` 必须是 IcmpCreateFile 返回且尚未关闭的有效句柄。
+    unsafe fn echo_loop(handle: HANDLE, ip: std::net::Ipv4Addr, count: usize, outcome: &mut EchoOutcome) {
+        let buf_len = std::mem::size_of::<ICMP_ECHO_REPLY>() + REQUEST_DATA.len() + REPLY_MARGIN;
+        let mut reply_buf = vec![0u8; buf_len];
+        // IcmpSendEcho 目标地址要求网络字节序 u32（同 inet_addr 返回值）
+        let destination = u32::from_le_bytes(ip.octets());
+        let mut last_code: u32 = IP_SUCCESS;
+        let mut last_ttl: u32 = 0;
+
+        for _ in 0..count {
+            outcome.sent += 1;
+            let replies = IcmpSendEcho(
+                handle,
+                destination,
+                Some(REQUEST_DATA),
+                REQUEST_DATA.len() as u16,
+                None,
+                Some(reply_buf.as_mut_ptr() as *mut core::ffi::c_void),
+                reply_buf.len() as u32,
+                ECHO_TIMEOUT_MS,
+            );
+            if replies == 0 {
+                // 本机 API 调用失败（超时也走这里，GetLastError=IP_REQ_TIMED_OUT）
+                last_code = GetLastError().0;
+                outcome.summary = format!("{} (win32 code={})", status_text(last_code), last_code);
+                continue;
+            }
+            let reply = &*(reply_buf.as_ptr() as *const ICMP_ECHO_REPLY);
+            last_code = reply.Status;
+            last_ttl = reply.Options.Ttl as u32;
+            if reply.Status == IP_SUCCESS {
+                outcome.received += 1;
+                outcome.rtts.push(reply.RoundTripTime);
+            } else {
+                // 回包到达但目的端返回差错（不可达等）
+                outcome.summary = format!("{} (status={})", status_text(reply.Status), reply.Status);
             }
         }
-    }
-    s
-}
 
-/// Windows 中英文输出按"位置"解析，不依赖本地化文案，因此对 CP936(GBK) 控制台
-/// 经 lossy 转换后的乱码同样有效：
-///   统计行 `Packets: Sent = 3, Received = 3, Lost = 0 (0% loss)`
-///         / `数据包: 已发送 = 3，已接收 = 3，已丢失 = 0 (0% 丢失)`
-///   RTT 行固定顺序 min/max/avg（最短/最长/平均），均为 `标识 = 数值ms`
-fn parse_ping_windows(text: &str) -> PingStats {
-    let mut s = PingStats::default();
-    let lines: Vec<&str> = text.lines().collect();
-    let stats_idx = lines.iter().position(|l| l.contains('(') && l.contains('%'));
-    if let Some(idx) = stats_idx {
-        let stats_line = lines[idx];
-        let vals = eq_values(stats_line);
-        if let Some(v) = vals.first() {
-            s.sent = *v as u32;
-        }
-        if let Some(v) = vals.get(1) {
-            s.received = *v as u32;
-        }
-        s.loss_pct = pct_in_parens(stats_line).unwrap_or(0.0);
-        // 统计行之后的 RTT 块：中英文都可能把 min/max/avg 压在同一行
-        // （`Minimum = 11ms, Maximum = 13ms, Average = 12ms`），故拍平所有等号值，
-        // 按固定顺序 min/max/avg（最短/最长/平均）取值
-        let rtt: Vec<f64> = lines[idx + 1..]
-            .iter()
-            .filter(|l| l.contains('=') && l.to_lowercase().contains("ms"))
-            .flat_map(|l| eq_values(l))
-            .collect();
-        if let Some(v) = rtt.first() {
-            s.rtt_min = *v;
-        }
-        if let Some(v) = rtt.get(1) {
-            s.rtt_max = *v;
-        }
-        if let Some(v) = rtt.get(2) {
-            s.rtt_avg = *v;
+        if outcome.received > 0 {
+            outcome.summary = format!(
+                "icmp echo sent={} recv={} last_code={} ttl={}",
+                outcome.sent, outcome.received, last_code, last_ttl
+            );
         }
     }
-    s
-}
-
-/// 取一行中所有 `= 数值` 前缀数字，忽略本地化标签。
-fn eq_values(line: &str) -> Vec<f64> {
-    line.split('=')
-        .skip(1)
-        .filter_map(|part| {
-            let num: String = part
-                .trim()
-                .chars()
-                .take_while(|c| c.is_ascii_digit() || *c == '.')
-                .collect();
-            num.parse().ok()
-        })
-        .collect()
-}
-
-/// 取括号内百分比数字：`(0% loss)` / `(100% 丢失)` → 0 / 100。
-fn pct_in_parens(line: &str) -> Option<f64> {
-    let l = line.find('(')?;
-    let r = line[l..].find('%')? + l;
-    line[l + 1..r].trim().parse().ok()
 }
 
 // ---------- tcp ----------
@@ -733,160 +778,11 @@ fn clamp_usize(v: u64, lo: usize, hi: usize) -> usize {
     (v as usize).clamp(lo, hi)
 }
 
-fn tail(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        return s.to_owned();
-    }
-    let mut start = s.len() - n;
-    while !s.is_char_boundary(start) {
-        start -= 1;
-    }
-    s[start..].to_owned()
-}
-
 // ---------- 单测（全部离线，无网络/子进程依赖） ----------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const LINUX_OK: &str = "\
-PING 8.8.8.8 (8.8.8.8) 56(84) bytes of data.
-64 bytes from 8.8.8.8: icmp_seq=1 ttl=57 time=12.1 ms
-64 bytes from 8.8.8.8: icmp_seq=2 ttl=57 time=11.8 ms
-64 bytes from 8.8.8.8: icmp_seq=3 ttl=57 time=13.4 ms
-
---- 8.8.8.8 ping statistics ---
-3 packets transmitted, 3 received, 0% packet loss, time 2003ms
-rtt min/avg/max/mdev = 11.800/12.433/13.400/0.702 ms";
-
-    const LINUX_FULL_LOSS: &str = "\
-PING 10.255.255.1 (10.255.255.1) 56(84) bytes of data.
-
---- 10.255.255.1 ping statistics ---
-3 packets transmitted, 0 received, 100% packet loss, time 2030ms";
-
-    const MACOS_OK: &str = "\
-PING 8.8.8.8 (8.8.8.8): 56 data bytes
-64 bytes from 8.8.8.8: icmp_seq=0 ttl=57 time=12.044 ms
-64 bytes from 8.8.8.8: icmp_seq=1 ttl=57 time=13.102 ms
-64 bytes from 8.8.8.8: icmp_seq=2 ttl=57 time=11.766 ms
-
---- 8.8.8.8 ping statistics ---
-3 packets transmitted, 3 packets received, 0.0% packet loss
-round-trip min/avg/max/stddev = 11.766/12.304/13.102/0.581 ms";
-
-    const WIN_EN_OK: &str = "\
-Pinging 8.8.8.8 with 32 bytes of data:
-Reply from 8.8.8.8: bytes=32 time=12ms TTL=57
-Reply from 8.8.8.8: bytes=32 time=11ms TTL=57
-Reply from 8.8.8.8: bytes=32 time=13ms TTL=57
-
-Ping statistics for 8.8.8.8:
-    Packets: Sent = 3, Received = 3, Lost = 0 (0% loss),
-Approximate round trip times in milli-seconds:
-    Minimum = 11ms, Maximum = 13ms, Average = 12ms";
-
-    const WIN_ZH_OK: &str = "\
-正在 Ping 8.8.8.8 具有 32 字节的数据:
-来自 8.8.8.8 的回复: 字节=32 时间=12ms TTL=57
-来自 8.8.8.8 的回复: 字节=32 时间=11ms TTL=57
-来自 8.8.8.8 的回复: 字节=32 时间=13ms TTL=57
-
-Ping 统计信息:
-    数据包: 已发送 = 3，已接收 = 3，已丢失 = 0 (0% 丢失)，
-往返行程的估计时间(以毫秒为单位):
-    最短 = 11ms，最长 = 13ms，平均 = 12ms";
-
-    const WIN_EN_FULL_LOSS: &str = "\
-Pinging 10.255.255.1 with 32 bytes of data:
-Request timed out.
-Request timed out.
-Request timed out.
-
-Ping statistics for 10.255.255.1:
-    Packets: Sent = 3, Received = 0, Lost = 3 (100% loss),";
-
-    #[test]
-    fn test_parse_ping_unix_ok() {
-        let s = parse_ping_unix(LINUX_OK);
-        assert_eq!(
-            s,
-            PingStats {
-                sent: 3,
-                received: 3,
-                loss_pct: 0.0,
-                rtt_min: 11.8,
-                rtt_avg: 12.433,
-                rtt_max: 13.4,
-                rtt_mdev: 0.702,
-            }
-        );
-    }
-
-    #[test]
-    fn test_parse_ping_unix_full_loss() {
-        let s = parse_ping_unix(LINUX_FULL_LOSS);
-        assert_eq!(s.sent, 3);
-        assert_eq!(s.received, 0);
-        assert_eq!(s.loss_pct, 100.0);
-        // 无 RTT 行时保持零值
-        assert_eq!(s.rtt_min, 0.0);
-        assert_eq!(s.rtt_mdev, 0.0);
-    }
-
-    #[test]
-    fn test_parse_ping_macos() {
-        let s = parse_ping_unix(MACOS_OK);
-        assert_eq!(s.sent, 3);
-        assert_eq!(s.received, 3);
-        assert_eq!(s.loss_pct, 0.0);
-        assert_eq!(s.rtt_min, 11.766);
-        assert_eq!(s.rtt_avg, 12.304);
-        assert_eq!(s.rtt_max, 13.102);
-        assert_eq!(s.rtt_mdev, 0.581);
-    }
-
-    #[test]
-    fn test_parse_ping_windows_en() {
-        let s = parse_ping_windows(WIN_EN_OK);
-        assert_eq!(s.sent, 3);
-        assert_eq!(s.received, 3);
-        assert_eq!(s.loss_pct, 0.0);
-        assert_eq!(s.rtt_min, 11.0);
-        assert_eq!(s.rtt_max, 13.0);
-        assert_eq!(s.rtt_avg, 12.0);
-        assert_eq!(s.rtt_mdev, 0.0);
-    }
-
-    #[test]
-    fn test_parse_ping_windows_zh() {
-        // 位置解析不依赖中文标签，GBK 乱码场景同样成立
-        let s = parse_ping_windows(WIN_ZH_OK);
-        assert_eq!(s.sent, 3);
-        assert_eq!(s.received, 3);
-        assert_eq!(s.loss_pct, 0.0);
-        assert_eq!(s.rtt_min, 11.0);
-        assert_eq!(s.rtt_max, 13.0);
-        assert_eq!(s.rtt_avg, 12.0);
-    }
-
-    #[test]
-    fn test_parse_ping_windows_full_loss() {
-        let s = parse_ping_windows(WIN_EN_FULL_LOSS);
-        assert_eq!(s.sent, 3);
-        assert_eq!(s.received, 0);
-        assert_eq!(s.loss_pct, 100.0);
-        assert_eq!(s.rtt_avg, 0.0);
-    }
-
-    #[test]
-    fn test_parse_ping_garbage() {
-        let s = parse_ping_output(PingFlavor::Unix, "something went wrong\nno stats here");
-        assert_eq!(s, PingStats::default());
-        let s = parse_ping_windows("完全无法识别的输出");
-        assert_eq!(s, PingStats::default());
-    }
 
     #[test]
     fn test_is_safe_host() {
@@ -917,15 +813,18 @@ Ping statistics for 10.255.255.1:
         );
     }
 
+    #[cfg(windows)]
     #[test]
-    fn test_eq_and_pct_helpers() {
-        assert_eq!(
-            eq_values("Sent = 3, Received = 2, Lost = 1"),
-            vec![3.0, 2.0, 1.0]
-        );
-        assert_eq!(pct_in_parens("Lost = 3 (100% loss)"), Some(100.0));
-        assert_eq!(pct_in_parens("no parens here"), None);
-        assert_eq!(tail("abcdef", 3), "def");
-        assert_eq!(tail("ab", 10), "ab");
+    fn test_ping_rtt_stats() {
+        // 空序列全 0
+        assert_eq!(ping_rtt_stats(&[]), (0.0, 0.0, 0.0));
+        // 单包：min/avg/max 相同
+        assert_eq!(ping_rtt_stats(&[12]), (12.0, 12.0, 12.0));
+        // 多包：min/max 取极值，avg 保留 1 位小数（(11+12+13)/3=12.0）
+        assert_eq!(ping_rtt_stats(&[12, 11, 13]), (11.0, 12.0, 13.0));
+        // avg 四舍五入：10+11+12 = 33/3 = 11.0；10+12 = 11.0
+        assert_eq!(ping_rtt_stats(&[10, 12]), (10.0, 11.0, 12.0));
+        // 非整除场景：(10+11)/2 = 10.5
+        assert_eq!(ping_rtt_stats(&[10, 11]), (10.0, 10.5, 11.0));
     }
 }
