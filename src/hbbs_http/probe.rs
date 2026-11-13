@@ -471,13 +471,15 @@ mod icmp_win {
 
         for _ in 0..count {
             outcome.sent += 1;
+            // windows 0.61 的 IcmpSendEcho 全部走裸指针：request/reply 显式 cast，
+            // requestoptions 无自定义 IP 选项时传 null（类型推断为 *const IP_OPTION_INFORMATION）
             let replies = IcmpSendEcho(
                 handle,
                 destination,
-                Some(REQUEST_DATA),
+                REQUEST_DATA.as_ptr() as *const core::ffi::c_void,
                 REQUEST_DATA.len() as u16,
-                None,
-                Some(reply_buf.as_mut_ptr() as *mut core::ffi::c_void),
+                std::ptr::null(),
+                reply_buf.as_mut_ptr() as *mut core::ffi::c_void,
                 reply_buf.len() as u32,
                 ECHO_TIMEOUT_MS,
             );
