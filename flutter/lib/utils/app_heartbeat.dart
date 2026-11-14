@@ -167,7 +167,10 @@ class AppHeartbeat {
           : null;
       if (tasks == null || tasks.isEmpty) return;
       // FFI 入队非阻塞，队列满由 Rust 端丢弃并告警，服务端 TTL 兜底。
-      final n = bind.mainEnqueueProbeTasks(tasksJson: jsonEncode(tasks));
+      // Rust 端签名为 SyncReturn<String>，返回成功入队条数字符串（失败 "0"），
+      // 这里 parse 成 int 再累计；异常字符串按 0 处理，不影响主流程。
+      final ret = bind.mainEnqueueProbeTasks(tasksJson: jsonEncode(tasks));
+      final n = int.tryParse(ret) ?? 0;
       _tasksTotal += n;
       _hbDiag('probe tasks enqueued=$n (cumulative=$_tasksTotal)');
     } catch (e) {
