@@ -4,6 +4,10 @@ use serde_json::{Map, Value};
 
 #[cfg(feature = "flutter")]
 pub mod account;
+// App 级心跳的 Rust 常驻载体（--server 进程），仅桌面端：移动端无服务进程形态，
+// 探测在线由 Dart 侧 AppHeartbeat 单独承担。
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+pub mod app_heartbeat;
 pub mod downloader;
 mod http_client;
 #[cfg(not(target_os = "ios"))]
