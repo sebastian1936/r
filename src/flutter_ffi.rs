@@ -1285,7 +1285,7 @@ fn spawn_headless_display_check() {
                             );
                             return;
                         }
-                        hbb_common::sleep(1).await;
+                        hbb_common::sleep(1.0).await;
                     }
                 }
             }
