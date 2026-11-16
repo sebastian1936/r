@@ -249,6 +249,8 @@ async fn start_hbbs_sync_async() {
                 }
                 let modified_at = LocalConfig::get_option("strategy_timestamp").parse::<i64>().unwrap_or(0);
                 v["modified_at"] = json!(modified_at);
+                // transport（wifi/蜂窝）维度已随探测 PC 化整体下线：移动端不进探测链路，
+                // 桌面节点不再区分网络类型，心跳不再上报该字段。
                 if let Ok(s) = crate::post_request(url.clone(), v.to_string(), "").await {
                     if let Ok(mut rsp) = serde_json::from_str::<HashMap::<&str, Value>>(&s) {
                         if rsp.remove("sysinfo").is_some() {
@@ -274,6 +276,8 @@ async fn start_hbbs_sync_async() {
                                 handle_config_options(strategy.config_options);
                             }
                         }
+                        // 探测任务只走 App 心跳通道（flutter AppHeartbeat，独立于
+                        // stop-service），服务心跳响应不再携带 probe_tasks，此处不处理。
                     }
                 }
             }

@@ -18,7 +18,7 @@ use reqwest::{blocking::Client as SyncClient, Client as AsyncClient};
 
 lazy_static::lazy_static! {
     // 复用 AsyncClient（reqwest Client 内部带连接池，设计上就应全局共享）。
-    // 心跳每 15s 一次，复用后同一台设备只保持 1 条到 API 服务的 keep-alive 连接，
+    // App 心跳每 3s 一次，复用后同一台设备只保持 1 条到 API 服务的 keep-alive 连接，
     // 不再每次新建 TCP + 完整 TLS 握手，可大幅降低服务端的连接 churn / TIME-WAIT / 签名 CPU。
     // key = (TLS 类型, 是否信任非法证书, 代理配置摘要)。
     static ref ASYNC_CLIENT_CACHE: Mutex<HashMap<(u8, bool, Option<String>), AsyncClient>> =

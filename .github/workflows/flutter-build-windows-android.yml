@@ -511,38 +511,28 @@ jobs:
           # 加数据超时+重试，卡住 20s 即断开重连，最多重试 5 次；
           # --no-install-recommends 只装硬依赖，减少下载量，显式列出的 dev 包不受影响。
           echo 'Acquire::Retries "5"; Acquire::http::Timeout "20"; Acquire::https::Timeout "20";' | sudo tee /etc/apt/apt.conf.d/99ci-timeouts
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-               clang \
-               cmake \
-               curl \
-               gcc-multilib \
-               git \
-               g++ \
-               g++-multilib \
-               libayatana-appindicator3-dev \
-               libasound2-dev \
-               libc6-dev \
-               libclang-dev \
-               libunwind-dev \
-               libgstreamer1.0-dev \
-               libgstreamer-plugins-base1.0-dev \
-               libgtk-3-dev \
-               libpam0g-dev \
-               libpulse-dev \
-               libva-dev \
-               libxcb-randr0-dev \
-               libxcb-shape0-dev \
-               libxcb-xfixes0-dev \
-               libxdo-dev \
-               libxfixes-dev \
-               llvm-dev \
-               nasm \
-               ninja-build \
-               openjdk-17-jdk-headless \
-               pkg-config \
-               tree \
-               wget
+          # 另有一类故障是 DNS 持续解析失败（Temporary failure resolving *.ubuntu.com），
+          # 超时重试无法自愈，追加换源兜底：重写 mirrorlist 与 sources 到不同根域镜像站。
+          # 24.04 runner 真实源在 /etc/apt/apt-mirrors.txt（ubuntu.sources 以 mirror+file
+          # 引用），只 sed .list/.sources 不生效，必须重写 mirrorlist（见设计文档 C.26）。
+          switch_apt_mirror() {
+            for mirror in http://mirrors.edge.kernel.org/ubuntu http://mirrors.aliyun.com/ubuntu; do
+              echo "::warning::尝试备用镜像: $mirror"
+              echo "$mirror/" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+              sudo find /etc/apt -maxdepth 2 -type f \( -name '*.list' -o -name '*.sources' \) \
+                -exec sed -i -E \
+                  -e "s|https?://[a-z0-9.]*ubuntu\.com/ubuntu|$mirror|g" \
+                  -e "s|https?://mirrors\.edge\.kernel\.org/ubuntu|$mirror|g" \
+                  -e "s|https?://mirrors\.aliyun\.com/ubuntu|$mirror|g" \
+                  {} +
+              if sudo apt-get update && sudo apt-get install -y --no-install-recommends "$@"; then return 0; fi
+            done
+            return 1
+          }
+          PKGS="clang cmake curl gcc-multilib git g++ g++-multilib libayatana-appindicator3-dev libasound2-dev libc6-dev libclang-dev libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgtk-3-dev libpam0g-dev libpulse-dev libva-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxdo-dev libxfixes-dev llvm-dev nasm ninja-build openjdk-17-jdk-headless pkg-config tree wget"
+          if ! sudo apt-get update || ! sudo apt-get install -y --no-install-recommends $PKGS; then
+            switch_apt_mirror $PKGS || { echo "::error::所有 apt 源均不可用"; exit 1; }
+          fi
 
       - name: Checkout source code
         uses: actions/checkout@v4

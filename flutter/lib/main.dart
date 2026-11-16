@@ -31,6 +31,7 @@ import 'consts.dart';
 import 'mobile/pages/home_page.dart';
 import 'mobile/pages/server_page.dart';
 import 'models/platform_model.dart';
+import 'utils/app_heartbeat.dart';
 import 'utils/endpoints.dart';
 
 import 'package:flutter_hbb/plugin/handlers.dart'
@@ -188,6 +189,10 @@ Future<void> initEnv(String appType) async {
     // 正常在线时不产生 COS 请求
     mobileStartupStep = 'startPeriodicSync';
     EndpointStore.startPeriodicSync();
+    // App 级心跳：独立于 stop-service 开关，App 存活即上报，
+    // 后台据此区分"在线（可被控）"与"App在线（服务未开）"
+    mobileStartupStep = 'startAppHeartbeat';
+    AppHeartbeat.start();
     // connectStatus=-1（连续注册无响应）时立即回源 COS 拉最新线路，
     // 恢复在线后自动停止重试，全平台生效（桌面状态经 IPC 取自服务进程）
     mobileStartupStep = 'serverModel.addListener';

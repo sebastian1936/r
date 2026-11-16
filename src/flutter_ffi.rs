@@ -40,9 +40,12 @@ lazy_static::lazy_static! {
 fn initialize(app_dir: &str, custom_client_config: &str) {
     flutter::async_tasks::start_flutter_async_runner();
     // `APP_DIR` is set in `main_get_data_dir_ios()` on iOS.
+    // Android 上 FFI.onAppStart 可能已提前写入正确目录；空路径永不合法，跳过覆盖。
     #[cfg(not(target_os = "ios"))]
     {
-        *config::APP_DIR.write().unwrap() = app_dir.to_owned();
+        if !app_dir.is_empty() {
+            *config::APP_DIR.write().unwrap() = app_dir.to_owned();
+        }
     }
     // core_main's load_custom_client does not work for flutter since it is only applied to its load_library in main.c
     if custom_client_config.is_empty() {
@@ -2151,6 +2154,30 @@ pub fn main_start_service() {
     }
 }
 
+/// App 心跳通道（source=app）下发的探测任务入队。
+///
+/// 探测 worker 是独立 std 线程（ping/tcp/http），不依赖 rendezvous 中介和
+/// 被控服务，因此 stop-service=Y（用户点了"停止服务"）时任务仍可正常执行，
+/// 探测功能的在线/执行只与 App 进程是否存活挂钩。
+///
+/// 入参为 ProbeTask JSON 数组字符串（与服务心跳通道同结构），
+/// 返回成功入队条数；解析失败返回 "0" 并告警，不影响 App 主流程。
+pub fn main_enqueue_probe_tasks(tasks_json: String) -> SyncReturn<String> {
+    match serde_json::from_str::<Vec<crate::hbbs_http::probe::ProbeTask>>(&tasks_json) {
+        Ok(tasks) => {
+            let n = tasks.len();
+            for task in tasks {
+                crate::hbbs_http::probe::spawn(task);
+            }
+            SyncReturn(n.to_string())
+        }
+        Err(e) => {
+            log::warn!("main_enqueue_probe_tasks parse failed: {}", e);
+            SyncReturn("0".to_string())
+        }
+    }
+}
+
 pub fn main_update_temporary_password() {
     update_temporary_password();
 }
@@ -3049,7 +3076,17 @@ pub mod server_side {
         log::debug!("startServer from jvm");
         let mut env = env;
         if let Ok(app_dir) = env.get_string(&app_dir) {
-            *config::APP_DIR.write().unwrap() = app_dir.into();
+            // 空字符串可能来自 prefs 尚未被 Flutter 同步的纯服务启动（开机/看门狗）。
+            // 此时 FFI.onAppStart 已通过 Context.getDir("flutter") 建立了正确的
+            // APP_DIR，绝不能被空值覆盖，否则 lazy 配置会从错误相对路径加载为空。
+            if !app_dir.is_empty() {
+                *config::APP_DIR.write().unwrap() = app_dir.into();
+            } else {
+                log::warn!(
+                    "startServer got empty app_dir, keep existing APP_DIR: {}",
+                    config::APP_DIR.read().unwrap()
+                );
+            }
         }
         if let Ok(custom_client_config) = env.get_string(&custom_client_config) {
             if !custom_client_config.is_empty() {

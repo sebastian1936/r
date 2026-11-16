@@ -73,6 +73,11 @@ impl RendezvousMediator {
             }
         }
         crate::hbbs_http::sync::start();
+        // App 级心跳（探测在线通道）常驻于 --server 进程：独立于 stop-service，
+        // UI 关闭到托盘/退出、无人登录时仍持续上报，与 Dart 侧心跳双发由服务端
+        // 按 peer id 幂等去重（槽位一次性派发，不会重复探测）。
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        crate::hbbs_http::app_heartbeat::start();
         #[cfg(target_os = "windows")]
         if crate::platform::is_installed() && crate::is_server() && !crate::is_custom_client() {
             crate::updater::start_auto_update();

@@ -3336,10 +3336,16 @@ class QualityMonitorModel with ChangeNotifier {
         : kQualityMonitorAuto;
   }
 
-  checkShowQualityMonitor(SessionID sessionId) async {
-    final show = await bind.sessionGetToggleOption(
+  /// [manual] 表示本次刷新来自用户在工具栏的手动切换，而非连接初始化时
+  /// 读取 PeerConfig 持久值。全局 off 模式下，初始化要忽略该设备历史手动
+  /// 勾选残留的 show_quality_monitor=true，否则 off 仍会被 peer 级
+  /// _showOption 压住（show = _showOption || _showAuto）；手动切换始终尊重，
+  /// 保留"本次会话临时打开"的能力。
+  checkShowQualityMonitor(SessionID sessionId, {bool manual = false}) async {
+    final persisted = await bind.sessionGetToggleOption(
             sessionId: sessionId, arg: 'show-quality-monitor') ==
         true;
+    final show = (!manual && _mode == kQualityMonitorOff) ? false : persisted;
     if (_showOption != show) {
       _showOption = show;
       notifyListeners();

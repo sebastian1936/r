@@ -593,7 +593,8 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
       onChanged: (value) async {
         if (value == null) return;
         await bind.sessionToggleOption(sessionId: sessionId, value: option);
-        ffi.qualityMonitorModel.checkShowQualityMonitor(sessionId);
+        ffi.qualityMonitorModel
+            .checkShowQualityMonitor(sessionId, manual: true);
       },
       child: Text(translate('Show quality monitor'))));
   // mute
