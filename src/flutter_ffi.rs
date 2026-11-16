@@ -1226,6 +1226,100 @@ pub fn main_get_connect_status() -> String {
 pub fn main_check_connect_status() {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     start_option_status_sync(); // avoid multi calls
+    #[cfg(windows)]
+    spawn_headless_display_check();
+}
+
+#[cfg(windows)]
+static HEADLESS_DISPLAY_CHECK_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 无头机（未接/未开显示器）启动时，通过 IPC 请求系统服务插入 IDD 虚拟显示器，
+/// 让系统存在活动显示输出，Flutter(ANGLE/D3D) 窗口才不会白屏。
+///
+/// 全程在独立后台线程执行：无头检测、IPC 连接、驱动安装等待均不阻塞 UI 启动；
+/// 便携版/服务未运行/超时等失败路径只记录日志，不影响客户端任何现有功能。
+#[cfg(windows)]
+fn spawn_headless_display_check() {
+    if HEADLESS_DISPLAY_CHECK_STARTED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    std::thread::spawn(|| {
+        // 避开进程启动高峰，并等待服务 IPC listener 就绪
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        if !crate::platform::is_headless_display() {
+            return;
+        }
+        log::info!("headless machine detected, request virtual display via service ipc");
+        let rt = match hbb_common::tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                log::error!("headless display: build tokio runtime failed: {e}");
+                return;
+            }
+        };
+        rt.block_on(async {
+            // 首次安装时服务可能仍在启动（杀软扫描、磁盘繁忙），单次连接容易失败，
+            // 这里在 15s 内重试，兼顾便携版/服务未安装时的退出速度。
+            let mut conn = None;
+            for i in 0..15u8 {
+                match crate::ipc::connect(1000, "").await {
+                    Ok(c) => {
+                        conn = Some(c);
+                        break;
+                    }
+                    Err(e) => {
+                        if i == 14 {
+                            // 便携版或服务未运行：没有提权通道安装/控制 IDD 驱动，安静退出
+                            log::warn!(
+                                "headless display: service unavailable, skip virtual display: {e}"
+                            );
+                            return;
+                        }
+                        hbb_common::sleep(1).await;
+                    }
+                }
+            }
+            let mut conn = match conn {
+                Some(c) => c,
+                None => return,
+            };
+            if let Err(e) = conn
+                .send(&crate::ipc::Data::PlugInHeadlessDisplay)
+                .await
+            {
+                log::error!("headless display: ipc send failed: {e}");
+                return;
+            }
+            // 首次安装驱动并等待显示设备就绪可能较慢，上限 30s
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while std::time::Instant::now() < deadline {
+                match conn.next_timeout(1000).await {
+                    Ok(Some(crate::ipc::Data::PlugInHeadlessDisplayResult(r))) => match r {
+                        Ok(()) => log::info!(
+                            "headless display: virtual display plugged in by service"
+                        ),
+                        Err(e) => {
+                            log::error!("headless display: service plug-in failed: {e}")
+                        }
+                    },
+                    Ok(None) => {
+                        log::warn!("headless display: service closed ipc without result");
+                        return;
+                    }
+                    Ok(Some(_)) => {}
+                    Err(_) => {}
+                }
+            }
+            log::error!("headless display: wait service result timeout (30s)");
+        });
+    });
 }
 
 pub fn main_is_using_public_server() -> bool {

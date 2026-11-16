@@ -2444,6 +2444,40 @@ pub fn resolutions(name: &str) -> Vec<Resolution> {
     }
 }
 
+/// Detect a headless machine (no physical monitor attached or powered on).
+///
+/// Keep this in sync with `no_displays()` in `server/display_service.rs`.
+/// Windows may keep a ghost display at <= 1024px when no monitor is connected,
+/// so a single tiny display without any larger available mode is treated as headless.
+/// Returns false when enumeration fails, to avoid plugging in a virtual display by mistake.
+pub fn is_headless_display() -> bool {
+    const DUMMY_DISPLAY_SIDE_MAX_SIZE: usize = 1024;
+    let displays = match scrap::Display::all() {
+        Ok(displays) => displays,
+        Err(e) => {
+            log::error!("Failed to enumerate displays for headless check: {}", e);
+            return false;
+        }
+    };
+    if displays.is_empty() {
+        return true;
+    }
+    if displays.len() != 1 {
+        return false;
+    }
+    let display = &displays[0];
+    if display.width() > DUMMY_DISPLAY_SIDE_MAX_SIZE
+        || display.height() > DUMMY_DISPLAY_SIDE_MAX_SIZE
+    {
+        return false;
+    }
+    let any_real = resolutions(&display.name()).iter().any(|r| {
+        r.height as usize > DUMMY_DISPLAY_SIDE_MAX_SIZE
+            || r.width as usize > DUMMY_DISPLAY_SIDE_MAX_SIZE
+    });
+    !any_real
+}
+
 pub fn current_resolution(name: &str) -> ResultType<Resolution> {
     let device_name = str_to_device_name(name);
     unsafe {
