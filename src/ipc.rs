@@ -296,6 +296,13 @@ pub enum Data {
     ManualUploadLogs,
     #[cfg(windows)]
     ManualUploadLogsResult(Result<(), String>),
+    // 用户态 UI 检测到无头环境（未接/未开显示器）时，请求 LocalSystem 服务
+    // 插入 IDD 虚拟显示器：让系统存在活动显示输出，Flutter(ANGLE/D3D) 窗口
+    // 在无头机上才不会白屏。驱动安装需要服务权限，故必须经 IPC 代办。
+    #[cfg(windows)]
+    PlugInHeadlessDisplay,
+    #[cfg(windows)]
+    PlugInHeadlessDisplayResult(Result<(), String>),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -672,6 +679,15 @@ async fn handle(data: Data, stream: &mut Connection) {
                     .map_err(|e| e.to_string())
             };
             allow_err!(stream.send(&Data::ManualUploadLogsResult(result)).await);
+        }
+        // 服务（LocalSystem）代用户态 UI 插入无头虚拟显示器。
+        // plug_in_headless() 内部已有平台/安装版校验与 5s 节流，
+        // 驱动缺失或安装失败会以 Err 返回，由 UI 侧记录日志。
+        #[cfg(windows)]
+        Data::PlugInHeadlessDisplay => {
+            let result = crate::virtual_display_manager::plug_in_headless()
+                .map_err(|e| e.to_string());
+            allow_err!(stream.send(&Data::PlugInHeadlessDisplayResult(result)).await);
         }
         Data::TestRendezvousServer => {
             crate::test_rendezvous_server();
