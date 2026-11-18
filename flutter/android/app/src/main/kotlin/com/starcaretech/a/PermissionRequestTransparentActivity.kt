@@ -208,7 +208,7 @@ class PermissionRequestTransparentActivity: Activity() {
         val km = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
         com.starcaretech.a.adb.AdbAuthManager.trace(
             applicationContext,
-            "录屏透明页#$stage hasFocus=$hasWindowFocus() finishing=$isFinishing " +
+            "录屏透明页#$stage hasFocus=${hasWindowFocus()} finishing=$isFinishing " +
                 "captureLaunched=$captureLaunched pendingFocus=$launchPendingFocus " +
                 "locked=${km?.isKeyguardLocked}")
     }
