@@ -92,10 +92,16 @@
             </intent-filter>
         </activity>
 
+        <!-- taskAffinity=""：独立 task，不再与 MainActivity 共享默认 affinity，
+             避免 FSI 展开时 MainActivity 被同 task 连带拉起抢焦点，导致本页
+             2 秒内被 keyguard/任务清理连带销毁（实测 8 次空转的根因之一）。
+             若真机发现空 affinity 使 FSI 退化为普通通知，改用唯一命名
+             affinity（如 com.starcaretech.a.projection）后重测。 -->
         <activity
             android:name=".PermissionRequestTransparentActivity"
             android:excludeFromRecents="true"
             android:launchMode="singleTask"
+            android:taskAffinity=""
             android:theme="@style/Transparent" />
 
         <activity

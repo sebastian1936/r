@@ -134,28 +134,43 @@ class PermissionRequestTransparentActivity: Activity() {
         // 自动点击。有安全锁屏时回调立即取消，走旧路径（锁屏之上直弹）兜底。
         val keyguardManager =
             getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-        if (bootAutoConsent &&
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-            keyguardManager?.isKeyguardLocked == true
+        // 无密码（滑动/无）锁屏：无论入口是开机武装、FSI 全屏通知展开还是用户
+        // 手点通知，都先代码解散锁屏，解散成功后在真前台再弹系统确认框。
+        // 有安全锁屏（PIN/图案/密码）绝不进此分支——系统安全边界不允许绕过，
+        // 行为与旧版完全一致（最终由 MainService 门控拦在通知引导）。
+        val secureLocked = MainService.isDeviceSecureLocked(this)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            keyguardManager?.isKeyguardLocked == true &&
+            !secureLocked
         ) {
             try {
-                Log.i(logTag, "开机自动授权：锁屏中，先请求代码解散无密码锁屏")
+                com.starcaretech.a.adb.AdbAuthManager.trace(
+                    applicationContext,
+                    "录屏透明页：无密码锁屏，请求 requestDismissKeyguard（bootAuto=$bootAutoConsent）")
+                Log.i(logTag, "无密码锁屏中（bootAuto=$bootAutoConsent），先请求代码解散锁屏")
                 autoFinishHandler.postDelayed(dismissFallback, DISMISS_FALLBACK_MS)
                 keyguardManager.requestDismissKeyguard(
                     this,
                     object : KeyguardManager.KeyguardDismissCallback() {
                         override fun onDismissSucceeded() {
+                            com.starcaretech.a.adb.AdbAuthManager.trace(
+                                applicationContext,
+                                "锁屏已解散（onDismissSucceeded），真前台发起确认框")
                             Log.i(logTag, "锁屏已解散（onDismissSucceeded），准备在真前台发起录屏确认框")
                             scheduleCaptureAfterFocus()
                         }
 
                         override fun onDismissCancelled() {
-                            // 有安全锁屏需凭据（开机武装本不该放行到此，双保险）
-                            Log.i(logTag, "解散锁屏被取消（可能需要凭据），回退锁屏之上直弹")
+                            // 理论上无密码锁屏不会走到；走到说明 ROM 行为变化，回退旧路径
+                            com.starcaretech.a.adb.AdbAuthManager.trace(
+                                applicationContext, "解散被取消，回退锁屏之上直弹")
+                            Log.i(logTag, "解散锁屏被取消，回退锁屏之上直弹")
                             scheduleCaptureAfterFocus()
                         }
 
                         override fun onDismissError() {
+                            com.starcaretech.a.adb.AdbAuthManager.trace(
+                                applicationContext, "解散出错，回退锁屏之上直弹")
                             Log.w(logTag, "解散锁屏出错，回退锁屏之上直弹")
                             scheduleCaptureAfterFocus()
                         }
@@ -163,10 +178,14 @@ class PermissionRequestTransparentActivity: Activity() {
                 )
                 return
             } catch (e: Exception) {
+                com.starcaretech.a.adb.AdbAuthManager.trace(
+                    applicationContext,
+                    "requestDismissKeyguard 异常，回退锁屏之上直弹：${e.javaClass.simpleName}")
                 Log.w(logTag, "requestDismissKeyguard 异常，回退锁屏之上直弹", e)
             }
         }
 
+        // 有密码锁屏 / 未上锁 / SDK 低：保持旧路径
         scheduleCaptureAfterFocus()
     }
 
@@ -178,6 +197,35 @@ class PermissionRequestTransparentActivity: Activity() {
         if (hasFocus && launchPendingFocus && !captureLaunched) {
             launchCaptureIntent()
         }
+    }
+
+    /**
+     * 生命周期全链路埋点：下次日志可直接区分「FSI 未展开（页根本没 created）」
+     * 「keyguard 清理（created→destroy 无 pause 之外信息）」「焦点丢失
+     * （pause/stop 时序）」三类死因，无需再复现抓 logcat。
+     */
+    private fun lifecycleTrace(stage: String) {
+        val km = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        com.starcaretech.a.adb.AdbAuthManager.trace(
+            applicationContext,
+            "录屏透明页#$stage hasFocus=$hasWindowFocus() finishing=$isFinishing " +
+                "captureLaunched=$captureLaunched pendingFocus=$launchPendingFocus " +
+                "locked=${km?.isKeyguardLocked}")
+    }
+
+    override fun onResume() {
+        super.onResume()
+        lifecycleTrace("onResume")
+    }
+
+    override fun onPause() {
+        super.onPause()
+        lifecycleTrace("onPause")
+    }
+
+    override fun onStop() {
+        super.onStop()
+        lifecycleTrace("onStop")
     }
 
     /**
@@ -267,6 +315,8 @@ class PermissionRequestTransparentActivity: Activity() {
             InputService.endConsentWait()
             MainService.endProjectionRequest()
         }
+        // 必须在 super.onDestroy() 前取窗口/锁屏状态，销毁后状态可能已翻转
+        lifecycleTrace("onDestroy")
         super.onDestroy()
     }
 

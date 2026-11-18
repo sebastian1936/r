@@ -1822,6 +1822,7 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
   /// 客户端再硬过滤一次，防止无线调试/功能权限项串入）
   static const Set<String> keepAliveKeys = {
     "notification",
+    "full_screen_intent",
     "battery_optimization",
     "miui_battery_unrestricted",
     "overlay",
@@ -1913,6 +1914,14 @@ class _EnvCheckDialogState extends State<_EnvCheckDialog>
     "notification": [
       "通知权限",
       "允许通知：用于服务常驻运行提示；配对时配对码也在通知栏输入",
+      true,
+    ],
+    "full_screen_intent": [
+      "全屏通知权限（安卓14+必开）",
+      "点「去开启」，在系统设置中打开本应用的「全屏通知」（部分机型叫"
+          "「全屏 Intent」）。未开启时，锁屏后录屏失效的恢复通知只会显示"
+          "为普通横幅、无法自动弹出授权页，远程画面不能自动恢复。"
+          "安卓13及以下系统默认授予，本项显示正常即可",
       true,
     ],
     "overlay": [

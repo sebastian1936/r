@@ -456,6 +456,29 @@ class MainService : Service() {
             pendingKeepScreenOn = on
             keepAwakeInstance?.applyKeepScreenOn(on)
         }
+
+        /**
+         * 设备是否设置了安全锁屏（PIN/图案/密码）的静态版本：
+         * 供无 Service 实例持有方（如 PermissionRequestTransparentActivity）判定。
+         * 拿不到 KeyguardManager 或读取异常时一律按 true（安全侧）处理，
+         * 保守不解散锁屏，避免在有密码设备上误触 requestDismissKeyguard。
+         */
+        @JvmStatic
+        fun isDeviceSecureLocked(ctx: Context): Boolean {
+            val km = ctx.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+                ?: return true
+            return try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    km.isDeviceSecure
+                } else {
+                    @Suppress("DEPRECATION")
+                    km.isKeyguardSecure
+                }
+            } catch (e: Exception) {
+                Log.w("LOG_SERVICE", "静态读取锁屏安全状态失败，按有安全锁屏处理", e)
+                true
+            }
+        }
     }
 
     private val logTag = "LOG_SERVICE"
@@ -1641,21 +1664,10 @@ class MainService : Service() {
         Log.i(logTag, "开机自动恢复解除武装：$reason")
     }
 
-    /** 设备是否设置了安全锁屏（PIN/图案/密码）；无法判断时按 true（安全侧）处理 */
-    private fun isDeviceSecureLocked(): Boolean {
-        val km = keyguardManager ?: return true
-        return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                km.isDeviceSecure
-            } else {
-                @Suppress("DEPRECATION")
-                km.isKeyguardSecure
-            }
-        } catch (e: Exception) {
-            Log.w(logTag, "读取锁屏安全状态失败，按有安全锁屏处理", e)
-            true
-        }
-    }
+    /** 设备是否设置了安全锁屏（PIN/图案/密码）；无法判断时按 true（安全侧）处理。
+     *  委托 companion 静态版本，保持现有两个调用点（promptProjectionRecovery、
+     *  armBootAutoPromptIfUnsecured）签名不变。 */
+    private fun isDeviceSecureLocked(): Boolean = isDeviceSecureLocked(this)
 
     /** 当前是否处于录屏短命失效熔断态（熔断时开机自动弹框也必须让路） */
     private fun isProjectionFused(): Boolean =
@@ -1687,8 +1699,15 @@ class MainService : Service() {
                 .setAutoCancel(true)
                 .setContentTitle(if (fused) "录屏权限开启失败" else "录屏授权已失效")
                 .setContentText(
-                    if (fused) "请点击重试（已停止自动弹窗）"
-                    else "点击即可自动恢复，无需手动确认"
+                    when {
+                        fused -> "请点击重试（已停止自动弹窗）"
+                        // FSI 未授予时 setFullScreenIntent 退化为普通横幅通知，
+                        // 透明页不会被系统自动展开：文案提示手动点击并去开启
+                        // 「全屏通知」权限（检测项 full_screen_intent 可直达）
+                        !EnvCheckManager.canUseFullScreenIntent(this) ->
+                            "点击即可恢复；若未自动弹出，请先开启本应用的全屏通知权限"
+                        else -> "点击即可自动恢复，无需手动确认"
+                    }
                 )
                 .setContentIntent(pendingIntent)
                 // 锁屏/无前台界面时由系统直接展开为全屏授权页

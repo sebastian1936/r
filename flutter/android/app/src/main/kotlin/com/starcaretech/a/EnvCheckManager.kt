@@ -150,6 +150,11 @@ object EnvCheckManager {
             "notification",
             checkNotification(context, checkPairingChannel = checkPairingChannel)
         )
+        // 全屏 Intent（FSI）权限：录屏恢复通知靠它在锁屏上自动展开为透明
+        // 授权页。Android14+ 非通话类应用可能默认不授予，未授予时
+        // setFullScreenIntent 退化为普通横幅通知，透明页根本不会被自动
+        // 展开（锁屏录屏自愈链路的前置条件）。保活检查同样需要展示。
+        items += Item("full_screen_intent", checkFullScreenIntent(context))
         // 电池「无限制/不受限制」不是小米专有：Android 6+ 全系都有
         // Doze 电池优化白名单（isIgnoringBatteryOptimizations 为通用 API），
         // 只是 MIUI 的设置入口和文案不同——小米下发 MIUI 专属项直达私有页，
@@ -371,6 +376,31 @@ object EnvCheckManager {
         return STATUS_OK
     }
 
+    /**
+     * 全屏 Intent（FSI）权限检测。Android14（API34）起非通话类应用的
+     * USE_FULL_SCREEN_INTENT 可能默认不授予：未授予时通知的
+     * setFullScreenIntent 退化为普通横幅，录屏恢复透明页不会被系统自动
+     * 展开，锁屏自愈链路从第一环就断了。API34 以下该权限随清单声明
+     * 自动授予，恒 ok；取不到服务/探测异常给 unknown，不硬拦流程。
+     */
+    private fun checkFullScreenIntent(context: Context): String {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            return STATUS_OK
+        }
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE)
+            as? android.app.NotificationManager ?: return STATUS_UNKNOWN
+        return try {
+            if (nm.canUseFullScreenIntent()) STATUS_OK else STATUS_OFF
+        } catch (e: Throwable) {
+            Log.w(TAG, "canUseFullScreenIntent probe fail", e)
+            STATUS_UNKNOWN
+        }
+    }
+
+    /** 供 MainService 恢复通知文案复用同一判定：不可用时文案提示手动开启 */
+    fun canUseFullScreenIntent(context: Context): Boolean =
+        checkFullScreenIntent(context) == STATUS_OK
+
     private fun checkOverlay(context: Context): String =
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)) {
             STATUS_OK
@@ -531,6 +561,10 @@ object EnvCheckManager {
 
             "notification" -> openNotificationSettings(appContext)
 
+            // Android14+「全屏通知/全屏 Intent」权限页；该权限没有常规
+            // runtime 申请 API，只能引导用户手动开启
+            "full_screen_intent" -> openFullScreenIntentSettings(appContext)
+
             "overlay" ->
                 launch(
                     appContext,
@@ -680,6 +714,25 @@ object EnvCheckManager {
             if (launch(context, intent)) return true
         }
         return openAppDetails(context)
+    }
+
+    /**
+     * 直达「全屏通知 / 全屏 Intent」权限页（Android14+）。该权限没有常规
+     * runtime 申请 API，无法静默授予，只能跳设置页由用户手动开启；
+     * API34 以下无此页面，回退应用详情页（实际也恒为授予态）。
+     */
+    private fun openFullScreenIntentSettings(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            return openAppDetails(context)
+        }
+        val ok = launch(
+            context,
+            Intent(
+                Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                Uri.parse("package:${context.packageName}")
+            )
+        )
+        return if (ok) true else openAppDetails(context)
     }
 
     private fun openBatterySettings(context: Context): Boolean {
