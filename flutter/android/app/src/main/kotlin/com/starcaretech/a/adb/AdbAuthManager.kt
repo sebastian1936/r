@@ -288,6 +288,25 @@ object AdbAuthManager {
         throw AuthException(baseHint + diagTrailer)
     }
 
+    /** 供 MainService 无人值守恢复复用的 shell 执行结果 */
+    data class ShellScriptResult(
+        val connected: Boolean,
+        val output: String,
+        val attempts: List<String>
+    )
+
+    /**
+     * 在已配对设备上执行一段 adb shell 复合脚本（内含 mDNS 发现/TLS 握手/
+     * 分阶段重试全套）。含网络 IO 与 Thread.sleep，**禁止主线程调用**；
+     * 调用方需先过 [isPaired] 门控并自行节流。
+     * connected=false 表示 adbd 不可达（无线调试被 ROM 关闭/配对钥匙失效等）。
+     */
+    fun executeShellScript(context: Context, script: String): ShellScriptResult {
+        val identity = AdbKeyStore.getOrCreate(context)
+        val run = runShellWithRetry(context, identity, null) { script }
+        return ShellScriptResult(run.connected, run.output, run.attempts)
+    }
+
     /**
      * 分两阶段重试，避免"找不到端口"和"认证被拒"白等几十秒：
      *  - 发现阶段：最多 2 轮 mDNS（15s + 8s 短窗）

@@ -344,6 +344,13 @@ class MainService : Service() {
         // 无障碍连入自愈失败的引导通知（区别于录屏恢复通知）
         const val INPUT_RECOVERY_NOTIFY_ID = 3
 
+        /** ADB shell 无人值守自动恢复：两次发起的最小间隔（节流） */
+        private const val ADB_RECOVER_THROTTLE_MS = 30_000L
+        /** 连续失败此次数后熔断，仅按探活间隔重试（无线调试可能被 ROM 关闭） */
+        private const val ADB_RECOVER_MAX_FAILURES = 3
+        /** 熔断后的探活间隔：给无线调试被重新打开留恢复窗口 */
+        private const val ADB_RECOVER_PROBE_MS = 10 * 60_000L
+
         /** 连入自愈两次尝试的最小间隔，防弱网重连/多个主控连入时重复扫描 */
         private const val INPUT_HEAL_THROTTLE_MS = 60_000L
         @Volatile
@@ -491,6 +498,17 @@ class MainService : Service() {
     private var mediaProjection: MediaProjection? = null
     private var projectionCallback: MediaProjection.Callback? = null
 
+    /**
+     * 进程内内存态授权 Intent（无人值守静默恢复首选）。
+     * 部分国产 ROM（vivo Android16 实测）的授权结果 Intent 含 Binder，
+     * Parcel marshall 落盘必然失败，但同进程持有原始 Intent 不受影响；
+     * targetSdk=33 走 legacy 路径，onStop 被系统收回后仍可用它重新
+     * getMediaProjection，全程无需 Activity/弹窗，绕开锁屏与后台 BAL 限制。
+     * 进程被杀即失效，届时回退落盘缓存/恢复通知/ADB shell 自动链。
+     */
+    @Volatile
+    private var inMemoryProjectionIntent: Intent? = null
+
     /** 服务主动销毁标记：为 true 时忽略系统迟到的 MediaProjection.onStop 回调 */
     @Volatile
     private var serviceDestroyed = false
@@ -516,6 +534,12 @@ class MainService : Service() {
     /** 上次自动拉起授权页时间（3s 去抖，多触发源只发一次） */
     @Volatile
     private var lastAutoPromptMs = 0L
+    /** 上次 ADB shell 无人值守自动恢复发起时刻（节流，含 mDNS/TLS 成本） */
+    @Volatile
+    private var lastAdbRecoverMs = 0L
+    /** ADB shell 自动恢复连续失败次数（熔断：无线调试被 ROM 关闭时不空转） */
+    @Volatile
+    private var adbRecoverFailures = 0
 
     // ---- 开机全自动恢复录屏（实验，仅无安全锁屏设备）----
     // 重启后无密码（滑动/无）锁屏设备：BOOT_COMPLETED 武装一个短窗口，窗口内
@@ -806,6 +830,8 @@ class MainService : Service() {
 
     private var surface: Surface? = null
     private val sendVP9Thread = Executors.newSingleThreadExecutor()
+    /** ADB shell 无人值守恢复专用单线程：mDNS 发现/TLS 握手均为阻塞 IO，与采集线程隔离 */
+    private val adbRecoverExecutor = Executors.newSingleThreadExecutor()
     private var videoEncoder: MediaCodec? = null
     private var imageReader: ImageReader? = null
     private var virtualDisplay: VirtualDisplay? = null
@@ -1100,6 +1126,8 @@ class MainService : Service() {
         projectionCallback?.let { cb -> runCatching { mediaProjection?.unregisterCallback(cb) } }
         projectionCallback = null
         mediaProjection = null
+        // 用户主动关服：内存授权一并作废，下次启动重新走完整授权
+        inMemoryProjectionIntent = null
         checkMediaPermission()
         runCatching { unregisterReceiver(screenStateReceiver) }
         releaseKeepAlive()
@@ -1260,12 +1288,17 @@ class MainService : Service() {
                             // 同步失败同样计入熔断，避免异常 ROM 下"点允许→秒失败→再弹"的死循环
                             promptProjectionRecovery(recordProjectionFailure())
                         } else {
+                            // 内存态保留原始 Intent：含 Binder 也无所谓，不跨进程 marshall，
+                            // 供 onStop 收回后在本进程内静默重建（落盘缓存失败机型的主力恢复路径）
+                            inMemoryProjectionIntent = token
                             MediaProjectionTokenStore.save(this, token)
                             _isReady = true
                             disarmBootAutoPrompt("录屏授权已就绪")
                             // 用户完成了一次有效授权：历史短命失败计数全部清零，
                             // 否则熔断后手动成功一次，下次单次抖动又会立即熔断
                             shortLivedProjectionFailures = 0
+                            // ADB shell 恢复熔断同步解除
+                            adbRecoverFailures = 0
                             endProjectionRequest()
                             // checkMediaPermission 内部会撤下恢复通知并同步 Dart 状态
                             checkMediaPermission()
@@ -1374,18 +1407,41 @@ class MainService : Service() {
         }
     }
 
-    /** 尝试用缓存的授权 Intent 静默恢复；成功返回 true，失败（无缓存/失效）返回 false */
+    /**
+     * 尝试静默恢复 MediaProjection；成功返回 true，失败（无缓存/失效）返回 false。
+     * 恢复顺序：① 进程内内存授权 Intent（含 Binder 无法落盘的 ROM 也能用，
+     * 且无需弹窗/前台，锁屏后台均可）→ ② 落盘缓存（部分 Android 11~13 机型）。
+     */
     @Synchronized
     fun tryRestoreMediaProjection(
         manager: MediaProjectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
     ): Boolean {
         if (mediaProjection != null) return true
+        // ① 内存态优先：绕开 Binder 无法 marshall 的 ROM 限制与一切 Activity/前台约束
+        val memToken = inMemoryProjectionIntent
+        if (memToken != null) {
+            if (applyProjection(manager, memToken)) {
+                Log.i(logTag, "MediaProjection 已用内存授权静默恢复（无需弹窗）")
+                adbRecoverFailures = 0
+                _isReady = true
+                disarmBootAutoPrompt("内存授权静默恢复成功")
+                checkMediaPermission()
+                resumeCaptureIfWanted()
+                return true
+            }
+            // ROM 拒绝复用（SecurityException/IllegalStateException）：内存 token 作废，
+            // 落盘缓存存的是同一 Intent，大概率同样失效，但仍按顺序试一次以兼容历史机型
+            Log.w(logTag, "内存授权 Intent 复用失败，清除后尝试落盘缓存")
+            inMemoryProjectionIntent = null
+        }
+        // ② 落盘缓存（老机型同开机周期内 marshall 可恢复的路径）
         val token = MediaProjectionTokenStore.load(this) ?: return false
         if (!applyProjection(manager, token)) {
             MediaProjectionTokenStore.clear(this)
             return false
         }
         Log.i(logTag, "MediaProjection 已用缓存授权静默恢复")
+        adbRecoverFailures = 0
         _isReady = true
         disarmBootAutoPrompt("缓存授权静默恢复成功")
         checkMediaPermission()
@@ -1604,8 +1660,11 @@ class MainService : Service() {
                 logTag,
                 "非可交互前台（亮屏=$screenOn 解锁=$unlocked 前台=$foreground），仅通知引导，不自动弹录屏框"
             )
-            // 被控时 App 必然在后台：这是"30 秒仍无画面"的典型结局——
-            // 只发了恢复通知，需要人点通知（或无障碍后续拉起）才能弹系统确认框
+            // 被控时 App 必然在后台：这是"30 秒仍无画面"的典型结局。
+            // 无人值守兜底：已配对无线 ADB 时，由 shell(uid 2000，豁免 BAL)
+            // 自动亮屏/解散无密码锁屏/拉起授权页，无障碍随后自动点确认，
+            // 不依赖任何人点通知；未配对/有安全锁屏时内部自行短路。
+            tryAdbShellAutoRecovery()
             return "background_notice(on=$screenOn,unlocked=$unlocked,fg=$foreground)"
         }
         // 仅自动流程携带：透明页据此 30s 无人应答自毁，服务才能在 45s/90s 补弹。
@@ -1675,6 +1734,83 @@ class MainService : Service() {
             SystemClock.elapsedRealtime() - projectionFailWindowStartMs <= PROJECTION_FUSE_WINDOW_MS
 
     private fun requestMediaProjectionWithNotice() = promptProjectionRecovery(fused = false)
+
+    /**
+     * 无人值守兜底（ADB shell 全自动重授权链）：借已配对的无线 ADB，
+     * 用 shell(uid 2000) 完成"亮屏 → 解散无密码锁屏 → 拉起透明授权页"。
+     *
+     * 为什么能全自动：
+     * - shell 启动 Activity 天然豁免后台启动限制（BAL），App 在后台/锁屏也能拉前台；
+     * - 无密码（滑动/无）锁屏可由 wm/input 直接解散，无需凭据；
+     * - 授权页弹出后 InputService 无障碍自动点"立即开始"（既有能力）。
+     * 有 PIN/图案/密码的设备越不过系统凭据边界，直接短路。
+     *
+     * 含 mDNS 发现与 TLS 握手（秒级阻塞），只在 [adbRecoverExecutor] 后台执行；
+     * 带 30s 节流与连续失败熔断（无线调试被 ROM 夜间关闭时不空转耗电）。
+     */
+    private fun tryAdbShellAutoRecovery() {
+        if (serviceDestroyed || _isReady || mediaProjection != null) return
+        if (projectionRequestInFlight) return
+        // 安全锁屏必须有人输入凭据，shell 同样无法绕过，不做无意义尝试
+        if (isDeviceSecureLocked()) return
+        if (!com.starcaretech.a.adb.AdbAuthManager.isPaired(this)) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastAdbRecoverMs < ADB_RECOVER_THROTTLE_MS) return
+        if (adbRecoverFailures >= ADB_RECOVER_MAX_FAILURES &&
+            now - lastAdbRecoverMs < ADB_RECOVER_PROBE_MS
+        ) {
+            Log.i(
+                logTag,
+                "ADB shell 自动恢复熔断中（连续失败 $adbRecoverFailures 次），等待下次探活窗口"
+            )
+            return
+        }
+        lastAdbRecoverMs = now
+        adbRecoverExecutor.execute {
+            val pkg = packageName
+            // 单条复合脚本一次连接跑完，避免每个动作都付一次 mDNS 发现+TLS 往返
+            val script = buildString {
+                appendLine("input keyevent KEYCODE_WAKEUP 2>/dev/null")
+                appendLine("sleep 1")
+                // 优先系统解散接口；被 ROM 拒绝（vivo 实测 requestDismissKeyguard 同路径）
+                // 时，下面的上滑手势兜底
+                appendLine("wm dismiss-keyguard 2>/dev/null")
+                appendLine("size=\$(wm size 2>/dev/null | grep -oE '[0-9]+x[0-9]+' | tail -1)")
+                appendLine("w=\${size%x*}; h=\${size#*x}")
+                appendLine("if [ -n \"\$w\" ] && [ -n \"\$h\" ]; then input swipe \$((w/2)) \$((h*4/5)) \$((w/2)) \$((h/5)) 300 2>/dev/null; fi")
+                appendLine("sleep 1")
+                // shell uid 2000 豁免 BAL；FLAG_ACTIVITY_NEW_TASK(0x10000000)
+                // 与 Service 侧 startActivity 的 flags 对齐；带自毁标记防永久挂起
+                appendLine("am start -n $pkg/.PermissionRequestTransparentActivity -a $ACT_REQUEST_MEDIA_PROJECTION --ez $EXT_BOOT_AUTO_CONSENT true -f 0x10000000 2>&1")
+                appendLine("echo RC_AM=\$?")
+            }
+            try {
+                val result = com.starcaretech.a.adb.AdbAuthManager
+                    .executeShellScript(applicationContext, script)
+                if (result.connected) {
+                    adbRecoverFailures = 0
+                    Log.i(logTag, "ADB shell 自动恢复脚本已执行，输出：${result.output.take(300)}")
+                    com.starcaretech.a.adb.AdbAuthManager.trace(
+                        applicationContext,
+                        "adb shell 自动恢复：已亮屏/解散锁屏/拉起授权页 output=${result.output.take(200)}"
+                    )
+                } else {
+                    adbRecoverFailures += 1
+                    Log.w(
+                        logTag,
+                        "ADB shell 自动恢复连接失败（第 $adbRecoverFailures 次），adbd 不可达（无线调试可能被关闭）"
+                    )
+                    com.starcaretech.a.adb.AdbAuthManager.trace(
+                        applicationContext,
+                        "adb shell 自动恢复连接失败 #$adbRecoverFailures"
+                    )
+                }
+            } catch (e: Exception) {
+                adbRecoverFailures += 1
+                Log.w(logTag, "ADB shell 自动恢复异常（第 $adbRecoverFailures 次）", e)
+            }
+        }
+    }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
@@ -1788,6 +1924,13 @@ class MainService : Service() {
         com.starcaretech.a.adb.AdbAuthManager.trace(
             applicationContext, "startCapture: enter（vp9=$useVP9 projection=${mediaProjection != null}）")
         if (mediaProjection == null) {
+            // ① 先试静默恢复（内存 token 优先、落盘缓存兜底）：成功则零 UI 续采，
+            //    锁屏/后台均可完成，避免走到亮屏拉页的 shell 链或等人点通知。
+            //    本方法与 startCapture 同为实例锁，同线程递归重入安全。
+            if (tryRestoreMediaProjection()) {
+                Log.i(logTag, "startCapture 前静默恢复 projection 成功，直接续采")
+                return startCapture()
+            }
             Log.w(logTag, "startCapture fail,mediaProjection is null")
             // 主控连接进来但录屏会话不存在（锁屏后进程被看门狗重建、token 不可缓存机型）：
             // 触发恢复引导——前台则弹一次确认框，锁屏/后台则刷新恢复通知等用户点。
@@ -1945,6 +2088,8 @@ class MainService : Service() {
         projectionCallback?.let { cb -> runCatching { mediaProjection?.unregisterCallback(cb) } }
         projectionCallback = null
         mediaProjection = null
+        // 主动停服：内存授权同步作废，避免下次启动绕过完整授权流程
+        inMemoryProjectionIntent = null
         checkMediaPermission()
         releaseKeepAlive()
         stopForeground(true)
