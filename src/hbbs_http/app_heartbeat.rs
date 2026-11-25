@@ -65,6 +65,12 @@ async fn heartbeat_loop() {
         HEARTBEAT_INTERVAL.as_secs()
     );
     let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+    // 休眠/进程被冻结唤醒后不得补拍：tokio 默认 Burst 会把停滞期间错过的
+    // 节拍在唤醒后连续立即触发，若此时网络尚未恢复、请求秒败，会瞬间补发
+    // 大量心跳（停滞越久突发越大）。Delay 让唤醒后只立即打一拍重新注册
+    // 在线态，之后按正常 3s 节奏走，与 Dart 侧 Timer.periodic（错过即丢弃）
+    // 的行为对齐。
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut tick: u64 = 0;
     let mut ok_count: u64 = 0;
     let mut skip_count: u64 = 0;
