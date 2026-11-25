@@ -73,6 +73,16 @@ const val PROJECTION_STABLE_LIFETIME_MS = 20_000L
 const val PROJECTION_FUSE_WINDOW_MS = 60_000L
 const val PROJECTION_FUSE_MAX_FAILURES = 2
 
+/**
+ * 零帧升级重授权的会话级熔断：startCapture 即武装等帧后，僵尸 projection
+ * 经软重建耗尽 → 作废 token 重授权，整条链在本服务生命周期内最多自动跑
+ * [ZERO_FRAME_REAUTH_MAX] 次；超过后只保留通知引导并节流上报，避免
+ * "僵尸 token→静默恢复→再僵尸"无限空转（首批帧恢复后计数清零）。
+ */
+const val ZERO_FRAME_REAUTH_MAX = 2
+/** 熔断后零帧现场的上报节流，避免看门狗每 tick 刷一条 */
+const val ZERO_FRAME_FUSED_REPORT_INTERVAL_MS = 60_000L
+
 // 开机全自动恢复录屏（实验，仅无安全锁屏设备）：BOOT_COMPLETED 后的武装窗口，
 // 以及两次补弹延时（与透明页 30s 自毁、授权闸门 45s 兜底超时对齐）
 const val BOOT_AUTO_PROMPT_WINDOW_MS = 150_000L
@@ -369,6 +379,18 @@ class MainService : Service() {
          * 的被控采集（重弹会新建会话并把 App 带到前台）。
          */
         fun hasActiveProjection(): Boolean = aliveInstance?.mediaProjection != null
+
+        /**
+         * 透明授权页 [android.app.KeyguardManager.requestDismissKeyguard] 被 ROM
+         * 拒绝（vivo Android16 实测 onDismissError 27ms 即回）时的转发入口：
+         * 由存活的 Service 实例走已配对无线 ADB，用 shell 的 wm dismiss-keyguard
+         * （WMS 系统级能力，无密码锁屏不受 App API 限制）完成解散。
+         * 无服务实例/未配对/有安全锁屏时内部自行短路，无副作用。
+         */
+        @JvmStatic
+        fun requestAdbDismissKeyguardExternal() {
+            aliveInstance?.requestAdbDismissKeyguard()
+        }
 
         /** MainService 进程内存活事实：进程外看门狗（Job/无障碍）据此判断是否需要拉起 */
         @JvmStatic
@@ -884,6 +906,16 @@ class MainService : Service() {
     private var frameBaselineAtStart = 0L
     @Volatile
     private var noFrameEverFired = false
+    /**
+     * 本服务生命周期内"零帧 → 软重建耗尽 → 作废 token 重授权"的升级次数。
+     * 首批帧到达证明采集链恢复后清零；达到 [ZERO_FRAME_REAUTH_MAX] 后熔断，
+     * 不再自动作废重授权（无线调试关闭/无人点通知时空转没有意义），只保留通知。
+     */
+    @Volatile
+    private var zeroFrameReauthCount = 0
+    /** 熔断后零帧现场上次上报时刻（节流，防看门狗每 tick 刷上报） */
+    @Volatile
+    private var lastZeroFrameFusedReportMs = 0L
 
     private val frameStallCheckOnce = Runnable { runCatching { checkFrameStall() } }
 
@@ -1011,6 +1043,13 @@ class MainService : Service() {
                 "（locked=${keyguardManager?.isKeyguardLocked} screenOffSeen=$screenOffSeenDuringCapture）"
         )
         reportCaptureStall("no_frame_ever")
+        // 兜底：正常情况下 startCapture 成功即已 beginAwaitingFrames，stall 链
+        // 必然武装；若极端时序下 awaiting 被清零（stop/start 竞速、回调漏注册），
+        // 这里补一次武装，让既有"软重建→重授权"两级处置链接管，而不是只上报等死。
+        if (awaitingFramesSinceMs == 0L) {
+            captureDiag("no_frame_ever: stall 链未武装，补位 beginAwaitingFrames 交由两级处置接管")
+            beginAwaitingFrames("no_frame_ever_arm")
+        }
     }
 
     /**
@@ -1491,16 +1530,40 @@ class MainService : Service() {
         }
         val frameAgeMs = now - lastFrameElapsedMs
         if (stallRebuildCount >= STALL_REBUILD_MAX) {
+            // 会话级熔断：重授权后新会话仍零帧、再次走到升级，说明现场无人可完成
+            // 授权（无线调试关闭/没人点通知），继续作废重授权只会空转。撤等帧态
+            // 静默等待，保留恢复通知；屏幕翻转/重连会重新武装，首帧到达后计数清零。
+            if (zeroFrameReauthCount >= ZERO_FRAME_REAUTH_MAX) {
+                awaitingFramesSinceMs = 0L
+                if (now - lastZeroFrameFusedReportMs > ZERO_FRAME_FUSED_REPORT_INTERVAL_MS) {
+                    lastZeroFrameFusedReportMs = now
+                    captureDiag(
+                        "frame stall: 零帧重授权已熔断（$zeroFrameReauthCount 次），" +
+                            "保留通知等待人工/新会话 totalFrames=$frameTotalCounter"
+                    )
+                    reportCaptureStall("no_frame_reauth_fused")
+                }
+                return
+            }
+            zeroFrameReauthCount += 1
             Log.w(
                 logTag,
                 "屏幕恢复后 ${now - awaitingSince}ms 无帧，已软重建 $stallRebuildCount 次仍无帧，" +
-                    "判定 MediaProjection 僵尸（onStop 丢失），转重新授权流程"
+                    "判定 MediaProjection 僵尸（onStop 丢失），作废缓存 token 转重新授权（第 $zeroFrameReauthCount/$ZERO_FRAME_REAUTH_MAX 次）"
             )
             captureDiag(
                 "frame stall: 重建耗尽，invalidate projection（无帧 ${now - awaitingSince}ms，" +
-                    "lastFrameAge=${frameAgeMs}ms totalFrames=$frameTotalCounter）"
+                    "lastFrameAge=${frameAgeMs}ms totalFrames=$frameTotalCounter，" +
+                    "reauth #$zeroFrameReauthCount）"
             )
             awaitingFramesSinceMs = 0L
+            // 僵尸实锤：内存/落盘 token 复用出来的会话不供帧，必须作废，
+            // 否则 onProjectionInvalid 后 startCapture 又会静默恢复到同一个僵尸
+            // projection，形成"恢复→零帧→重建"死循环。onStop 正常收回路径
+            // （fromStall=false）不作废，保留静默恢复能力。
+            inMemoryProjectionIntent = null
+            runCatching { MediaProjectionTokenStore.clear(this) }
+                .onFailure { Log.w(logTag, "作废落盘 projection token 失败", it) }
             // onProjectionInvalid(fromStall=true) 内部会 trace 引导方式并立即上传
             // onProjectionInvalid 会 stopCapture、置 resumeWanted，授权恢复后自动续采集
             onProjectionInvalid(fromStall = true)
@@ -1812,6 +1875,62 @@ class MainService : Service() {
         }
     }
 
+    /**
+     * 仅用 shell 解散无密码锁屏（不拉起授权页）：供透明授权页 requestDismissKeyguard
+     * 被 ROM 拒绝（vivo 实测 onDismissError）时回退。与 [tryAdbShellAutoRecovery]
+     * 的区别：本方法不检查授权在途闸门（透明页本身就持有闸门），也不再 am start
+     * ——页面已在前台，shell 解散成功后其窗口焦点回调会自然续上系统确认框。
+     * 复用同一节流字段与失败熔断，adbd 不可达时与完整恢复链一致地进入探活节奏。
+     */
+    fun requestAdbDismissKeyguard() {
+        if (serviceDestroyed) return
+        // 安全锁屏 shell 同样越不过凭据边界，不做无意义尝试
+        if (isDeviceSecureLocked()) return
+        if (!com.starcaretech.a.adb.AdbAuthManager.isPaired(this)) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastAdbRecoverMs < ADB_RECOVER_THROTTLE_MS) return
+        if (adbRecoverFailures >= ADB_RECOVER_MAX_FAILURES &&
+            now - lastAdbRecoverMs < ADB_RECOVER_PROBE_MS
+        ) {
+            Log.i(logTag, "ADB shell 解散锁屏：熔断探活窗口内，跳过")
+            return
+        }
+        lastAdbRecoverMs = now
+        adbRecoverExecutor.execute {
+            val script = buildString {
+                appendLine("input keyevent KEYCODE_WAKEUP 2>/dev/null")
+                appendLine("sleep 1")
+                // WMS 系统级解散：App API requestDismissKeyguard 被 ROM 拒绝时，
+                // shell(uid 2000) 的 wm 命令仍可解散无密码锁屏
+                appendLine("wm dismiss-keyguard 2>/dev/null")
+                appendLine("size=\$(wm size 2>/dev/null | grep -oE '[0-9]+x[0-9]+' | tail -1)")
+                appendLine("w=\${size%x*}; h=\${size#*x}")
+                appendLine("if [ -n \"\$w\" ] && [ -n \"\$h\" ]; then input swipe \$((w/2)) \$((h*4/5)) \$((w/2)) \$((h/5)) 300 2>/dev/null; fi")
+            }
+            try {
+                val result = com.starcaretech.a.adb.AdbAuthManager
+                    .executeShellScript(applicationContext, script)
+                if (result.connected) {
+                    adbRecoverFailures = 0
+                    Log.i(logTag, "ADB shell 解散锁屏脚本已执行：${result.output.take(200)}")
+                    com.starcaretech.a.adb.AdbAuthManager.trace(
+                        applicationContext,
+                        "adb shell 解散锁屏：已执行 output=${result.output.take(200)}"
+                    )
+                } else {
+                    adbRecoverFailures += 1
+                    com.starcaretech.a.adb.AdbAuthManager.trace(
+                        applicationContext,
+                        "adb shell 解散锁屏：adbd 不可达 #$adbRecoverFailures"
+                    )
+                }
+            } catch (e: Exception) {
+                adbRecoverFailures += 1
+                Log.w(logTag, "ADB shell 解散锁屏异常（第 $adbRecoverFailures 次）", e)
+            }
+        }
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         updateScreenInfo(newConfig.orientation)
@@ -1885,6 +2004,12 @@ class MainService : Service() {
                                     stallRebuildCount = 0
                                     stallWindowStartMs = 0L
                                     silentProbeFired = false
+                                    // 新会话已证实能供帧：零帧重授权熔断一并解除，
+                                    // 后续再次僵死时允许完整两级处置重新跑一轮
+                                    if (zeroFrameReauthCount != 0) {
+                                        captureDiag("frames recovered：零帧重授权计数清零（原值 $zeroFrameReauthCount）")
+                                        zeroFrameReauthCount = 0
+                                    }
                                     captureDiag(
                                         "frames recovered：等待 ${waitedMs}ms 后首批帧到达，" +
                                             "totalFrames=$frameTotalCounter"
@@ -2014,6 +2139,13 @@ class MainService : Service() {
             "watchdog armed sdk=${Build.VERSION.SDK_INT} reuseVD=$reuseVirtualDisplay " +
                 "tick=${FRAME_WATCHDOG_INTERVAL_MS}ms stall=${FRAME_STALL_THRESHOLD_MS}ms"
         )
+        // 关键：启动即进入等帧态，不再依赖锁屏/亮屏翻转事件。
+        // 旧逻辑下若解锁翻转发生在 isStart=false 的竞速窗口，pollScreenStateFlip
+        // 会把 prev 状态无条件刷新，startCapture 后再也看不到 locked→unlocked 沿，
+        // awaiting 恒为 0，checkFrameStall 整条软重建/重授权链永不触发
+        // （vivo Android16 实测僵尸 projection 只上报 no_frame_ever 不自救的根因）。
+        // 正常供帧时首批帧 1~2s 内到达并自动清零，静态桌面零误判。
+        beginAwaitingFrames("start_capture")
         return true
     }
 

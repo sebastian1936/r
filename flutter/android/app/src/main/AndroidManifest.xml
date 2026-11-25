@@ -96,10 +96,17 @@
              避免 FSI 展开时 MainActivity 被同 task 连带拉起抢焦点，导致本页
              2 秒内被 keyguard/任务清理连带销毁（实测 8 次空转的根因之一）。
              若真机发现空 affinity 使 FSI 退化为普通通知，改用唯一命名
-             affinity（如 com.starcaretech.a.projection）后重测。 -->
+             affinity（如 com.starcaretech.a.projection）后重测。
+             exported=true：无人值守 ADB shell 链用 `am start`（uid 2000）拉起本页，
+             Android 16 上 shell 启动非导出组件同样被 SecurityException 拒绝（实测）。
+             安全边界：本页不声明 intent-filter（仅显式 Intent 可达、launcher 不可见），
+             且只发起系统 MediaProjection 确认框——最终"立即开始"仍需用户或本应用
+             无障碍服务确认，任何第三方拉起都无法静默获得录屏权；能配对无线 ADB 的
+             调用方本身已具备 shell 级截屏能力，导出不扩大实际攻击面。 -->
         <activity
             android:name=".PermissionRequestTransparentActivity"
             android:excludeFromRecents="true"
+            android:exported="true"
             android:launchMode="singleTask"
             android:taskAffinity=""
             android:theme="@style/Transparent" />

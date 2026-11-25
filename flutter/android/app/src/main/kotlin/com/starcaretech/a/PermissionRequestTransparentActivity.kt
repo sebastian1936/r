@@ -90,6 +90,15 @@ class PermissionRequestTransparentActivity: Activity() {
             finish()
             return
         }
+        // 导出组件（供 ADB shell am start 无人值守拉起）后的来源审计：
+        // referrer 为 null 是 shell/通知/内部启动的常态，仅留痕不拦截——
+        // 本页不直接授予任何权限，最终系统确认框仍需人工/无障碍点击。
+        runCatching {
+            com.starcaretech.a.adb.AdbAuthManager.trace(
+                applicationContext,
+                "录屏透明页：onCreate referrer=${referrer?.toString() ?: "null"}"
+            )
+        }
         // 兜底防御：服务已持有有效录屏会话时（残留全屏通知误触、国产 ROM
         // 对全屏 Intent 的重复展开、多触发源重复 startActivity），绝不重弹
         // 系统确认框——重弹会新建 MediaProjection 顶掉正在进行的被控采集，
@@ -165,6 +174,8 @@ class PermissionRequestTransparentActivity: Activity() {
                             com.starcaretech.a.adb.AdbAuthManager.trace(
                                 applicationContext, "解散被取消，回退锁屏之上直弹")
                             Log.i(logTag, "解散锁屏被取消，回退锁屏之上直弹")
+                            // ROM 取消 App API 解散时，已配对 ADB 可改走 shell wm 兜底
+                            MainService.requestAdbDismissKeyguardExternal()
                             scheduleCaptureAfterFocus()
                         }
 
@@ -172,6 +183,12 @@ class PermissionRequestTransparentActivity: Activity() {
                             com.starcaretech.a.adb.AdbAuthManager.trace(
                                 applicationContext, "解散出错，回退锁屏之上直弹")
                             Log.w(logTag, "解散锁屏出错，回退锁屏之上直弹")
+                            // vivo Android16 实测：requestDismissKeyguard 27ms 即
+                            // onDismissError，且本页在锁屏上拿不到窗口焦点，纯焦点
+                            // 兜底必然空转。已配对无线 ADB 时转 shell(uid 2000)
+                            // wm dismiss-keyguard（WMS 级，无密码锁屏不受 App API 限制），
+                            // 解散成功后本页焦点回调自然续上系统确认框；未配对则原样兜底。
+                            MainService.requestAdbDismissKeyguardExternal()
                             scheduleCaptureAfterFocus()
                         }
                     }
